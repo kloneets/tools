@@ -8,7 +8,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	"github.com/koko-tools/src/pages"
+	"github.com/kloneets/tools/src/pages"
 )
 
 type kokoTools struct {
@@ -21,7 +21,7 @@ func InitApp() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	app := gtk.NewApplication("com.github.kloneets.koko-tools", gio.ApplicationFlagsNone)
+	app := gtk.NewApplication("com.github.kloneets.tools", gio.ApplicationFlagsNone)
 	app.ConnectActivate(func() {
 		t := activate(ctx, app)
 		t.window.Show()

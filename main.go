@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/koko-tools/src/app"
+	"github.com/kloneets/tools/src/app"
 )
 
 func main() {

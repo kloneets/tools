@@ -1,4 +1,4 @@
-module github.com/koko-tools
+module github.com/kloneets/tools
 
 go 1.20
 
