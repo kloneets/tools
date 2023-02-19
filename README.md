@@ -2,7 +2,7 @@
 
 This repository is for experiments on GO with GTK4.
 
-There will some basic tools for everyday use.
+There will be some basic tools for everyday use.
 
 ## Books
 
