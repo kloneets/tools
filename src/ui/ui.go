@@ -17,10 +17,25 @@ func Frame(title string) *gtk.Frame {
 }
 
 func FieldWrapper(element gtk.Widgetter, padding int) *gtk.Box {
-	box := gtk.NewBox(gtk.OrientationHorizontal, padding)
+	return Wrapper(element, gtk.OrientationHorizontal, padding)
+}
+
+func ToolsWrapper(element gtk.Widgetter, padding int) *gtk.Box {
+	return Wrapper(element, gtk.OrientationVertical, padding)
+}
+
+func Wrapper(element gtk.Widgetter, orientation gtk.Orientation, padding int) *gtk.Box {
+	box := gtk.NewBox(orientation, padding)
 	box.SetMarginStart(padding)
 	box.SetMarginEnd(padding)
 	box.Append(element)
+
+	return box
+}
+
+func MainArea() *gtk.Box {
+	box := gtk.NewBox(gtk.OrientationVertical, DefaultMasterPadding)
+	box.SetMarginBottom(DefaultMasterPadding)
 
 	return box
 }

@@ -45,8 +45,7 @@ func PageUi() *KokoPages {
 	hBox3.Append(gtk.NewLabel("Result: "))
 	hBox3.Append(p.resLabel)
 
-	p.Box = gtk.NewBox(gtk.OrientationVertical, ui.DefaultMasterPadding)
-	p.Box.SetMarginBottom(ui.DefaultMasterPadding)
+	p.Box = ui.MainArea()
 	p.Box.Append(hBox)
 	p.Box.Append(hBox2)
 	p.Box.Append(hBox3)

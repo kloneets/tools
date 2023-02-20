@@ -31,6 +31,8 @@ func GenerateUI() *PasswordGenerator {
 	p.generate = gtk.NewButton()
 	p.generate.SetLabel("Generate")
 	p.generate.ConnectClicked(p.genPassword)
+	p.generate.SetMarginStart(ui.DefaultBoxPadding)
+	p.generate.SetMarginEnd(ui.DefaultBoxPadding)
 	p.letters = gtk.NewCheckButtonWithLabel("letters")
 	p.letters.SetActive(true)
 	p.numbers = gtk.NewCheckButtonWithLabel("numbers")
@@ -38,23 +40,24 @@ func GenerateUI() *PasswordGenerator {
 	p.specialSymbols = gtk.NewCheckButtonWithLabel("special symbols")
 	p.specialSymbols.SetActive(true)
 	p.password = gtk.NewEntry()
+	p.password.SetMarginStart(ui.DefaultBoxPadding)
+	p.password.SetMarginEnd(ui.DefaultBoxPadding)
 	p.symbolCount = gtk.NewEntry()
 	p.symbolCount.SetText(fmt.Sprint(defaultPasswordLength))
 
 	countContainer := ui.FieldWrapper(gtk.NewLabel("Symbol count:"), ui.DefaultBoxPadding)
 	countContainer.Append(p.symbolCount)
 
-	mainField := gtk.NewBox(gtk.OrientationVertical, ui.DefaultMasterPadding)
-	mainField.SetMarginBottom(ui.DefaultMasterPadding)
-	mainField.Append(countContainer)
-	mainField.Append(p.letters)
-	mainField.Append(p.numbers)
-	mainField.Append(p.specialSymbols)
-	mainField.Append(ui.FieldWrapper(p.generate, ui.DefaultBoxPadding))
-	mainField.Append(ui.FieldWrapper(p.password, ui.DefaultBoxPadding))
+	mainArea := ui.MainArea()
+	mainArea.Append(countContainer)
+	mainArea.Append(p.letters)
+	mainArea.Append(p.numbers)
+	mainArea.Append(p.specialSymbols)
+	mainArea.Append(p.generate)
+	mainArea.Append(p.password)
 
 	p.F = ui.Frame("Generate password:")
-	p.F.SetChild(mainField)
+	p.F.SetChild(mainArea)
 
 	return &p
 }
