@@ -5,9 +5,9 @@ This repository is for experiments on GO with GTK4.
 There will be some basic tools for everyday use.
 
 ## Books
-
 This tool just calculate how many pages would be read in another edition of the book.
-
+## Password generator
+Generate random passwords
 
 ## Building and running
 ### Build
