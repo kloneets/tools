@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/kloneets/tools/src/ui"
 )
 
 type KokoPages struct {
@@ -44,19 +45,17 @@ func PageUi() *KokoPages {
 	hBox3.Append(gtk.NewLabel("Result: "))
 	hBox3.Append(p.resLabel)
 
-	p.Box = gtk.NewBox(gtk.OrientationVertical, 3)
+	p.Box = gtk.NewBox(gtk.OrientationVertical, ui.DefaultMasterPadding)
+	p.Box.SetMarginBottom(ui.DefaultMasterPadding)
 	p.Box.Append(hBox)
 	p.Box.Append(hBox2)
 	p.Box.Append(hBox3)
-	p.Box.SetMarginStart(2)
-	p.Box.SetMarginEnd(2)
+	p.Box.SetMarginStart(ui.DefaultBoxPadding)
+	p.Box.SetMarginEnd(ui.DefaultBoxPadding)
 
-	p.F = gtk.NewFrame("Pages:")
-	p.F.SetMarginTop(2)
-	p.F.SetMarginStart(2)
-	p.F.SetMarginEnd(2)
-
+	p.F = ui.Frame("Pages: ")
 	p.F.SetChild(p.Box)
+
 	return &p
 }
 

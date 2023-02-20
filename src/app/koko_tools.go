@@ -9,6 +9,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/pages"
+	"github.com/kloneets/tools/src/password"
 )
 
 type kokoTools struct {
@@ -42,11 +43,17 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	tools := kokoTools{Application: app}
 
 	tools.window = gtk.NewApplicationWindow(app)
-	tools.window.SetDefaultSize(300, 200)
+	tools.window.SetDefaultSize(600, 300)
 	tools.window.SetTitle("Koko tools")
 
-	p := pages.PageUi()
-	tools.window.SetChild(p.F)
+	page := pages.PageUi()
+	passw := password.GenerateUI()
+
+	upper := gtk.NewBox(gtk.OrientationHorizontal, 2)
+	upper.Append(page.F)
+	upper.Append(passw.F)
+
+	tools.window.SetChild(upper)
 
 	return &tools
 }
