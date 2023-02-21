@@ -15,6 +15,7 @@ import (
 	"github.com/kloneets/tools/src/notes"
 	"github.com/kloneets/tools/src/pages"
 	"github.com/kloneets/tools/src/password"
+	"github.com/kloneets/tools/src/settings"
 	"github.com/kloneets/tools/src/ui"
 )
 
@@ -26,6 +27,7 @@ type kokoTools struct {
 
 func InitApp() {
 	makeConfigDirIfNotExists()
+	settings.Init()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -54,11 +56,11 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	tools.window.SetDefaultSize(600, 300)
 	tools.window.SetTitle("Koko tools")
 
+	helpers.InitStatusBar()
+
 	page := pages.PageUi()
 	passw := password.GenerateUI()
 	note := notes.GenerateUI()
-
-	helpers.InitStatusBar()
 
 	upperLeftWrapper := ui.ToolsWrapper(page.F, ui.DefaultBoxPadding)
 	upperLeftWrapper.Append(note.F)

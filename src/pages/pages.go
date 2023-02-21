@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/kloneets/tools/src/settings"
 	"github.com/kloneets/tools/src/ui"
 )
 
@@ -21,9 +22,14 @@ type KokoPages struct {
 func PageUi() *KokoPages {
 	p := KokoPages{}
 
+	appSettings := settings.Inst().PagesApp
+
 	p.fbEntry = gtk.NewEntry()
+	p.fbEntry.SetText(fmt.Sprint(appSettings.FirstBookPages))
 	p.fbReadEntry = gtk.NewEntry()
+	p.fbReadEntry.SetText(fmt.Sprint(appSettings.ReadPages))
 	p.sbEntry = gtk.NewEntry()
+	p.sbEntry.SetText(fmt.Sprint(appSettings.SecondBookPages))
 	p.resLabel = gtk.NewLabel("")
 	p.calcButton = gtk.NewButtonFromIconName("input-dialpad")
 	p.calcButton.SetTooltipText("Calculate")
@@ -76,4 +82,11 @@ func (p *KokoPages) Calculate() {
 
 	res := readPages * maxSecondPages / maxFirstPages
 	p.resLabel.SetText(fmt.Sprint(res))
+
+	s := settings.Inst()
+	s.PagesApp.FirstBookPages = maxFirstPages
+	s.PagesApp.SecondBookPages = maxSecondPages
+	s.PagesApp.ReadPages = readPages
+
+	settings.SaveSettings()
 }
