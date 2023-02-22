@@ -42,7 +42,7 @@ func GenerateUI() *Note {
 func getNoteText() string {
 	c, err := os.ReadFile(fileName())
 	if err != nil {
-		log.Fatal(err)
+		log.Println("Didn't find notes file:", err)
 		return ""
 	}
 
@@ -68,7 +68,7 @@ func (n *Note) save() {
 
 	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Println(err)
+		log.Println("Notes read file error: ", err)
 		return
 	}
 	defer f.Close()

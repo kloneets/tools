@@ -13,6 +13,15 @@ You can now save notes
 
 ## Building and running
 ### Build
+
+*Requirements*
+* golang 1.20+
+* gtk4
+* glib2
+* gobject-introspection-1.0
+
+_First build will take more time than others_
+
 ```sh
 go build -o koko-tools
 ```
