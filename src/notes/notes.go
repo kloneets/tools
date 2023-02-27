@@ -1,9 +1,11 @@
 package notes
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/helpers"
@@ -11,32 +13,46 @@ import (
 )
 
 type Note struct {
-	F          *gtk.Frame
-	note       *gtk.TextView
-	saveButton *gtk.Button
+	F             *gtk.Frame
+	note          *gtk.TextView
+	WaitingToSave bool
 }
 
+var saveCounter int
+
 func GenerateUI() *Note {
-	n := Note{}
+	saveCounter = 0
+	n := Note{
+		WaitingToSave: false,
+	}
 
 	n.note = gtk.NewTextView()
 	n.note.SetWrapMode(gtk.WrapWord)
 	n.note.SetSizeRequest(300, 200)
 	n.note.Buffer().SetText(getNoteText())
-	n.saveButton = gtk.NewButtonFromIconName("document-save")
-	n.saveButton.SetTooltipText("Save")
-	n.saveButton.ConnectClicked(n.save)
-	n.saveButton.SetMarginStart(ui.DefaultBoxPadding)
-	n.saveButton.SetMarginEnd(ui.DefaultBoxPadding)
-
+	n.note.Buffer().ConnectChanged(n.autoSave)
+	n.note.SetMarginStart(ui.DefaultBoxPadding)
+	n.note.SetMarginEnd(ui.DefaultBoxPadding)
+	n.note.SetMarginTop(ui.DefaultBoxPadding)
+	n.note.SetMarginBottom(ui.DefaultBoxPadding)
+	scrollW := gtk.NewScrolledWindow()
+	scrollW.SetMaxContentHeight(400)
+	scrollW.SetMinContentHeight(300)
+	scrollW.SetChild(n.note)
 	mainArea := ui.MainArea()
-	mainArea.Append(n.note)
-	mainArea.Append(n.saveButton)
+	mainArea.Append(scrollW)
 
 	n.F = ui.Frame("Notes:")
 	n.F.SetChild(mainArea)
 
 	return &n
+}
+
+func (n *Note) autoSave() {
+	if !n.WaitingToSave {
+		n.WaitingToSave = true
+		time.AfterFunc(3*time.Second, n.save)
+	}
 }
 
 func getNoteText() string {
@@ -82,6 +98,7 @@ func (n *Note) save() {
 		log.Println(err)
 		return
 	}
-
-	helpers.StatusBarInst().UpdateStatusBar("Notes saved to: " + file)
+	saveCounter++
+	helpers.StatusBarInst().UpdateStatusBar("Notes saved to: " + file + ", " + fmt.Sprint(saveCounter))
+	n.WaitingToSave = false
 }

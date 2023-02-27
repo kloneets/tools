@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+    <object class="GtkHeaderBar" id="header-bar">
+        <property name="decoration-layout">icon:close</property>
+        <child type="end">
+            <object class="GtkMenuButton" id="gears">
+                <property name="direction">none</property>
+            </object>
+        </child>
+    </object>
+</interface>

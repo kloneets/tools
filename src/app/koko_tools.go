@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"path/filepath"
 
+	_ "embed"
+
 	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -24,6 +26,9 @@ type kokoTools struct {
 	window *gtk.ApplicationWindow
 	// pages  *pages.KokoPages
 }
+
+//go:embed menu.ui
+var menuXML string
 
 func InitApp() {
 	makeConfigDirIfNotExists()
@@ -70,6 +75,12 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	upper.Append(passw.F)
 
 	mainWrap := gtk.NewBox(gtk.OrientationVertical, 0)
+
+	menuBuilder := gtk.NewBuilderFromString(menuXML, len(menuXML))
+	log.Println(menuBuilder)
+	menu := menuBuilder.GetObject("header-bar").Cast().(*gtk.HeaderBar)
+
+	mainWrap.Append(menu)
 	mainWrap.Append(upper)
 	mainWrap.Append(helpers.StatusBarInst().B)
 

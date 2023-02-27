@@ -71,7 +71,7 @@ func (p *KokoPages) Calculate() {
 	}
 
 	maxFirstPages, err := strconv.Atoi(p.fbEntry.Text())
-	if err != nil {
+	if err != nil || maxFirstPages == 0 {
 		maxFirstPages = 1
 	}
 
