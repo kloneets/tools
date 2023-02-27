@@ -58,6 +58,8 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	tools := kokoTools{Application: app}
 
 	tools.window = gtk.NewApplicationWindow(app)
+	tools.window.SetDecorated(false)
+	tools.window.SetIconName("media-tape")
 	tools.window.SetDefaultSize(600, 300)
 	tools.window.SetTitle("Koko tools")
 
@@ -77,7 +79,6 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	mainWrap := gtk.NewBox(gtk.OrientationVertical, 0)
 
 	menuBuilder := gtk.NewBuilderFromString(menuXML, len(menuXML))
-	log.Println(menuBuilder)
 	menu := menuBuilder.GetObject("header-bar").Cast().(*gtk.HeaderBar)
 
 	mainWrap.Append(menu)
