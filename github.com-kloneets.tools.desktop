@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Koko Tools
+Icon=media-tape
+Comment=Koko tools for better life
+Exec="/location/of/koko-tools"
+Version=1.0
+Type=Application
+Categories=Office;Utilities;
+Terminal=false
+StartupNotify=true
