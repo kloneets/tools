@@ -41,9 +41,9 @@ func PageUi() *KokoPages {
 	hBox2 := gtk.NewBox(gtk.OrientationHorizontal, 1)
 	hBox2.Append(p.fbEntry)
 	hBox2.Append(gtk.NewLabel(":"))
-	hBox2.Append(p.sbEntry)
-	hBox2.Append(gtk.NewLabel(":"))
 	hBox2.Append(p.fbReadEntry)
+	hBox2.Append(gtk.NewLabel(":"))
+	hBox2.Append(p.sbEntry)
 	hBox2.Append(gtk.NewLabel(" "))
 	hBox2.Append(p.calcButton)
 
@@ -60,6 +60,8 @@ func PageUi() *KokoPages {
 
 	p.F = ui.Frame("Pages: ")
 	p.F.SetChild(p.Box)
+
+	p.Calculate()
 
 	return &p
 }
@@ -81,7 +83,9 @@ func (p *KokoPages) Calculate() {
 	}
 
 	res := readPages * maxSecondPages / maxFirstPages
-	p.resLabel.SetText(fmt.Sprint(res))
+	resPercents := (readPages * 100) / maxFirstPages
+	resText := fmt.Sprint(res) + " pages, " + fmt.Sprint(resPercents) + "%"
+	p.resLabel.SetText(resText)
 
 	s := settings.Inst()
 	s.PagesApp.FirstBookPages = maxFirstPages
