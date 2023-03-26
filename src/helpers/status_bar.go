@@ -5,7 +5,6 @@ import (
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
-
 type StatusBar struct {
 	B *gtk.Statusbar
 }

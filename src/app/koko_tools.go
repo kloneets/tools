@@ -60,6 +60,9 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	menuBuilder := gtk.NewBuilderFromString(menuXML, len(menuXML))
 	menu := menuBuilder.GetObject("header-bar").Cast().(*gtk.HeaderBar)
 
+	gb := menuBuilder.GetObject("gears").Cast().(*gtk.MenuButton)
+	gb.SetPopover(ui.Popover().Popover)
+
 	tools.window = gtk.NewApplicationWindow(app)
 	tools.window.SetTitlebar(menu)
 	tools.window.SetIconName("media-tape")
