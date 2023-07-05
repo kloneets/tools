@@ -23,7 +23,7 @@ import (
 
 type kokoTools struct {
 	*gtk.Application
-	window *gtk.ApplicationWindow
+	appWindow *gtk.ApplicationWindow
 	// pages  *pages.KokoPages
 }
 
@@ -40,7 +40,7 @@ func InitApp() {
 	app := gtk.NewApplication("com.github.kloneets.tools", gio.ApplicationFlagsNone)
 	app.ConnectActivate(func() {
 		t := activate(ctx, app)
-		t.window.Show()
+		t.appWindow.Show()
 	})
 
 	go func() {
@@ -63,11 +63,11 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	gb := menuBuilder.GetObject("gears").Cast().(*gtk.MenuButton)
 	gb.SetPopover(ui.Popover().Popover)
 
-	tools.window = gtk.NewApplicationWindow(app)
-	tools.window.SetTitlebar(menu)
-	tools.window.SetIconName("media-tape")
-	tools.window.SetDefaultSize(600, 300)
-	tools.window.SetTitle("Koko tools")
+	tools.appWindow = gtk.NewApplicationWindow(app)
+	tools.appWindow.SetTitlebar(menu)
+	tools.appWindow.SetIconName("media-tape")
+	tools.appWindow.SetDefaultSize(600, 300)
+	tools.appWindow.SetTitle("Koko tools")
 
 	helpers.InitStatusBar()
 
@@ -86,7 +86,7 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	mainWrap.Append(upper)
 	mainWrap.Append(helpers.StatusBarInst().B)
 
-	tools.window.SetChild(mainWrap)
+	tools.appWindow.SetChild(mainWrap)
 
 	return &tools
 }
