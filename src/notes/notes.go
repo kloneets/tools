@@ -82,6 +82,10 @@ func (n *Note) save() {
 
 	file := fileName()
 
+	if err := os.Truncate(file, 0); err != nil {
+		log.Println("Notes read file error: ", err)
+	}
+
 	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Println("Notes read file error: ", err)
@@ -91,14 +95,14 @@ func (n *Note) save() {
 
 	buffer := n.note.Buffer()
 
-	if _, err := f.WriteString(
-		buffer.Text(buffer.StartIter(),
-			buffer.EndIter(),
-			true)); err != nil {
+	t := buffer.Text(buffer.StartIter(), buffer.EndIter(), true)
+	log.Println(t)
+	if _, err := f.WriteString(t); err != nil {
 		log.Println(err)
 		return
 	}
 	saveCounter++
 	helpers.StatusBarInst().UpdateStatusBar("Notes saved to: " + file + ", " + fmt.Sprint(saveCounter))
 	n.WaitingToSave = false
+	f.Close()
 }
