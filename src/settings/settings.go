@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/kloneets/tools/src/helpers"
 )
@@ -48,7 +49,17 @@ func Init() {
 
 	marshalError := json.Unmarshal(c, &settingsInstance)
 	if marshalError != nil {
-		log.Fatal(marshalError)
+		log.Println("Settings unmarshal error: ", marshalError)
+		ct := time.Now()
+		backupFileName := getFileName(ct.Format("2006-01-02_15.04.0000") + "settings.json")
+		err = os.Rename(fn, backupFileName)
+		if err != nil {
+			log.Println("Cannot back up settings: ", err)
+		} else {
+			msg := "Old settings backed up to: "+ backupFileName
+			// helpers.StatusBarInst().UpdateStatusBar(msg)
+			log.Println(msg)
+		}
 		settingsInstance = defaultSettings()
 	}
 }
@@ -69,17 +80,21 @@ func defaultSettings() *UserSettings {
 	}
 }
 
-func fileName() string {
+func getFileName(n string) string {
 	dirname, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	return filepath.Join(
+			return filepath.Join(
 		dirname,
 		helpers.AppConfigMainDir,
 		helpers.AppConfigAppDir,
-		"settings.json")
+		n)
+}
+
+func fileName() string {
+	return getFileName("settings.json")
 }
 
 func SaveSettings() {
