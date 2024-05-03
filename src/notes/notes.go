@@ -96,7 +96,9 @@ func (n *Note) save() {
 	buffer := n.note.Buffer()
 
 	t := buffer.Text(buffer.StartIter(), buffer.EndIter(), true)
-	log.Println(t)
+	if helpers.Globals().Debug {
+		log.Println(t)
+	}
 	if _, err := f.WriteString(t); err != nil {
 		log.Println(err)
 		return

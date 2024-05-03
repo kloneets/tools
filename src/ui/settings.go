@@ -1,6 +1,10 @@
 package ui
 
-import "github.com/diamondburned/gotk4/pkg/gtk/v4"
+import (
+	"log"
+
+	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+)
 
 type Settings struct {
 	SettingsButton *gtk.Button
@@ -21,13 +25,23 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 	dialog.SetTitle("Settings")
 	// Add widgets to the dialog to create the settings UI
 
-	settingsFrame := Frame("Settings")
-	dialog.SetChild(settingsFrame)
+	settingsFrame := MainArea()
+
+	cancelButton := gtk.NewButton()
+	cancelButton.SetLabel("Cancel")
+	cancelButton.ConnectClicked(func() {
+		dialog.Destroy()
+	})
 
 	dialog.AddButton("Save", int(gtk.ResponseOK))
 	dialog.AddButton("Cancel", int(gtk.ResponseCancel))
 
+	s.GDriveSettings(settingsFrame)
+	settingsFrame.Append(cancelButton)
+	dialog.SetChild(settingsFrame)
+
 	dialog.Connect("response", func(dialog *gtk.Dialog, responseId gtk.ResponseType) {
+		log.Println("Response:", responseId)
 		// Handle dialog response here, e.g. update the app's settings
 		dialog.Destroy()
 	})
@@ -35,4 +49,10 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 	dialog.Show()
 
 	pm.Popover.Hide()
+}
+
+func (s *Settings) GDriveSettings(placeholder *gtk.Box) {
+	gDriveFrame := Frame("Google Drive")
+
+	placeholder.Append(gDriveFrame)
 }
