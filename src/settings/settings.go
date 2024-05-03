@@ -2,6 +2,7 @@ package settings
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 type UserSettings struct {
 	PasswordApp PasswordAppSettings `json:"password_app"`
 	PagesApp    PagesAppSettings    `json:"pages_app"`
+	GDrive      *GDriveSettings     `json:"gdrive"`
 }
 
 type PagesAppSettings struct {
@@ -28,6 +30,10 @@ type PasswordAppSettings struct {
 	SymbolCount    int  `json:"symbol_count"`
 }
 
+type GDriveSettings struct {
+	Secret bool `json:"secret"`
+}
+
 var settingsInstance *UserSettings
 
 func Inst() *UserSettings {
@@ -38,13 +44,16 @@ func Inst() *UserSettings {
 	return settingsInstance
 }
 
-func Init() {
+func Init() *[]string {
+	var messages []string
 	fn := fileName()
 	c, err := os.ReadFile(fn)
 	if err != nil {
-		log.Println("Settings read error: ", err)
+		msg := fmt.Sprintf("Settings read error: %s", err)
+		log.Println(msg)
+		messages = append(messages, msg)
 		settingsInstance = defaultSettings()
-		return
+		return &messages
 	}
 
 	marshalError := json.Unmarshal(c, &settingsInstance)
@@ -56,12 +65,14 @@ func Init() {
 		if err != nil {
 			log.Println("Cannot back up settings: ", err)
 		} else {
-			msg := "Old settings backed up to: "+ backupFileName
-			// helpers.StatusBarInst().UpdateStatusBar(msg)
+			msg := "Old settings backed up to: " + backupFileName
+			messages = append(messages, msg)
 			log.Println(msg)
 		}
 		settingsInstance = defaultSettings()
 	}
+
+	return &messages
 }
 
 func defaultSettings() *UserSettings {
@@ -86,7 +97,7 @@ func getFileName(n string) string {
 		log.Fatal(err)
 	}
 
-			return filepath.Join(
+	return filepath.Join(
 		dirname,
 		helpers.AppConfigMainDir,
 		helpers.AppConfigAppDir,

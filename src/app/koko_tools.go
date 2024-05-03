@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -31,6 +32,10 @@ type kokoTools struct {
 var menuXML string
 
 func InitApp() {
+	helpers.InitGlobals()
+	flag.BoolVar(&helpers.Globals().Debug, "d", false, "Debug mode")
+	flag.Parse()
+
 	makeConfigDirIfNotExists()
 	settings.Init()
 
@@ -43,12 +48,15 @@ func InitApp() {
 		t.appWindow.Show()
 	})
 
+	app.AddMainOption("Debug mode", []byte("d")[0], 0b1, 0, "", "")
+
 	go func() {
 		<-ctx.Done()
 		glib.IdleAdd(app.Quit)
 	}()
 
 	if code := app.Run(os.Args); code > 0 {
+		log.Println("A te mēs tikām!", code)
 		cancel()
 		os.Exit(code)
 	}
@@ -61,7 +69,7 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	menu := menuBuilder.GetObject("header-bar").Cast().(*gtk.HeaderBar)
 
 	gb := menuBuilder.GetObject("gears").Cast().(*gtk.MenuButton)
-	gb.SetPopover(ui.Popover().Popover)
+	gb.SetPopover(ui.Popover(gb).Popover)
 
 	tools.appWindow = gtk.NewApplicationWindow(app)
 	tools.appWindow.SetTitlebar(menu)
