@@ -39,13 +39,23 @@ func TestTokenFromFileMissingFile(t *testing.T) {
 	}
 }
 
-func TestDefaultCredentialsPath(t *testing.T) {
-	if got := filepath.Base(DefaultCredentialsPath()); got != "credentials.json" {
-		t.Fatalf("DefaultCredentialsPath() basename = %q, want credentials.json", got)
+func TestOAuthClientIDUsesEnvOverride(t *testing.T) {
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
+
+	if got := OAuthClientID(); got != "client-id-1" {
+		t.Fatalf("OAuthClientID() = %q, want client-id-1", got)
 	}
 }
 
-func TestSyncablePathsSkipsCredentialsAndToken(t *testing.T) {
+func TestOAuthClientLabelUsesBuiltInDefault(t *testing.T) {
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "")
+
+	if got := OAuthClientLabel(); got != defaultOAuthClientID {
+		t.Fatalf("OAuthClientLabel() = %q, want %q", got, defaultOAuthClientID)
+	}
+}
+
+func TestSyncablePathsSkipsTokenOnly(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"settings.json", "notes.txt", "credentials.json", "gdrive_token.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
@@ -57,8 +67,8 @@ func TestSyncablePathsSkipsCredentialsAndToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("syncablePaths() error = %v", err)
 	}
-	if len(paths) != 2 {
-		t.Fatalf("syncablePaths() len = %d, want 2", len(paths))
+	if len(paths) != 3 {
+		t.Fatalf("syncablePaths() len = %d, want 3", len(paths))
 	}
 }
 

@@ -37,15 +37,7 @@ type AuthorizationSession struct {
 	result chan error
 }
 
-func DefaultCredentialsPath() string {
-	if override := os.Getenv("KOKO_TOOLS_CREDENTIALS_FILE"); override != "" {
-		return override
-	}
-	if executable, err := os.Executable(); err == nil {
-		return filepath.Join(filepath.Dir(executable), "credentials.json")
-	}
-	return "credentials.json"
-}
+const defaultOAuthClientID = "863485242223-ghqf2jt00v710rkt27oieivkg7h613nr.apps.googleusercontent.com"
 
 func TokenPath() string {
 	return filepath.Join(appConfigDir(), "gdrive_token.json")
@@ -56,13 +48,27 @@ func HasToken() bool {
 	return err == nil
 }
 
+func OAuthClientID() string {
+	if override := strings.TrimSpace(os.Getenv("KOKO_TOOLS_GOOGLE_CLIENT_ID")); override != "" {
+		return override
+	}
+	return strings.TrimSpace(defaultOAuthClientID)
+}
+
+func OAuthClientLabel() string {
+	clientID := OAuthClientID()
+	if clientID == "" {
+		return "not configured"
+	}
+	return clientID
+}
+
 func HasCredentials() bool {
-	_, err := os.Stat(DefaultCredentialsPath())
-	return err == nil
+	return OAuthClientID() != ""
 }
 
 func AuthorizationURL() (string, error) {
-	config, err := configFromFile(DefaultCredentialsPath())
+	config, err := oauthConfig()
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +77,7 @@ func AuthorizationURL() (string, error) {
 }
 
 func StartLocalAuthorization() (string, *AuthorizationSession, error) {
-	config, err := configFromFile(DefaultCredentialsPath())
+	config, err := oauthConfig()
 	if err != nil {
 		return "", nil, err
 	}
@@ -330,22 +336,21 @@ func appConfigDir() string {
 	return filepath.Join(dirname, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
 }
 
-func configFromFile(credentialsPath string) (*oauth2.Config, error) {
-	b, err := os.ReadFile(credentialsPath)
-	if err != nil {
-		return nil, fmt.Errorf("read credentials file: %w", err)
+func oauthConfig() (*oauth2.Config, error) {
+	clientID := OAuthClientID()
+	if clientID == "" {
+		return nil, errors.New("missing Google OAuth client ID")
 	}
 
-	config, err := google.ConfigFromJSON(b, drive.DriveScope)
-	if err != nil {
-		return nil, fmt.Errorf("parse credentials file: %w", err)
-	}
-
-	return config, nil
+	return &oauth2.Config{
+		ClientID: clientID,
+		Endpoint: google.Endpoint,
+		Scopes:   []string{drive.DriveScope},
+	}, nil
 }
 
 func serviceFromCredentials() (*drive.Service, error) {
-	config, err := configFromFile(DefaultCredentialsPath())
+	config, err := oauthConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +384,7 @@ func syncablePaths(dir string) ([]string, error) {
 			continue
 		}
 		name := entry.Name()
-		if name == filepath.Base(DefaultCredentialsPath()) || name == filepath.Base(TokenPath()) {
+		if name == filepath.Base(TokenPath()) {
 			continue
 		}
 		paths = append(paths, filepath.Join(dir, name))

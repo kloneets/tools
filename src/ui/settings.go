@@ -153,7 +153,7 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 
 	s.statusLabel = InfoLabel("")
 	s.lastSyncLabel = InfoLabel("")
-	credentialsLabel := InfoLabel(fmt.Sprintf("App credentials file: %s", gdrive.DefaultCredentialsPath()))
+	credentialsLabel := InfoLabel(fmt.Sprintf("Google OAuth client ID: %s", gdrive.OAuthClientLabel()))
 	credentialsLabel.SetSelectable(true)
 
 	s.updateStatusFromCurrentSettings(current)
@@ -280,9 +280,9 @@ func (s *Settings) updateStatusFromCurrentSettings(current *settings.GDriveSetti
 	case current.Ready():
 		s.setStatus("Google Drive sync is enabled for folder: " + current.FolderName)
 	case gdrive.HasCredentials():
-		s.setStatus("App credentials are available. Connect Google Drive and choose a folder to enable sync.")
+		s.setStatus("Google OAuth client ID is configured. Connect Google Drive and choose a folder to enable sync.")
 	default:
-		s.setStatus("Missing app credentials.json. Bundle it with the application, then connect and choose a Drive folder.")
+		s.setStatus("Missing Google OAuth client ID. Set KOKO_TOOLS_GOOGLE_CLIENT_ID or compile it into the app.")
 	}
 }
 
@@ -316,7 +316,7 @@ func (s *Settings) validateDriveSettings() error {
 		return nil
 	}
 	if !gdrive.HasCredentials() {
-		return fmt.Errorf("application credentials.json is missing")
+		return fmt.Errorf("missing Google OAuth client ID")
 	}
 	if !gdrive.HasToken() {
 		return fmt.Errorf("connect Google Drive before enabling sync")
@@ -360,7 +360,7 @@ func (s *Settings) setStatus(message string) {
 
 func (s *Settings) createFolder() {
 	if !gdrive.HasCredentials() {
-		s.setStatus("application credentials.json is missing")
+		s.setStatus("missing Google OAuth client ID")
 		return
 	}
 	if !gdrive.HasToken() {

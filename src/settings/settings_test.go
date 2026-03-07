@@ -100,11 +100,7 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 func TestGDriveReady(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	credentialsPath := filepath.Join(t.TempDir(), "credentials.json")
-	t.Setenv("KOKO_TOOLS_CREDENTIALS_FILE", credentialsPath)
-	if err := os.WriteFile(credentialsPath, []byte("{}"), 0o644); err != nil {
-		t.Fatalf("WriteFile(credentials) error = %v", err)
-	}
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
 	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
 		t.Fatalf("MkdirAll(token dir) error = %v", err)
 	}
