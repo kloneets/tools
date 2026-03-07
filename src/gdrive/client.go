@@ -37,7 +37,10 @@ type AuthorizationSession struct {
 	result chan error
 }
 
-const defaultOAuthClientID = "863485242223-ghqf2jt00v710rkt27oieivkg7h613nr.apps.googleusercontent.com"
+const (
+	defaultOAuthClientID     = "863485242223-ghqf2jt00v710rkt27oieivkg7h613nr.apps.googleusercontent.com"
+	defaultOAuthClientSecret = "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"
+)
 
 func TokenPath() string {
 	return filepath.Join(appConfigDir(), "gdrive_token.json")
@@ -55,6 +58,13 @@ func OAuthClientID() string {
 	return strings.TrimSpace(defaultOAuthClientID)
 }
 
+func OAuthClientSecret() string {
+	if override := strings.TrimSpace(os.Getenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET")); override != "" {
+		return override
+	}
+	return strings.TrimSpace(defaultOAuthClientSecret)
+}
+
 func OAuthClientLabel() string {
 	clientID := OAuthClientID()
 	if clientID == "" {
@@ -64,7 +74,7 @@ func OAuthClientLabel() string {
 }
 
 func HasCredentials() bool {
-	return OAuthClientID() != ""
+	return OAuthClientID() != "" && OAuthClientSecret() != ""
 }
 
 func AuthorizationURL() (string, error) {
@@ -338,14 +348,16 @@ func appConfigDir() string {
 
 func oauthConfig() (*oauth2.Config, error) {
 	clientID := OAuthClientID()
-	if clientID == "" {
-		return nil, errors.New("missing Google OAuth client ID")
+	clientSecret := OAuthClientSecret()
+	if clientID == "" || clientSecret == "" {
+		return nil, errors.New("missing Google OAuth client configuration")
 	}
 
 	return &oauth2.Config{
-		ClientID: clientID,
-		Endpoint: google.Endpoint,
-		Scopes:   []string{drive.DriveScope},
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint:     google.Endpoint,
+		Scopes:       []string{drive.DriveScope},
 	}, nil
 }
 

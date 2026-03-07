@@ -47,11 +47,28 @@ func TestOAuthClientIDUsesEnvOverride(t *testing.T) {
 	}
 }
 
+func TestOAuthClientSecretUsesEnvOverride(t *testing.T) {
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "client-secret-1")
+
+	if got := OAuthClientSecret(); got != "client-secret-1" {
+		t.Fatalf("OAuthClientSecret() = %q, want client-secret-1", got)
+	}
+}
+
 func TestOAuthClientLabelUsesBuiltInDefault(t *testing.T) {
 	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "")
 
 	if got := OAuthClientLabel(); got != defaultOAuthClientID {
 		t.Fatalf("OAuthClientLabel() = %q, want %q", got, defaultOAuthClientID)
+	}
+}
+
+func TestHasCredentialsUsesBuiltInSecret(t *testing.T) {
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "")
+
+	if !HasCredentials() {
+		t.Fatal("HasCredentials() should be true when built-in client secret is available")
 	}
 }
 
