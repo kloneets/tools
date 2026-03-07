@@ -1,0 +1,65 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background Circle for a professional icon look -->
+  <circle cx="256" cy="256" r="240" fill="#f5f5f5"/>
+  
+  <!-- "Mixed" Beer Bottles (Decline/Staggered) -->
+  <g id="bottles">
+    <!-- Bottle 1 (Amber, leaning far left) -->
+    <g transform="rotate(-18 180 300) translate(-10 60)">
+      <path d="M180 180 C180 160 190 150 190 130 L190 100 L210 100 L210 130 C210 150 220 160 220 180 L220 280 L180 280 Z" fill="#6d4c41"/>
+      <rect x="190" y="90" width="20" height="10" rx="2" fill="#ffd54f"/>
+      <rect x="185" y="200" width="30" height="40" fill="#fff176" opacity="0.8"/>
+    </g>
+    
+    <!-- Bottle 2 (Dark, leaning right) -->
+    <g transform="rotate(15 340 280) translate(10 55)">
+      <path d="M300 170 C300 150 310 140 310 120 L310 90 L330 90 L330 120 C330 140 340 150 340 170 L340 270 L300 270 Z" fill="#4e342e"/>
+      <rect x="310" y="80" width="20" height="10" rx="2" fill="#ffd54f"/>
+      <rect x="305" y="190" width="30" height="40" fill="#ffb74d" opacity="0.8"/>
+    </g>
+  </g>
+
+  <!-- Mixed Tools -->
+  <g id="tools">
+    <!-- Hand Saw (Left, tilted outward) -->
+    <g transform="rotate(-12 120 280) translate(-15 30)">
+      <path d="M100 120 L115 120 L135 280 L90 280 Z" fill="#bdbdbd"/>
+      <path d="M115 120 L120 125 L116 130 L121 135 L117 140 L122 145 L118 150 L123 155 L119 160 L124 165 L120 170 L125 175 L121 180 L126 185 L122 190 L127 195 L123 200 L128 205 L124 210 L129 215 L125 220 L130 225 L126 230 L131 235 L127 240 L131 280" stroke="#9e9e9e" stroke-width="1"/>
+      <path d="M85 80 C85 70 95 60 110 60 L125 60 C135 60 140 70 140 80 L140 110 C140 120 135 130 125 130 L110 130 C95 130 85 120 85 110 Z" fill="#5d4037"/>
+      <path d="M100 85 C100 80 105 75 115 75 L120 75 C125 75 130 80 130 85 L130 105 C130 110 125 115 120 115 L115 115 C105 115 100 110 100 105 Z" fill="#f5f5f5"/>
+    </g>
+
+    <!-- Chisel (Leaning left, between saw and bottles) -->
+    <g transform="rotate(-25 220 280) translate(0 40)">
+      <rect x="212" y="160" width="16" height="120" rx="2" fill="#bdbdbd"/> <!-- Metal blade -->
+      <path d="M212 160 L228 160 L224 150 L216 150 Z" fill="#9e9e9e"/> <!-- Bevel tip -->
+      <rect x="208" y="180" width="24" height="60" rx="4" fill="#5d4037"/> <!-- Wood handle -->
+    </g>
+
+    <!-- Hammer (Leaning right) -->
+    <g transform="rotate(22 260 280) translate(20 35)">
+      <rect x="0" y="0" width="15" height="150" rx="5" fill="#5d4037" transform="translate(252 140)"/>
+      <path d="M222 130 L272 130 L272 160 L222 160 Z" fill="#757575"/>
+      <path d="M212 135 L222 130 L222 160 L212 155 Z" fill="#616161"/>
+    </g>
+
+    <!-- Wrench (Leaning left, far right side) -->
+    <g transform="rotate(-15 380 280) translate(10 45)">
+      <rect x="360" y="160" width="15" height="120" rx="5" fill="#bdbdbd"/>
+      <circle cx="375" cy="160" r="18" fill="#bdbdbd"/>
+      <rect x="368" y="145" width="14" height="20" fill="#f5f5f5"/>
+    </g>
+  </g>
+
+  <!-- Wooden Toolbox Body (Front Layer) -->
+  <g id="toolbox">
+    <rect x="80" y="260" width="352" height="160" rx="4" fill="#8d6e63"/>
+    <path d="M90 290 H422" stroke="#795548" stroke-width="2" opacity="0.4"/>
+    <path d="M90 330 H422" stroke="#795548" stroke-width="2" opacity="0.4"/>
+    <path d="M90 370 H422" stroke="#795548" stroke-width="2" opacity="0.4"/>
+    <rect x="70" y="250" width="372" height="40" rx="4" fill="#a1887f"/>
+    <path d="M200 250 L200 220 C200 210 210 200 220 200 L292 200 C302 200 312 210 312 220 L312 250" stroke="#4e342e" stroke-width="14" fill="none" stroke-linecap="round"/>
+    <rect x="236" y="290" width="40" height="30" rx="4" fill="#9e9e9e"/>
+    <circle cx="256" cy="305" r="4" fill="#424242"/>
+  </g>
+</svg>

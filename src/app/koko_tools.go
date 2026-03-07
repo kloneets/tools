@@ -87,10 +87,14 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	upperLeftWrapper.Append(note.F)
 
 	upper := gtk.NewBox(gtk.OrientationHorizontal, 2)
+	upper.SetHExpand(true)
+	upper.SetVExpand(true)
 	upper.Append(upperLeftWrapper)
 	upper.Append(passw.F)
 
 	mainWrap := gtk.NewBox(gtk.OrientationVertical, 0)
+	mainWrap.SetHExpand(true)
+	mainWrap.SetVExpand(true)
 	mainWrap.Append(upper)
 	mainWrap.Append(helpers.StatusBarInst().B)
 

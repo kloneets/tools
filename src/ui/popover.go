@@ -9,31 +9,40 @@ import (
 )
 
 type PopoverMenu struct {
-	Popover     *gtk.PopoverMenu
-	Menu        *gio.Menu
+	Popover     *gtk.Popover
 	AboutButton *gtk.Button
-	QuitButton  *gio.MenuItem
+	QuitButton  *gtk.Button
 	Settings    *Settings
 }
 
 func Popover(parent gtk.Widgetter) *PopoverMenu {
-	menu := gio.NewMenu()
-	menu.AppendItem(gio.NewMenuItem("_Quit", "app.Quit"))
 	pm := &PopoverMenu{
-		Popover: NewPopoverMenu(parent, gtk.PosRight, [][2]string{
-			{"_About", "pm.About"},
-			// quit Button
-			{"_Quit", "app.Quit"},
-		}),
-		Menu:        menu,
-		AboutButton: gtk.NewButton(),
-		QuitButton:  gio.NewMenuItem("_Quit", "app.Quit"),
+		Popover:     gtk.NewPopover(),
+		AboutButton: gtk.NewButtonWithLabel("About"),
+		QuitButton:  gtk.NewButtonWithLabel("Quit"),
 	}
+	pm.Popover.SetPosition(gtk.PosRight)
+	pm.Popover.SetParent(parent)
 	pm.Settings = pm.NewSettings()
 
-	pm.AboutButton.SetLabel("About")
-	pm.AboutButton.Connect("pm.About", pm.About)
-	// pm.AboutButton.ConnectClicked(pm.About)
+	content := gtk.NewBox(gtk.OrientationVertical, DefaultMasterPadding)
+	content.SetMarginTop(DefaultMasterPadding)
+	content.SetMarginBottom(DefaultMasterPadding)
+	content.SetMarginStart(DefaultMasterPadding)
+	content.SetMarginEnd(DefaultMasterPadding)
+
+	pm.AboutButton.ConnectClicked(pm.About)
+	pm.QuitButton.ConnectClicked(func() {
+		if !gtk.BaseWidget(parent).ActivateAction("app.quit", nil) {
+			log.Println("could not activate app.quit action")
+		}
+		pm.Popover.Hide()
+	})
+
+	content.Append(pm.Settings.SettingsButton)
+	content.Append(pm.AboutButton)
+	content.Append(pm.QuitButton)
+	pm.Popover.SetChild(content)
 
 	return pm
 }
@@ -47,19 +56,6 @@ func MenuPair(pairs [][2]string) *gio.Menu {
 		menu.Append(pair[0], pair[1])
 	}
 	return menu
-}
-
-// PopoverWidth is the default popover width.
-const PopoverWidth = 150
-
-// NewPopoverMenu creates a new Popover menu.
-func NewPopoverMenu(w gtk.Widgetter, pos gtk.PositionType, pairs [][2]string) *gtk.PopoverMenu {
-	popover := gtk.NewPopoverMenuFromModel(MenuPair(pairs))
-	popover.SetMnemonicsVisible(true)
-	popover.SetSizeRequest(PopoverWidth, -1)
-	popover.SetPosition(pos)
-	popover.SetParent(w)
-	return popover
 }
 
 // CustomMenu returns a new Menu from the given popover menu items. All menu
@@ -113,7 +109,6 @@ func addMenuItems(menu *gio.Menu, items []PopoverMenuItem, widgets map[string]gt
 		switch item := item.(type) {
 		case popoverMenuItem:
 			if item.widget != nil && widgets == nil {
-				// No widgets supported; skip this menu item.
 				continue
 			}
 
@@ -123,16 +118,16 @@ func addMenuItems(menu *gio.Menu, items []PopoverMenuItem, widgets map[string]gt
 				continue
 			}
 
-			menu := gio.NewMenuItem(item.label, item.action)
+			menuItem := gio.NewMenuItem(item.label, item.action)
 			if item.icon != "" {
-				menu.SetIcon(gio.NewThemedIcon(item.icon))
+				menuItem.SetIcon(gio.NewThemedIcon(item.icon))
 			}
 			if item.widget != nil {
 				widgets[item.action] = item.widget
-				setCustomMenuItem(menu, item.action)
+				setCustomMenuItem(menuItem, item.action)
 			}
 			added++
-			section.AppendItem(menu)
+			section.AppendItem(menuItem)
 		case submenu:
 			sub := gio.NewMenu()
 			if addMenuItems(sub, item.items, widgets) > 0 {

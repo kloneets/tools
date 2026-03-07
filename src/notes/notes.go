@@ -9,6 +9,7 @@ import (
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/helpers"
+	"github.com/kloneets/tools/src/settings"
 	"github.com/kloneets/tools/src/ui"
 )
 
@@ -27,6 +28,8 @@ func GenerateUI() *Note {
 	}
 
 	n.note = gtk.NewTextView()
+	n.note.SetHExpand(true)
+	n.note.SetVExpand(true)
 	n.note.SetWrapMode(gtk.WrapWord)
 	n.note.SetSizeRequest(300, 200)
 	n.note.Buffer().SetText(getNoteText())
@@ -36,13 +39,21 @@ func GenerateUI() *Note {
 	n.note.SetMarginTop(ui.DefaultBoxPadding)
 	n.note.SetMarginBottom(ui.DefaultBoxPadding)
 	scrollW := gtk.NewScrolledWindow()
+	scrollW.SetHExpand(true)
+	scrollW.SetVExpand(true)
+	scrollW.SetPropagateNaturalHeight(true)
+	scrollW.SetPropagateNaturalWidth(true)
 	scrollW.SetMaxContentHeight(400)
 	scrollW.SetMinContentHeight(300)
 	scrollW.SetChild(n.note)
 	mainArea := ui.MainArea()
+	mainArea.SetHExpand(true)
+	mainArea.SetVExpand(true)
 	mainArea.Append(scrollW)
 
 	n.F = ui.Frame("Notes:")
+	n.F.SetHExpand(true)
+	n.F.SetVExpand(true)
 	n.F.SetChild(mainArea)
 
 	return &n
@@ -104,6 +115,14 @@ func (n *Note) save() {
 		return
 	}
 	saveCounter++
+	if settings.Inst().GDrive.Ready() {
+		if err := settings.SyncDriveData(); err != nil {
+			log.Println("gdrive notes sync error:", err)
+			helpers.StatusBarInst().UpdateStatusBar("Notes saved locally, Drive sync failed")
+			n.WaitingToSave = false
+			return
+		}
+	}
 	helpers.StatusBarInst().UpdateStatusBar("Notes saved to: " + file + ", " + fmt.Sprint(saveCounter))
 	n.WaitingToSave = false
 	f.Close()

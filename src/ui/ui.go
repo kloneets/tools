@@ -39,3 +39,18 @@ func MainArea() *gtk.Box {
 
 	return box
 }
+
+func InfoLabel(text string) *gtk.Label {
+	label := gtk.NewLabel(text)
+	label.SetWrap(true)
+	label.SetXAlign(0)
+
+	return label
+}
+
+func SectionLabel(text string) *gtk.Label {
+	label := gtk.NewLabel(text)
+	label.SetXAlign(0)
+
+	return label
+}

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
 )
 
@@ -31,7 +32,12 @@ type PasswordAppSettings struct {
 }
 
 type GDriveSettings struct {
-	Secret bool `json:"secret"`
+	Enabled         bool   `json:"enabled"`
+	FolderID        string `json:"folder_id"`
+	FolderName      string `json:"folder_name"`
+	LastSyncAt      string `json:"last_sync_at"`
+	LastSyncStatus  string `json:"last_sync_status"`
+	LastSyncMessage string `json:"last_sync_message"`
 }
 
 var settingsInstance *UserSettings
@@ -72,6 +78,8 @@ func Init() *[]string {
 		settingsInstance = defaultSettings()
 	}
 
+	normalizeSettings(settingsInstance)
+
 	return &messages
 }
 
@@ -88,6 +96,20 @@ func defaultSettings() *UserSettings {
 			SecondBookPages: 0,
 			ReadPages:       0,
 		},
+		GDrive: defaultGDriveSettings(),
+	}
+}
+
+func defaultGDriveSettings() *GDriveSettings {
+	return &GDriveSettings{}
+}
+
+func normalizeSettings(s *UserSettings) {
+	if s == nil {
+		return
+	}
+	if s.GDrive == nil {
+		s.GDrive = defaultGDriveSettings()
 	}
 }
 
@@ -108,7 +130,15 @@ func fileName() string {
 	return getFileName("settings.json")
 }
 
+func (g *GDriveSettings) Ready() bool {
+	return g != nil && g.Enabled && g.FolderID != "" && gdrive.HasCredentials() && gdrive.HasToken()
+}
+
 func SaveSettings() {
+	saveSettings(true)
+}
+
+func saveSettings(sync bool) {
 	file := fileName()
 
 	if err := os.Truncate(file, 0); err != nil {
@@ -133,5 +163,51 @@ func SaveSettings() {
 		return
 	}
 
+	if sync && settingsInstance.GDrive.Ready() {
+		if err := SyncDriveData(); err != nil {
+			log.Println("gdrive settings sync error:", err)
+			helpers.StatusBarInst().UpdateStatusBar("Settings saved locally, Drive sync failed")
+			return
+		}
+	}
+
 	helpers.StatusBarInst().UpdateStatusBar("Settings saved!")
+}
+
+func SyncDriveData() error {
+	if settingsInstance == nil || !settingsInstance.GDrive.Ready() {
+		return nil
+	}
+
+	err := gdrive.SyncAppData(settingsInstance.GDrive.FolderID)
+	recordSyncResult(err)
+	saveSettings(false)
+
+	if err == nil {
+		if syncErr := gdrive.SyncFile(settingsInstance.GDrive.FolderID, fileName()); syncErr != nil {
+			recordSyncResult(syncErr)
+			saveSettings(false)
+			return syncErr
+		}
+		recordSyncResult(nil)
+		saveSettings(false)
+	}
+
+	return err
+}
+
+func recordSyncResult(err error) {
+	if settingsInstance == nil || settingsInstance.GDrive == nil {
+		return
+	}
+
+	settingsInstance.GDrive.LastSyncAt = time.Now().Format(time.RFC3339)
+	if err != nil {
+		settingsInstance.GDrive.LastSyncStatus = "error"
+		settingsInstance.GDrive.LastSyncMessage = err.Error()
+		return
+	}
+
+	settingsInstance.GDrive.LastSyncStatus = "ok"
+	settingsInstance.GDrive.LastSyncMessage = "Drive sync completed successfully"
 }

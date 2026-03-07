@@ -1,19 +1,42 @@
 package ui
 
 import (
+	"fmt"
 	"log"
+	"strings"
 
+	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/kloneets/tools/src/gdrive"
+	"github.com/kloneets/tools/src/settings"
 )
 
 type Settings struct {
-	SettingsButton *gtk.Button
+	SettingsButton       *gtk.Button
+	window               *gtk.Window
+	enableDriveSync      *gtk.CheckButton
+	connectButton        *gtk.Button
+	refreshFoldersButton *gtk.Button
+	syncNowButton        *gtk.Button
+	newFolderButton      *gtk.Button
+	authLink             *gtk.LinkButton
+	statusLabel          *gtk.Label
+	lastSyncLabel        *gtk.Label
+	searchEntry          *gtk.Entry
+	newFolderEntry       *gtk.Entry
+	folderSelect         *gtk.ComboBoxText
+	folders              map[string]gdrive.Folder
+	allFolders           []gdrive.Folder
+	authSession          *gdrive.AuthorizationSession
 }
 
+const folderGroupPrefix = "__group__:"
+
 func (pm *PopoverMenu) NewSettings() *Settings {
-	s := &Settings{}
-	s.SettingsButton = gtk.NewButton()
-	s.SettingsButton.SetLabel("Settings")
+	s := &Settings{
+		folders: make(map[string]gdrive.Folder),
+	}
+	s.SettingsButton = gtk.NewButtonWithLabel("Settings")
 	s.SettingsButton.ConnectClicked(func() {
 		s.SettingsWindow(pm)
 	})
@@ -21,38 +44,431 @@ func (pm *PopoverMenu) NewSettings() *Settings {
 }
 
 func (s *Settings) SettingsWindow(pm *PopoverMenu) {
-	dialog := gtk.NewDialog()
-	dialog.SetTitle("Settings")
-	// Add widgets to the dialog to create the settings UI
+	if s.window != nil {
+		s.window.Present()
+		pm.Popover.Hide()
+		return
+	}
+
+	window := newSettingsWindow(mainWindowFromPopover(pm))
+	s.window = window
 
 	settingsFrame := MainArea()
+	settingsFrame.SetMarginTop(DefaultMasterPadding)
+	settingsFrame.SetMarginStart(DefaultMasterPadding)
+	settingsFrame.SetMarginEnd(DefaultMasterPadding)
 
-	cancelButton := gtk.NewButton()
-	cancelButton.SetLabel("Cancel")
+	s.GDriveSettings(window, settingsFrame)
+
+	saveButton := gtk.NewButtonWithLabel("Save")
+	saveButton.ConnectClicked(func() {
+		if err := s.saveGDriveSettings(); err != nil {
+			s.setStatus(err.Error())
+			return
+		}
+		window.Close()
+	})
+
+	cancelButton := gtk.NewButtonWithLabel("Cancel")
 	cancelButton.ConnectClicked(func() {
-		dialog.Destroy()
+		window.Close()
 	})
 
-	dialog.AddButton("Save", int(gtk.ResponseOK))
-	dialog.AddButton("Cancel", int(gtk.ResponseCancel))
+	buttonRow := gtk.NewBox(gtk.OrientationHorizontal, DefaultMasterPadding)
+	buttonRow.SetMarginTop(DefaultMasterPadding)
+	buttonRow.SetHAlign(gtk.AlignEnd)
+	buttonRow.Append(cancelButton)
+	buttonRow.Append(saveButton)
 
-	s.GDriveSettings(settingsFrame)
-	settingsFrame.Append(cancelButton)
-	dialog.SetChild(settingsFrame)
+	content := MainArea()
+	content.SetMarginTop(DefaultMasterPadding)
+	content.SetMarginBottom(DefaultMasterPadding)
+	content.SetMarginStart(DefaultMasterPadding)
+	content.SetMarginEnd(DefaultMasterPadding)
+	content.Append(settingsFrame)
+	content.Append(buttonRow)
 
-	dialog.Connect("response", func(dialog *gtk.Dialog, responseId gtk.ResponseType) {
-		log.Println("Response:", responseId)
-		// Handle dialog response here, e.g. update the app's settings
-		dialog.Destroy()
+	window.SetChild(content)
+	window.ConnectCloseRequest(func() bool {
+		if s.authSession != nil {
+			_ = s.authSession.Close()
+			s.authSession = nil
+		}
+		s.window = nil
+		window.Destroy()
+		return false
 	})
 
-	dialog.Show()
-
+	window.Present()
 	pm.Popover.Hide()
 }
 
-func (s *Settings) GDriveSettings(placeholder *gtk.Box) {
+func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
+	current := settings.Inst().GDrive
+	s.folders = make(map[string]gdrive.Folder)
+
+	s.enableDriveSync = gtk.NewCheckButtonWithLabel("Enable Google Drive sync")
+	s.enableDriveSync.SetActive(current.Enabled)
+
+	s.connectButton = gtk.NewButtonWithLabel("Connect Google Drive")
+	s.connectButton.ConnectClicked(func() {
+		s.startDriveAuthorization(window)
+	})
+
+	s.authLink = gtk.NewLinkButtonWithLabel("", "Open Google authorization page")
+	s.authLink.SetVisible(false)
+
+	s.refreshFoldersButton = gtk.NewButtonWithLabel("Load Drive folders")
+	s.refreshFoldersButton.ConnectClicked(func() {
+		s.loadFolders(current.FolderID)
+	})
+
+	s.syncNowButton = gtk.NewButtonWithLabel("Sync now")
+	s.syncNowButton.ConnectClicked(func() {
+		s.syncNow()
+	})
+
+	s.newFolderEntry = gtk.NewEntry()
+	s.newFolderEntry.SetPlaceholderText("New Drive folder name")
+
+	s.newFolderButton = gtk.NewButtonWithLabel("Create folder")
+	s.newFolderButton.ConnectClicked(func() {
+		s.createFolder()
+	})
+
+	s.searchEntry = gtk.NewEntry()
+	s.searchEntry.SetPlaceholderText("Search folders")
+	s.searchEntry.ConnectChanged(func() {
+		s.populateFolderSelect(s.filterFolders(s.searchEntry.Text()), settings.Inst().GDrive.FolderID, settings.Inst().GDrive.FolderName)
+	})
+
+	s.folderSelect = gtk.NewComboBoxText()
+	s.folderSelect.SetHExpand(true)
+	s.folderSelect.ConnectChanged(func() {
+		if id := s.folderSelect.ActiveID(); strings.HasPrefix(id, folderGroupPrefix) {
+			s.folderSelect.SetActive(-1)
+		}
+	})
+	s.populateFolderSelect(nil, current.FolderID, current.FolderName)
+
+	s.statusLabel = InfoLabel("")
+	s.lastSyncLabel = InfoLabel("")
+	credentialsLabel := InfoLabel(fmt.Sprintf("App credentials file: %s", gdrive.DefaultCredentialsPath()))
+	credentialsLabel.SetSelectable(true)
+
+	s.updateStatusFromCurrentSettings(current)
+	s.updateLastSyncLabel(current)
+
+	connectionRow := FieldWrapper(SectionLabel("Connection"), DefaultBoxPadding)
+	connectionRow.Append(s.connectButton)
+	connectionRow.Append(s.syncNowButton)
+
+	searchRow := FieldWrapper(SectionLabel("Find Drive folder"), DefaultBoxPadding)
+	searchRow.Append(s.searchEntry)
+	searchRow.Append(s.refreshFoldersButton)
+
+	selectRow := FieldWrapper(SectionLabel("Drive sync folder"), DefaultBoxPadding)
+	selectRow.Append(s.folderSelect)
+
+	newFolderRow := FieldWrapper(SectionLabel("Create Drive folder"), DefaultBoxPadding)
+	newFolderRow.Append(s.newFolderEntry)
+	newFolderRow.Append(s.newFolderButton)
+
+	content := MainArea()
+	content.Append(s.enableDriveSync)
+	content.Append(credentialsLabel)
+	content.Append(s.authLink)
+	content.Append(connectionRow)
+	content.Append(searchRow)
+	content.Append(selectRow)
+	content.Append(newFolderRow)
+	content.Append(s.statusLabel)
+	content.Append(s.lastSyncLabel)
+
 	gDriveFrame := Frame("Google Drive")
+	gDriveFrame.SetChild(content)
 
 	placeholder.Append(gDriveFrame)
+}
+
+func (s *Settings) startDriveAuthorization(window *gtk.Window) {
+	if s.authSession != nil {
+		s.setStatus("Authorization is already in progress.")
+		return
+	}
+
+	url, session, err := gdrive.StartLocalAuthorization()
+	if err != nil {
+		s.setStatus("Google Drive setup error: " + err.Error())
+		return
+	}
+
+	s.authSession = session
+	s.authLink.SetURI(url)
+	s.authLink.SetVisible(true)
+	s.setStatus("Browser opened. Finish Google authorization and return to the app.")
+	gtk.ShowURI(nil, url, 0)
+
+	go func() {
+		err := <-session.Wait()
+		coreglib.IdleAdd(func() {
+			s.authSession = nil
+			if err != nil {
+				s.setStatus("Authorization failed: " + err.Error())
+				return
+			}
+			s.setStatus("Google Drive connected. Load folders and choose the sync target.")
+			s.loadFolders("")
+		})
+	}()
+
+	window.Present()
+}
+
+func (s *Settings) loadFolders(selectedID string) {
+	folders, err := gdrive.ListFolders()
+	if err != nil {
+		s.setStatus("Could not load Drive folders: " + err.Error())
+		return
+	}
+
+	s.allFolders = folders
+	s.populateFolderSelect(s.filterFolders(s.searchEntry.Text()), selectedID, settings.Inst().GDrive.FolderName)
+	if len(folders) == 0 {
+		s.setStatus("No Google Drive folders found for this account.")
+		return
+	}
+
+	s.setStatus(fmt.Sprintf("Loaded %d Google Drive folders.", len(folders)))
+}
+
+func (s *Settings) populateFolderSelect(folders []gdrive.Folder, selectedID string, selectedName string) {
+	s.folderSelect.RemoveAll()
+	s.folders = make(map[string]gdrive.Folder)
+
+	if selectedID != "" && selectedName != "" {
+		s.folderSelect.Append(selectedID, selectedName)
+		s.folders[selectedID] = gdrive.Folder{ID: selectedID, Name: selectedName, Path: selectedName}
+	}
+
+	lastGroup := ""
+	labelCounts := countFolderLabels(folders)
+	for _, folder := range folders {
+		if _, exists := s.folders[folder.ID]; exists {
+			continue
+		}
+		if folder.TopLevel != "" && folder.TopLevel != lastGroup {
+			groupID := folderGroupPrefix + folder.TopLevel
+			s.folderSelect.Append(groupID, "── "+folder.TopLevel+" ──")
+			lastGroup = folder.TopLevel
+		}
+		s.folderSelect.Append(folder.ID, folderDisplayLabel(folder, labelCounts))
+		s.folders[folder.ID] = folder
+	}
+
+	if selectedID != "" {
+		s.folderSelect.SetActiveID(selectedID)
+	}
+}
+
+func (s *Settings) updateStatusFromCurrentSettings(current *settings.GDriveSettings) {
+	switch {
+	case current == nil:
+		s.setStatus("Google Drive sync is not configured yet.")
+	case current.LastSyncStatus == "error" && current.LastSyncMessage != "":
+		s.setStatus("Last Drive sync failed: " + current.LastSyncMessage)
+	case current.Ready():
+		s.setStatus("Google Drive sync is enabled for folder: " + current.FolderName)
+	case gdrive.HasCredentials():
+		s.setStatus("App credentials are available. Connect Google Drive and choose a folder to enable sync.")
+	default:
+		s.setStatus("Missing app credentials.json. Bundle it with the application, then connect and choose a Drive folder.")
+	}
+}
+
+func (s *Settings) updateLastSyncLabel(current *settings.GDriveSettings) {
+	s.lastSyncLabel.SetText(lastSyncSummary(current))
+}
+
+func (s *Settings) applyFormToSettings() {
+	g := settings.Inst().GDrive
+	g.Enabled = s.enableDriveSync.Active()
+
+	selectedID := s.folderSelect.ActiveID()
+	if selectedID != "" && !strings.HasPrefix(selectedID, folderGroupPrefix) {
+		g.FolderID = selectedID
+		if folder, ok := s.folders[selectedID]; ok {
+			if folder.Path != "" {
+				g.FolderName = folder.Path
+			} else {
+				g.FolderName = folder.Name
+			}
+		} else {
+			g.FolderName = s.folderSelect.ActiveText()
+		}
+	}
+}
+
+func (s *Settings) validateDriveSettings() error {
+	g := settings.Inst().GDrive
+
+	if !g.Enabled {
+		return nil
+	}
+	if !gdrive.HasCredentials() {
+		return fmt.Errorf("application credentials.json is missing")
+	}
+	if !gdrive.HasToken() {
+		return fmt.Errorf("connect Google Drive before enabling sync")
+	}
+	if g.FolderID == "" {
+		return fmt.Errorf("choose a Google Drive folder for sync")
+	}
+
+	return nil
+}
+
+func (s *Settings) saveGDriveSettings() error {
+	s.applyFormToSettings()
+	settings.SaveSettings()
+	if settings.Inst().GDrive.Enabled && settings.Inst().GDrive.FolderID == "" {
+		s.setStatus("Google Drive sync is enabled. Connect Drive and choose a folder to start auto-syncing.")
+	}
+	s.updateLastSyncLabel(settings.Inst().GDrive)
+	return nil
+}
+
+func (s *Settings) syncNow() {
+	s.applyFormToSettings()
+	if err := s.validateDriveSettings(); err != nil {
+		s.setStatus(err.Error())
+		return
+	}
+	if err := settings.SyncDriveData(); err != nil {
+		s.setStatus("Drive sync failed: " + err.Error())
+		s.updateLastSyncLabel(settings.Inst().GDrive)
+		return
+	}
+	s.setStatus(settings.Inst().GDrive.LastSyncMessage)
+	s.updateLastSyncLabel(settings.Inst().GDrive)
+}
+
+func (s *Settings) setStatus(message string) {
+	log.Println(message)
+	s.statusLabel.SetText(message)
+}
+
+func (s *Settings) createFolder() {
+	if !gdrive.HasCredentials() {
+		s.setStatus("application credentials.json is missing")
+		return
+	}
+	if !gdrive.HasToken() {
+		s.setStatus("connect Google Drive before creating a folder")
+		return
+	}
+
+	name := strings.TrimSpace(s.newFolderEntry.Text())
+	if name == "" {
+		s.setStatus("enter a folder name first")
+		return
+	}
+
+	parentID := s.selectedFolderID()
+	folder, err := gdrive.CreateFolder(name, parentID)
+	if err != nil {
+		s.setStatus("could not create Drive folder: " + err.Error())
+		return
+	}
+
+	s.newFolderEntry.SetText("")
+	s.loadFolders(folder.ID)
+	s.setStatus("Created Drive folder: " + folder.Name)
+}
+
+func (s *Settings) selectedFolderID() string {
+	selectedID := s.folderSelect.ActiveID()
+	if strings.HasPrefix(selectedID, folderGroupPrefix) {
+		return ""
+	}
+	return selectedID
+}
+
+func (s *Settings) filterFolders(query string) []gdrive.Folder {
+	if query == "" {
+		return s.allFolders
+	}
+
+	query = strings.ToLower(strings.TrimSpace(query))
+	filtered := make([]gdrive.Folder, 0, len(s.allFolders))
+	for _, folder := range s.allFolders {
+		haystack := strings.ToLower(folder.Path + " " + folder.Name + " " + folder.TopLevel + " " + folder.ID)
+		if strings.Contains(haystack, query) {
+			filtered = append(filtered, folder)
+		}
+	}
+
+	return filtered
+}
+
+func countFolderLabels(folders []gdrive.Folder) map[string]int {
+	counts := make(map[string]int, len(folders))
+	for _, folder := range folders {
+		counts[folder.Path]++
+	}
+	return counts
+}
+
+func folderDisplayLabel(folder gdrive.Folder, labelCounts map[string]int) string {
+	label := folder.Path
+	if labelCounts[folder.Path] > 1 {
+		label += " (" + shortFolderID(folder.ID) + ")"
+	}
+	return label
+}
+
+func shortFolderID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+func newSettingsWindow(parent *gtk.Window) *gtk.Window {
+	window := gtk.NewWindow()
+	window.SetTitle("Settings")
+	window.SetDefaultSize(780, 420)
+	window.SetModal(false)
+	window.SetDestroyWithParent(true)
+	window.SetHideOnClose(false)
+	if parent != nil {
+		window.SetTransientFor(parent)
+	}
+
+	return window
+}
+
+func mainWindowFromPopover(pm *PopoverMenu) *gtk.Window {
+	if pm == nil || pm.Popover == nil {
+		return nil
+	}
+
+	root := gtk.BaseWidget(pm.Popover).Root()
+	if root == nil {
+		return nil
+	}
+
+	window, _ := root.Cast().(*gtk.Window)
+	return window
+}
+
+func lastSyncSummary(current *settings.GDriveSettings) string {
+	if current == nil || current.LastSyncAt == "" {
+		return "Last sync: not run yet"
+	}
+	if current.LastSyncStatus == "error" && current.LastSyncMessage != "" {
+		return fmt.Sprintf("Last sync: %s (%s)\n%s", current.LastSyncAt, current.LastSyncStatus, current.LastSyncMessage)
+	}
+
+	return fmt.Sprintf("Last sync: %s (%s)", current.LastSyncAt, current.LastSyncStatus)
 }
