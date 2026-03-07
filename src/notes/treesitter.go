@@ -4,6 +4,7 @@ import (
 	"embed"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	sitterlua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
@@ -23,6 +24,11 @@ import (
 
 //go:embed queries/*.scm
 var treeSitterQueries embed.FS
+
+var (
+	treeSitterLanguageCache sync.Map
+	treeSitterQueryCache    sync.Map
+)
 
 type treeSitterLanguageSpec struct {
 	language  func() *sitter.Language
@@ -109,33 +115,35 @@ func treeSitterSpans(text string, offset int, language string) []markdownSpan {
 
 	spec, ok := treeSitterSpec(language)
 	if !ok {
-		return legacyCodeSpans(text, offset, language)
+		return legacyCodeBlockSpans(text, offset, language)
 	}
 
 	querySource, err := treeSitterQueries.ReadFile(spec.queryFile)
 	if err != nil {
-		return legacyCodeSpans(text, offset, language)
+		return legacyCodeBlockSpans(text, offset, language)
+	}
+	lang, ok := cachedTreeSitterLanguage(spec.queryFile, spec.language)
+	if !ok {
+		return legacyCodeBlockSpans(text, offset, language)
 	}
 
 	parser := sitter.NewParser()
 	defer parser.Close()
-	lang := spec.language()
 	if err := parser.SetLanguage(lang); err != nil {
-		return legacyCodeSpans(text, offset, language)
+		return legacyCodeBlockSpans(text, offset, language)
 	}
 
 	source := []byte(text)
 	tree := parser.Parse(source, nil)
 	if tree == nil {
-		return legacyCodeSpans(text, offset, language)
+		return legacyCodeBlockSpans(text, offset, language)
 	}
 	defer tree.Close()
 
-	query, queryErr := sitter.NewQuery(lang, string(querySource))
-	if queryErr != nil {
-		return legacyCodeSpans(text, offset, language)
+	query, ok := cachedTreeSitterQuery(spec.queryFile, lang, querySource)
+	if !ok {
+		return legacyCodeBlockSpans(text, offset, language)
 	}
-	defer query.Close()
 
 	cursor := sitter.NewQueryCursor()
 	defer cursor.Close()
@@ -157,10 +165,38 @@ func treeSitterSpans(text string, offset int, language string) []markdownSpan {
 		spans = append(spans, markdownSpan{Tag: tag, Start: start, End: end})
 	}
 	if len(spans) == 0 {
-		return legacyCodeSpans(text, offset, language)
+		return legacyCodeBlockSpans(text, offset, language)
 	}
 
 	return mergeMarkdownSpans(spans)
+}
+
+func cachedTreeSitterLanguage(key string, build func() *sitter.Language) (*sitter.Language, bool) {
+	if cached, ok := treeSitterLanguageCache.Load(key); ok {
+		lang, ok := cached.(*sitter.Language)
+		return lang, ok
+	}
+	lang := build()
+	if lang == nil {
+		return nil, false
+	}
+	actual, _ := treeSitterLanguageCache.LoadOrStore(key, lang)
+	cached, ok := actual.(*sitter.Language)
+	return cached, ok
+}
+
+func cachedTreeSitterQuery(key string, lang *sitter.Language, source []byte) (*sitter.Query, bool) {
+	if cached, ok := treeSitterQueryCache.Load(key); ok {
+		query, ok := cached.(*sitter.Query)
+		return query, ok
+	}
+	query, err := sitter.NewQuery(lang, string(source))
+	if err != nil {
+		return nil, false
+	}
+	actual, _ := treeSitterQueryCache.LoadOrStore(key, query)
+	cached, ok := actual.(*sitter.Query)
+	return cached, ok
 }
 
 func markdownFenceSpans(text string, offset int) []markdownSpan {

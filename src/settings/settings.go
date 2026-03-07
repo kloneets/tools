@@ -197,24 +197,13 @@ func SaveSettings() {
 
 func saveSettings(sync bool, notifyHooks bool) {
 	file := fileName()
-
-	if err := os.Truncate(file, 0); err != nil {
-		log.Println("Settings read file error: ", err)
-	}
-
-	f, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-	defer f.Close()
-
 	dataString, err := json.Marshal(settingsInstance)
 	if err != nil {
 		log.Println(err)
 		statusUpdater("Couldn't stringify settings... :(")
+		return
 	}
-	if _, err := f.WriteString(string(dataString)); err != nil {
+	if err := os.WriteFile(file, dataString, 0o644); err != nil {
 		log.Println(err)
 		statusUpdater("Couldn't save settings... :(")
 		return

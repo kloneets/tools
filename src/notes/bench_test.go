@@ -36,6 +36,47 @@ func main() {
 [OpenAI](https://openai.com)
 `
 
+const benchMarkdownMultiFenceDoc = `# Workspace
+
+Regular paragraph with **bold**, _italic_, and ` + "`inline code`" + `.
+
+` + "```go" + `
+package main
+
+import "fmt"
+
+func main() {
+    for i := 0; i < 8; i++ {
+        fmt.Println("go", i)
+    }
+}
+` + "```" + `
+
+` + "```rust" + `
+fn main() {
+    for i in 0..8 {
+        println!("rust {}", i);
+    }
+}
+` + "```" + `
+
+` + "```python" + `
+def run():
+    for i in range(8):
+        print("py", i)
+` + "```" + `
+
+` + "```json" + `
+{"name":"koko","enabled":true,"count":8}
+` + "```" + `
+
+` + "```bash" + `
+for i in $(seq 1 8); do
+  echo "$i"
+done
+` + "```" + `
+`
+
 func BenchmarkMarkdownSpans(b *testing.B) {
 	text := strings.Repeat(benchMarkdownDoc+"\n", 20)
 	b.ReportAllocs()
@@ -46,6 +87,14 @@ func BenchmarkMarkdownSpans(b *testing.B) {
 
 func BenchmarkMarkdownPreview(b *testing.B) {
 	text := strings.Repeat(benchMarkdownDoc+"\n", 20)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = markdownPreview(text, 4)
+	}
+}
+
+func BenchmarkMarkdownPreviewMultiFence(b *testing.B) {
+	text := strings.Repeat(benchMarkdownMultiFenceDoc+"\n", 12)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = markdownPreview(text, 4)

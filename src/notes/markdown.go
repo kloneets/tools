@@ -68,10 +68,10 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 		trimmed := strings.TrimLeft(line, " \t")
 		if strings.HasPrefix(trimmed, "```") {
 			if inCodeBlock {
-				blockText, blockSpans := renderCodeBlock(codeBlockLines, offset, codeLanguage, tabSpaces)
+				blockText, blockSpans, blockLen := renderCodeBlock(codeBlockLines, offset, codeLanguage, tabSpaces)
 				rendered = append(rendered, blockText...)
 				spans = append(spans, blockSpans...)
-				offset += runeLen(strings.Join(blockText, "\n"))
+				offset += blockLen
 				if len(blockText) > 0 {
 					offset++
 				}
@@ -90,17 +90,17 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 			continue
 		}
 
-		renderedLine, lineSpans, lineLinks, _, _, emitLine := renderMarkdownLine(line, offset, false, "", tabSpaces)
+		renderedLine, lineSpans, lineLinks, renderedLen, emitLine := renderMarkdownLine(line, offset)
 		if !emitLine {
 			continue
 		}
 		rendered = append(rendered, renderedLine)
 		spans = append(spans, lineSpans...)
 		links = append(links, lineLinks...)
-		offset += runeLen(renderedLine) + 1
+		offset += renderedLen + 1
 	}
 	if inCodeBlock {
-		blockText, blockSpans := renderCodeBlock(codeBlockLines, offset, codeLanguage, tabSpaces)
+		blockText, blockSpans, _ := renderCodeBlock(codeBlockLines, offset, codeLanguage, tabSpaces)
 		rendered = append(rendered, blockText...)
 		spans = append(spans, blockSpans...)
 	}
@@ -160,61 +160,41 @@ func markdownRenderFromText(text string) markdownRender {
 	return markdownRender{Text: text, Spans: spans}
 }
 
-func renderMarkdownLine(line string, offset int, inCodeBlock bool, codeLanguage string, tabSpaces int) (string, []markdownSpan, []markdownLink, bool, string, bool) {
+func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []markdownLink, int, bool) {
 	trimmed := strings.TrimLeft(line, " \t")
-	if strings.HasPrefix(trimmed, "```") {
-		if inCodeBlock {
-			return "", nil, nil, false, "", false
-		}
-		return "", nil, nil, true, strings.TrimSpace(strings.TrimPrefix(trimmed, "```")), false
-	}
-	if inCodeBlock {
-		expanded := expandTabs(line, tabSpaces)
-		spans := []markdownSpan{{Tag: tagCodeBlock, Start: offset, End: offset + runeLen(expanded)}}
-		spans = append(spans, codeSpans(expanded, offset, codeLanguage)...)
-		return expanded, spans, nil, inCodeBlock, codeLanguage, true
-	}
-
-	prefixText := ""
+	prefixText := line[:len(line)-len(trimmed)]
 	lineTag := ""
 	switch {
 	case strings.HasPrefix(trimmed, "# "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + trimmed[2:]
 		lineTag = tagHeading1
 	case strings.HasPrefix(trimmed, "## "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + trimmed[3:]
 		lineTag = tagHeading2
 	case strings.HasPrefix(trimmed, "### "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + trimmed[4:]
 		lineTag = tagHeading3
 	case strings.HasPrefix(trimmed, "- [ ] "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + "☐ " + trimmed[6:]
 		lineTag = tagChecklist
 	case strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + "☑ " + trimmed[6:]
 		lineTag = tagChecklist
 	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + "• " + trimmed[2:]
 		lineTag = tagList
 	case orderedListPrefixLength(trimmed) > 0:
 		lineTag = tagOrdered
 	case strings.HasPrefix(trimmed, "> "):
-		prefixText = strings.Repeat(" ", len(line)-len(trimmed))
 		line = prefixText + trimmed[2:]
 		lineTag = tagQuote
 	}
 
-	plain, spans, links := renderInlineMarkdown(line, offset)
+	plain, spans, links, plainLen := renderInlineMarkdown(line, offset)
 	if lineTag != "" {
-		spans = append([]markdownSpan{{Tag: lineTag, Start: offset, End: offset + runeLen(plain)}}, spans...)
+		spans = append([]markdownSpan{{Tag: lineTag, Start: offset, End: offset + plainLen}}, spans...)
 	}
-	return plain, spans, links, inCodeBlock, codeLanguage, true
+	return plain, spans, links, plainLen, true
 }
 
 func expandTabs(text string, tabSpaces int) string {
@@ -223,6 +203,20 @@ func expandTabs(text string, tabSpaces int) string {
 
 func codeSpans(line string, offset int, language string) []markdownSpan {
 	return legacyCodeSpans(line, offset, language)
+}
+
+func legacyCodeBlockSpans(text string, offset int, language string) []markdownSpan {
+	lines := strings.Split(text, "\n")
+	spans := make([]markdownSpan, 0, len(lines)*2)
+	lineOffset := offset
+	for idx, line := range lines {
+		spans = append(spans, legacyCodeSpans(line, lineOffset, language)...)
+		lineOffset += runeLen(line)
+		if idx < len(lines)-1 {
+			lineOffset++
+		}
+	}
+	return spans
 }
 
 func legacyCodeSpans(line string, offset int, language string) []markdownSpan {
@@ -262,18 +256,19 @@ func legacyCodeSpans(line string, offset int, language string) []markdownSpan {
 	}
 }
 
-func renderCodeBlock(lines []string, offset int, language string, tabSpaces int) ([]string, []markdownSpan) {
+func renderCodeBlock(lines []string, offset int, language string, tabSpaces int) ([]string, []markdownSpan, int) {
 	if len(lines) == 0 {
-		return nil, nil
+		return nil, nil, 0
 	}
 	renderedLines := make([]string, len(lines))
 	for i, line := range lines {
 		renderedLines[i] = expandTabs(line, tabSpaces)
 	}
 	blockText := strings.Join(renderedLines, "\n")
-	spans := []markdownSpan{{Tag: tagCodeBlock, Start: offset, End: offset + runeLen(blockText)}}
+	blockLen := runeLen(blockText)
+	spans := []markdownSpan{{Tag: tagCodeBlock, Start: offset, End: offset + blockLen}}
 	spans = append(spans, treeSitterSpans(blockText, offset, language)...)
-	return renderedLines, spans
+	return renderedLines, spans, blockLen
 }
 
 func lexCodeLine(line string, offset int, lineComment string, blockCommentEnds []string, keywords []string, types []string) []markdownSpan {
@@ -317,6 +312,10 @@ func lexCodeLine(line string, offset int, lineComment string, blockCommentEnds [
 				spans = append(spans, codeSpan(line, offset, i, end, tagCodeKeyword))
 			case containsWord(types, word):
 				spans = append(spans, codeSpan(line, offset, i, end, tagCodeType))
+			case previousNonSpaceByte(line, i) == '.':
+				spans = append(spans, codeSpan(line, offset, i, end, tagCodeProperty))
+			case nextNonSpaceByte(line, end) == '(':
+				spans = append(spans, codeSpan(line, offset, i, end, tagCodeFunction))
 			}
 			i = end
 			continue
@@ -409,13 +408,34 @@ func containsWord(words []string, candidate string) bool {
 	return false
 }
 
+func previousNonSpaceByte(line string, index int) byte {
+	for i := index - 1; i >= 0; i-- {
+		if line[i] == ' ' || line[i] == '\t' {
+			continue
+		}
+		return line[i]
+	}
+	return 0
+}
+
+func nextNonSpaceByte(line string, index int) byte {
+	for i := index; i < len(line); i++ {
+		if line[i] == ' ' || line[i] == '\t' {
+			continue
+		}
+		return line[i]
+	}
+	return 0
+}
+
 func inlineMarkdownSpans(line string, offset int) []markdownSpan {
-	_, spans, _ := renderInlineMarkdown(line, offset)
+	_, spans, _, _ := renderInlineMarkdown(line, offset)
 	return spans
 }
 
-func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []markdownLink) {
+func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []markdownLink, int) {
 	var out strings.Builder
+	out.Grow(len(line))
 	spans := make([]markdownSpan, 0)
 	links := make([]markdownLink, 0)
 	outChars := 0
@@ -485,11 +505,16 @@ func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []ma
 		i += size
 	}
 
-	return out.String(), spans, links
+	return out.String(), spans, links, outChars
 }
 
 func runeLen(text string) int {
-	return utf8.RuneCountInString(text)
+	for i := 0; i < len(text); i++ {
+		if text[i] >= utf8.RuneSelf {
+			return utf8.RuneCountInString(text)
+		}
+	}
+	return len(text)
 }
 
 func singleDelimiterClose(line string, start int, delim byte) int {
