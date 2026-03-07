@@ -68,42 +68,19 @@ func GenerateUI() *PasswordGenerator {
 }
 
 func (p *PasswordGenerator) genPassword() {
-	newPassword := ""
-	charPool := ""
 	sCount, err := strconv.Atoi(p.symbolCount.Text())
 	if err != nil {
 		sCount = defaultPasswordLength
 	}
 
-	if p.letters.Active() {
-		for ch := 'a'; ch < 'z'; ch++ {
-			charPool = charPool + fmt.Sprintf("%c", ch)
-		}
-
-		charPool = charPool + strings.ToUpper(charPool)
-	}
-
-	if p.specialSymbols.Active() {
-		charPool = charPool + "`~!@#$%^&*()_+\\|/{}[]'\";:><.,"
-	}
-
-	if p.numbers.Active() {
-		charPool = charPool + "0123456789"
-	}
-
+	charPool := buildCharPool(p.letters.Active(), p.numbers.Active(), p.specialSymbols.Active())
 	if len(charPool) == 0 {
 		p.password.SetText("")
 		return
 	}
 
 	source := rand.NewSource(time.Now().UnixNano())
-	myRandom := rand.New(source)
-
-	for i := 0; i < sCount; i++ {
-		newPassword = newPassword + string(charPool[myRandom.Intn(len(charPool))])
-	}
-
-	p.password.SetText(newPassword)
+	p.password.SetText(generatePassword(charPool, sCount, rand.New(source)))
 	p.saveSettings()
 }
 
@@ -119,4 +96,37 @@ func (p *PasswordGenerator) saveSettings() {
 	s.PasswordApp.SymbolCount = sc
 
 	settings.SaveSettings()
+}
+
+func buildCharPool(includeLetters bool, includeNumbers bool, includeSpecial bool) string {
+	charPool := ""
+
+	if includeLetters {
+		for ch := 'a'; ch <= 'z'; ch++ {
+			charPool += fmt.Sprintf("%c", ch)
+		}
+
+		charPool += strings.ToUpper(charPool)
+	}
+
+	if includeSpecial {
+		charPool += "`~!@#$%^&*()_+\\|/{}[]'\";:><.,"
+	}
+
+	if includeNumbers {
+		charPool += "0123456789"
+	}
+
+	return charPool
+}
+
+func generatePassword(charPool string, symbolCount int, random *rand.Rand) string {
+	var builder strings.Builder
+	builder.Grow(symbolCount)
+
+	for i := 0; i < symbolCount; i++ {
+		builder.WriteByte(charPool[random.Intn(len(charPool))])
+	}
+
+	return builder.String()
 }

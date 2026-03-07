@@ -105,9 +105,16 @@ func makeConfigDirIfNotExists() {
 		log.Fatal(err)
 		return
 	}
-	dir := filepath.Join(dirname, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+	ensureConfigDirExists(configDir(dirname))
+}
+
+func configDir(home string) string {
+	return filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+}
+
+func ensureConfigDirExists(dir string) {
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-		err := os.Mkdir(dir, os.ModePerm)
+		err := os.MkdirAll(dir, os.ModePerm)
 		if err != nil {
 			log.Println(err)
 		}
