@@ -14,6 +14,12 @@ import (
 type Settings struct {
 	SettingsButton       *gtk.Button
 	window               *gtk.Window
+	noteTabSpaces        *gtk.SpinButton
+	noteVimMode          *gtk.CheckButton
+	noteEditorMono       *gtk.CheckButton
+	noteFontSelect       *gtk.ComboBoxText
+	noteMonoFontSelect   *gtk.ComboBoxText
+	noteThemeSelect      *gtk.ComboBoxText
 	enableDriveSync      *gtk.CheckButton
 	connectButton        *gtk.Button
 	refreshFoldersButton *gtk.Button
@@ -58,6 +64,7 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 	settingsFrame.SetMarginStart(DefaultMasterPadding)
 	settingsFrame.SetMarginEnd(DefaultMasterPadding)
 
+	s.NotesSettings(settingsFrame)
 	s.GDriveSettings(window, settingsFrame)
 
 	saveButton := gtk.NewButtonWithLabel("Save")
@@ -191,6 +198,58 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 	placeholder.Append(gDriveFrame)
 }
 
+func (s *Settings) NotesSettings(placeholder *gtk.Box) {
+	current := settings.Inst().NotesApp
+
+	s.noteTabSpaces = gtk.NewSpinButtonWithRange(1, 8, 1)
+	s.noteTabSpaces.SetValue(float64(current.TabSpaces))
+	s.noteVimMode = gtk.NewCheckButtonWithLabel("Enable Vim key bindings")
+	s.noteVimMode.SetActive(current.VimMode)
+	s.noteEditorMono = gtk.NewCheckButtonWithLabel("Use monospace font in editor")
+	s.noteEditorMono.SetActive(current.EditorMonospace)
+	s.noteFontSelect = fontChoiceSelect([]string{
+		"Cantarell 11",
+		"Noto Sans 11",
+		"IBM Plex Sans 11",
+		"Source Sans 3 11",
+		"Literata 12",
+	}, current.BodyFont)
+	s.noteMonoFontSelect = fontChoiceSelect([]string{
+		"Noto Sans Mono 11",
+		"JetBrains Mono 11",
+		"Fira Code 11",
+		"IBM Plex Mono 11",
+		"Source Code Pro 11",
+	}, current.MonospaceFont)
+	s.noteThemeSelect = choiceSelect([][2]string{
+		{"ide-dark", "IDE Dark"},
+		{"neon-burst", "Neon Burst"},
+		{"paper-light", "Paper Light"},
+		{"mono", "Monochrome"},
+	}, current.PreviewTheme)
+
+	tabRow := FieldWrapper(SectionLabel("Tab spaces"), DefaultBoxPadding)
+	tabRow.Append(s.noteTabSpaces)
+	fontRow := FieldWrapper(SectionLabel("Notes font"), DefaultBoxPadding)
+	fontRow.Append(s.noteFontSelect)
+	monoFontRow := FieldWrapper(SectionLabel("Code font"), DefaultBoxPadding)
+	monoFontRow.Append(s.noteMonoFontSelect)
+	themeRow := FieldWrapper(SectionLabel("Preview theme"), DefaultBoxPadding)
+	themeRow.Append(s.noteThemeSelect)
+
+	content := MainArea()
+	content.Append(tabRow)
+	content.Append(s.noteVimMode)
+	content.Append(s.noteEditorMono)
+	content.Append(fontRow)
+	content.Append(monoFontRow)
+	content.Append(themeRow)
+
+	frame := Frame("Notes")
+	frame.SetChild(content)
+	placeholder.Append(frame)
+}
+
 func (s *Settings) startDriveAuthorization(window *gtk.Window) {
 	if s.authSession != nil {
 		s.setStatus("Authorization is already in progress.")
@@ -291,6 +350,25 @@ func (s *Settings) updateLastSyncLabel(current *settings.GDriveSettings) {
 }
 
 func (s *Settings) applyFormToSettings() {
+	if s.noteTabSpaces != nil {
+		settings.Inst().NotesApp.TabSpaces = s.noteTabSpaces.ValueAsInt()
+	}
+	if s.noteVimMode != nil {
+		settings.Inst().NotesApp.VimMode = s.noteVimMode.Active()
+	}
+	if s.noteEditorMono != nil {
+		settings.Inst().NotesApp.EditorMonospace = s.noteEditorMono.Active()
+	}
+	if s.noteFontSelect != nil && s.noteFontSelect.ActiveID() != "" {
+		settings.Inst().NotesApp.BodyFont = s.noteFontSelect.ActiveID()
+	}
+	if s.noteMonoFontSelect != nil && s.noteMonoFontSelect.ActiveID() != "" {
+		settings.Inst().NotesApp.MonospaceFont = s.noteMonoFontSelect.ActiveID()
+	}
+	if s.noteThemeSelect != nil && s.noteThemeSelect.ActiveID() != "" {
+		settings.Inst().NotesApp.PreviewTheme = s.noteThemeSelect.ActiveID()
+	}
+
 	g := settings.Inst().GDrive
 	g.Enabled = s.enableDriveSync.Active()
 
@@ -434,16 +512,46 @@ func shortFolderID(id string) string {
 	return id[:8]
 }
 
+func fontChoiceSelect(options []string, current string) *gtk.ComboBoxText {
+	items := make([][2]string, 0, len(options)+1)
+	seen := make(map[string]bool, len(options)+1)
+	for _, option := range options {
+		items = append(items, [2]string{option, option})
+		seen[option] = true
+	}
+	if current != "" && !seen[current] {
+		items = append(items, [2]string{current, current})
+	}
+	return choiceSelect(items, current)
+}
+
+func choiceSelect(options [][2]string, current string) *gtk.ComboBoxText {
+	selectBox := gtk.NewComboBoxText()
+	selectBox.SetHExpand(true)
+	for _, option := range options {
+		selectBox.Append(option[0], option[1])
+	}
+	if current != "" {
+		selectBox.SetActiveID(current)
+	}
+	return selectBox
+}
+
 func newSettingsWindow(parent *gtk.Window) *gtk.Window {
 	window := gtk.NewWindow()
 	window.SetTitle("Settings")
 	window.SetDefaultSize(780, 420)
 	window.SetModal(false)
+	window.SetDeletable(true)
 	window.SetDestroyWithParent(true)
 	window.SetHideOnClose(false)
 	if parent != nil {
 		window.SetTransientFor(parent)
 	}
+	header := gtk.NewHeaderBar()
+	header.SetShowTitleButtons(true)
+	header.SetTitleWidget(gtk.NewLabel("Settings"))
+	window.SetTitlebar(header)
 
 	return window
 }

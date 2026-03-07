@@ -382,26 +382,27 @@ func serviceFromCredentials() (*drive.Service, error) {
 }
 
 func syncablePaths(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+	paths := make([]string, 0, 8)
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Base(path) == filepath.Base(TokenPath()) {
+			return nil
+		}
+		paths = append(paths, path)
+		return nil
+	})
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read app config dir: %w", err)
 	}
-
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if name == filepath.Base(TokenPath()) {
-			continue
-		}
-		paths = append(paths, filepath.Join(dir, name))
-	}
-
+	sort.Strings(paths)
 	return paths, nil
 }
 

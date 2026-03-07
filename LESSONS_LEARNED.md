@@ -13,6 +13,8 @@
 - `google.golang.org/api/drive/v2` uses `MaxResults`, `items`, and `title`, not `PageSize`, `files`, and `name`.
 - Password letter generation must include `z` and `Z`; watch loop bounds on character pools.
 - Config directory creation should use `os.MkdirAll`, not `os.Mkdir`, because parent directories may be missing.
+- Notes code preview must keep token colors separate from block styling. Do not set a foreground color on the code-block/base tag, or bright per-token colors collapse into one dull shade.
+- When changing Notes appearance, verify the `Neon Burst` theme still shows visibly different colors for keywords, strings, comments, functions, properties, constants, types, and numbers.
 
 ## Testing Strategy
 - Extract small pure helpers from GTK event handlers before writing tests.

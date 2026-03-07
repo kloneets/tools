@@ -34,3 +34,52 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install GTK4 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            gcc \
+            libgirepository1.0-dev \
+            libglib2.0-dev \
+            libgtk-4-dev \
+            gobject-introspection \
+            pkg-config
+
+      - name: Run benchmarks
+        run: |
+          mkdir -p .artifacts
+          go test ./src/notes ./src/gdrive ./src/settings -run '^$' -bench '.' -benchmem | tee .artifacts/benchmarks.txt
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          {
+            echo "## Benchmark Results"
+            echo
+            echo '```text'
+            cat .artifacts/benchmarks.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: .artifacts/benchmarks.txt

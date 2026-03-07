@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,24 @@ func TestDefaultSettings(t *testing.T) {
 	}
 	if got.PasswordApp.SymbolCount != 16 {
 		t.Fatalf("SymbolCount = %d, want 16", got.PasswordApp.SymbolCount)
+	}
+	if got.NotesApp.TabSpaces != 4 {
+		t.Fatalf("NotesApp.TabSpaces = %d, want 4", got.NotesApp.TabSpaces)
+	}
+	if got.NotesApp.BodyFont != "Cantarell 11" {
+		t.Fatalf("NotesApp.BodyFont = %q, want Cantarell 11", got.NotesApp.BodyFont)
+	}
+	if got.NotesApp.MonospaceFont != "Noto Sans Mono 11" {
+		t.Fatalf("NotesApp.MonospaceFont = %q, want Noto Sans Mono 11", got.NotesApp.MonospaceFont)
+	}
+	if got.NotesApp.EditorMonospace {
+		t.Fatal("NotesApp.EditorMonospace = true, want false by default")
+	}
+	if got.NotesApp.PreviewTheme != "ide-dark" {
+		t.Fatalf("NotesApp.PreviewTheme = %q, want ide-dark", got.NotesApp.PreviewTheme)
+	}
+	if got.NotesApp.VimMode {
+		t.Fatal("NotesApp.VimMode = true, want false by default")
 	}
 	if got.GDrive == nil {
 		t.Fatal("expected default GDrive settings to be initialized")
@@ -95,6 +115,30 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.GDrive == nil {
 		t.Fatal("normalizeSettings() should initialize GDrive")
 	}
+	if config.NotesApp.TabSpaces != 4 {
+		t.Fatalf("normalizeSettings() NotesApp.TabSpaces = %d, want 4", config.NotesApp.TabSpaces)
+	}
+	if config.NotesApp.BodyFont != "Cantarell 11" {
+		t.Fatalf("normalizeSettings() NotesApp.BodyFont = %q", config.NotesApp.BodyFont)
+	}
+	if config.NotesApp.MonospaceFont != "Noto Sans Mono 11" {
+		t.Fatalf("normalizeSettings() NotesApp.MonospaceFont = %q", config.NotesApp.MonospaceFont)
+	}
+	if config.NotesApp.EditorMonospace {
+		t.Fatal("normalizeSettings() should leave EditorMonospace disabled by default")
+	}
+	if config.NotesApp.PreviewTheme != "ide-dark" {
+		t.Fatalf("normalizeSettings() NotesApp.PreviewTheme = %q", config.NotesApp.PreviewTheme)
+	}
+	if config.NotesApp.VimMode {
+		t.Fatal("normalizeSettings() should leave VimMode disabled by default")
+	}
+
+	config.NotesApp.PreviewTheme = "neon-burst"
+	normalizeSettings(config)
+	if config.NotesApp.PreviewTheme != "neon-burst" {
+		t.Fatalf("normalizeSettings() should keep neon-burst, got %q", config.NotesApp.PreviewTheme)
+	}
 }
 
 func TestGDriveReady(t *testing.T) {
@@ -142,4 +186,84 @@ func TestRecordSyncResult(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, settingsInstance.GDrive.LastSyncAt); err != nil {
 		t.Fatalf("LastSyncAt parse error = %v", err)
 	}
+}
+
+func TestRunSaveHooksCanSkipHooks(t *testing.T) {
+	settingsInstance = defaultSettings()
+
+	originalHooks := saveHooks
+	defer func() { saveHooks = originalHooks }()
+	saveHooks = nil
+
+	var calls atomic.Int32
+	RegisterSaveHook(func(*UserSettings) {
+		calls.Add(1)
+	})
+
+	runSaveHooks(false)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("runSaveHooks(false) hook calls = %d, want 0", got)
+	}
+
+	runSaveHooks(true)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("runSaveHooks(true) hook calls = %d, want 1", got)
+	}
+}
+
+func TestSaveSettingsStartsDriveSyncAsync(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(token) error = %v", err)
+	}
+
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.FolderName = "Drive / Tests"
+
+	originalStatusUpdater := statusUpdater
+	originalDriveSyncFunc := driveSyncFunc
+	driveSyncInFlight.Store(false)
+	defer func() {
+		statusUpdater = originalStatusUpdater
+		driveSyncFunc = originalDriveSyncFunc
+		driveSyncInFlight.Store(false)
+	}()
+
+	statusUpdater = func(string) {}
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	driveSyncFunc = func() error {
+		once.Do(func() { started <- struct{}{} })
+		<-release
+		return nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		saveSettings(true, false)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("saveSettings() should return before Drive sync completes")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected async Drive sync to start")
+	}
+
+	close(release)
 }

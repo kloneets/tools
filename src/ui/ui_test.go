@@ -109,6 +109,12 @@ func TestNewSettingsWindowUsesPreferencesStyleDefaults(t *testing.T) {
 	if window.HideOnClose() {
 		t.Fatal("newSettingsWindow() should destroy on close")
 	}
+	if !window.Deletable() {
+		t.Fatal("newSettingsWindow() should be deletable")
+	}
+	if window.Titlebar() == nil {
+		t.Fatal("newSettingsWindow() should have a titlebar")
+	}
 }
 
 func TestMenuPairCreatesMenuModel(t *testing.T) {
@@ -123,6 +129,8 @@ func TestMenuPairCreatesMenuModel(t *testing.T) {
 }
 
 func TestCustomMenuSkipsWidgetItemsWithoutWidgetMap(t *testing.T) {
+	requireGTK(t)
+
 	menu := CustomMenu([]PopoverMenuItem{
 		popoverMenuItem{label: "About", action: "pm.About"},
 		popoverMenuItem{label: "Inline", action: "pm.Inline", widget: gtk.NewLabel("inline")},

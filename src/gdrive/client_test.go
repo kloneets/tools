@@ -79,13 +79,20 @@ func TestSyncablePathsSkipsTokenOnly(t *testing.T) {
 			t.Fatalf("WriteFile(%q) error = %v", name, err)
 		}
 	}
+	nestedDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(notes) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "Note 1.md"), []byte("note"), 0o644); err != nil {
+		t.Fatalf("WriteFile(Note 1.md) error = %v", err)
+	}
 
 	paths, err := syncablePaths(dir)
 	if err != nil {
 		t.Fatalf("syncablePaths() error = %v", err)
 	}
-	if len(paths) != 3 {
-		t.Fatalf("syncablePaths() len = %d, want 3", len(paths))
+	if len(paths) != 4 {
+		t.Fatalf("syncablePaths() len = %d, want 4", len(paths))
 	}
 }
 
