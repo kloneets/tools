@@ -26,8 +26,10 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             gcc \
+            libgirepository1.0-dev \
             libglib2.0-dev \
             libgtk-4-dev \
+            gobject-introspection \
             pkg-config
 
       - name: Run tests
