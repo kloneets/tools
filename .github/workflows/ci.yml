@@ -35,6 +35,44 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+  build-macos-arm64:
+    runs-on: macos-14
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install GTK4 dependencies
+        run: |
+          brew update
+          brew install gtk4 gobject-introspection pkgconf
+
+      - name: Configure pkg-config
+        run: |
+          {
+            echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig"
+            echo "CGO_ENABLED=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Build on Apple Silicon
+        run: ./scripts/build-macos-arm64.sh --bundle
+
+      - name: Package Apple Silicon artifact
+        run: |
+          tar -C dist -czf koko-tools-macos-arm64.tar.gz macos-arm64
+
+      - name: Upload Apple Silicon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koko-tools-macos-arm64
+          path: koko-tools-macos-arm64.tar.gz
+
   benchmarks:
     runs-on: ubuntu-latest
     continue-on-error: true

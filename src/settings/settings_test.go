@@ -25,6 +25,9 @@ func TestDefaultSettings(t *testing.T) {
 	if got.NotesApp.TabSpaces != 4 {
 		t.Fatalf("NotesApp.TabSpaces = %d, want 4", got.NotesApp.TabSpaces)
 	}
+	if got.NotesApp.EditorWidth != 0 {
+		t.Fatalf("NotesApp.EditorWidth = %d, want 0", got.NotesApp.EditorWidth)
+	}
 	if got.NotesApp.BodyFont != "Cantarell 11" {
 		t.Fatalf("NotesApp.BodyFont = %q, want Cantarell 11", got.NotesApp.BodyFont)
 	}
@@ -118,6 +121,9 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.NotesApp.TabSpaces != 4 {
 		t.Fatalf("normalizeSettings() NotesApp.TabSpaces = %d, want 4", config.NotesApp.TabSpaces)
 	}
+	if config.NotesApp.EditorWidth != 0 {
+		t.Fatalf("normalizeSettings() NotesApp.EditorWidth = %d, want 0", config.NotesApp.EditorWidth)
+	}
 	if config.NotesApp.BodyFont != "Cantarell 11" {
 		t.Fatalf("normalizeSettings() NotesApp.BodyFont = %q", config.NotesApp.BodyFont)
 	}
@@ -208,6 +214,47 @@ func TestRunSaveHooksCanSkipHooks(t *testing.T) {
 	runSaveHooks(true)
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("runSaveHooks(true) hook calls = %d, want 1", got)
+	}
+}
+
+func TestSaveNotesEditorWidthPersistsValue(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	settingsInstance = defaultSettings()
+
+	SaveNotesEditorWidth(512)
+
+	if settingsInstance.NotesApp.EditorWidth != 512 {
+		t.Fatalf("NotesApp.EditorWidth = %d, want 512", settingsInstance.NotesApp.EditorWidth)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), `"editor_width":512`) {
+		t.Fatalf("saved settings missing editor_width: %s", string(data))
+	}
+}
+
+func TestPersistedNotesEditorWidthReadsFromDisk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	settingsInstance = nil
+	data := `{"notes_app":{"editor_width":377}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if got := PersistedNotesEditorWidth(); got != 377 {
+		t.Fatalf("PersistedNotesEditorWidth() = %d, want 377", got)
 	}
 }
 

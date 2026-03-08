@@ -18,34 +18,59 @@ import (
 )
 
 type Note struct {
-	F               *gtk.Frame
-	notebook        *gtk.Notebook
-	sidebar         *gtk.ListBox
-	sidebarScroll   *gtk.ScrolledWindow
-	sidebarPaths    []string
-	sidebarToggle   *gtk.ToggleButton
-	renameEntry     *gtk.Entry
-	tabs            []*noteTab
-	currentTab      int
-	note            *gtk.TextView
-	buffer          *gtk.TextBuffer
-	preview         *gtk.TextView
-	previewBuffer   *gtk.TextBuffer
-	previewLinks    []markdownLink
-	paned           *gtk.Paned
-	previewToggle   *gtk.ToggleButton
-	commandEntry    *gtk.Entry
-	vimInsertMode   bool
-	vimPendingOp    string
-	selectionMode   vimSelectionMode
-	selectionMark   int
-	selectionCursor int
-	yankRegister    vimRegister
-	commandMode     bool
-	lastSearch      string
-	lastSearchPos   int
-	saveCommand     func()
-	WaitingToSave   bool
+	F                    *gtk.Frame
+	notebook             *gtk.Notebook
+	sidebar              *gtk.ListBox
+	sidebarBox           *gtk.Box
+	sidebarContent       *gtk.Box
+	sidebarPane          *gtk.Paned
+	sidebarScroll        *gtk.ScrolledWindow
+	sidebarActions       *gtk.Box
+	sidebarToggle        *gtk.ToggleButton
+	sidebarDragToggle    *gtk.ToggleButton
+	sidebarNewNote       *gtk.Button
+	sidebarNewFolder     *gtk.Button
+	sidebarDropHint      *gtk.Label
+	sidebarMenu          *gtk.Popover
+	sidebarMenuEntry     *gtk.Entry
+	sidebarCreate        *gtk.Popover
+	sidebarCreateEntry   *gtk.Entry
+	sidebarRows          map[string]*gtk.ListBoxRow
+	sidebarRowEntries    map[uintptr]sidebarEntry
+	sidebarActionButtons map[string]*gtk.Button
+	sidebarCollapsed     map[string]bool
+	sidebarMenuKind      sidebarEntryKind
+	sidebarMenuPath      string
+	sidebarMenuFolder    string
+	selectedFolder       string
+	tabs                 []*noteTab
+	currentTab           int
+	note                 *gtk.TextView
+	buffer               *gtk.TextBuffer
+	preview              *gtk.TextView
+	previewBuffer        *gtk.TextBuffer
+	previewLinks         []markdownLink
+	paned                *gtk.Paned
+	previewToggle        *gtk.ToggleButton
+	commandEntry         *gtk.Entry
+	vimInsertMode        bool
+	vimPendingOp         string
+	selectionMode        vimSelectionMode
+	selectionMark        int
+	selectionCursor      int
+	yankRegister         vimRegister
+	commandMode          bool
+	lastSearch           string
+	lastSearchPos        int
+	sidebarCreateMode    sidebarEntryKind
+	sidebarCreateFolder  string
+	sidebarDragSource    sidebarEntry
+	sidebarDragPending   bool
+	sidebarDragActive    bool
+	sidebarDragTarget    sidebarDropTarget
+	sidebarDragSeq       int64
+	saveCommand          func()
+	WaitingToSave        bool
 }
 
 var saveCounter atomic.Int64
@@ -56,8 +81,12 @@ var noteSyncDriveData = settings.SyncDriveData
 func GenerateUI() *Note {
 	saveCounter.Store(0)
 	n := Note{
-		currentTab:    -1,
-		WaitingToSave: false,
+		currentTab:           -1,
+		WaitingToSave:        false,
+		sidebarRows:          make(map[string]*gtk.ListBoxRow),
+		sidebarRowEntries:    make(map[uintptr]sidebarEntry),
+		sidebarActionButtons: make(map[string]*gtk.Button),
+		sidebarCollapsed:     make(map[string]bool),
 	}
 	n.saveCommand = func() {
 		glib.IdleAdd(func() {
@@ -1103,9 +1132,14 @@ func (n *Note) setPreviewVisible(visible bool) {
 	if child == nil {
 		return
 	}
+	if !visible {
+		if width, ok := editorWidthForPersistence(n.paned); ok {
+			persistEditorWidth(width)
+		}
+	}
 	gtk.BaseWidget(child).SetVisible(visible)
 	if visible {
-		n.paned.SetPosition(430)
+		applyEditorWidth(n.activeTab())
 	} else {
 		n.paned.SetPosition(9999)
 	}
@@ -1115,7 +1149,7 @@ func (n *Note) previewClickController() *gtk.GestureClick {
 	click := gtk.NewGestureClick()
 	click.ConnectReleased(func(_ int, x, y float64) {
 		if uri := n.previewLinkAt(int(x), int(y)); uri != "" {
-			gtk.ShowURI(nil, uri, 0)
+			helpers.OpenURI(uri)
 		}
 	})
 	return click

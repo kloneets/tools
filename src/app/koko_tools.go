@@ -73,7 +73,9 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 
 	tools.appWindow = gtk.NewApplicationWindow(app)
 	tools.appWindow.SetTitlebar(menu)
-	tools.appWindow.SetIconName("media-tape")
+	if iconName := helpers.WindowIconName(); iconName != "" {
+		tools.appWindow.SetIconName(iconName)
+	}
 	tools.appWindow.SetDefaultSize(600, 300)
 	tools.appWindow.SetTitle("Koko tools")
 

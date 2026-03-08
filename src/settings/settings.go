@@ -36,6 +36,7 @@ type PasswordAppSettings struct {
 
 type NotesAppSettings struct {
 	TabSpaces       int    `json:"tab_spaces"`
+	EditorWidth     int    `json:"editor_width,omitempty"`
 	BodyFont        string `json:"body_font"`
 	MonospaceFont   string `json:"monospace_font"`
 	EditorMonospace bool   `json:"editor_monospace"`
@@ -193,6 +194,41 @@ func (g *GDriveSettings) Ready() bool {
 
 func SaveSettings() {
 	saveSettings(true, true)
+}
+
+func SaveNotesEditorWidth(width int) {
+	if settingsInstance == nil || width <= 0 {
+		return
+	}
+	if settingsInstance.NotesApp.EditorWidth == width {
+		return
+	}
+	settingsInstance.NotesApp.EditorWidth = width
+	saveSettings(false, false)
+}
+
+func PersistedNotesEditorWidth() int {
+	if settingsInstance != nil && settingsInstance.NotesApp.EditorWidth > 0 {
+		return settingsInstance.NotesApp.EditorWidth
+	}
+
+	data, err := os.ReadFile(fileName())
+	if err != nil {
+		return 0
+	}
+
+	var persisted struct {
+		NotesApp struct {
+			EditorWidth int `json:"editor_width"`
+		} `json:"notes_app"`
+	}
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		return 0
+	}
+	if persisted.NotesApp.EditorWidth > 0 {
+		return persisted.NotesApp.EditorWidth
+	}
+	return 0
 }
 
 func saveSettings(sync bool, notifyHooks bool) {

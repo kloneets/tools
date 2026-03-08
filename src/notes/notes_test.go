@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/helpers"
@@ -27,6 +28,17 @@ func requireGTK(t *testing.T) {
 	if !gtkInitOK {
 		t.Skip("GTK could not be initialized in this environment")
 	}
+}
+
+func countSidebarRows(sidebar *gtk.ListBox) int {
+	if sidebar == nil {
+		return 0
+	}
+	total := 0
+	for row := sidebar.RowAtIndex(0); row != nil; row = sidebar.RowAtIndex(total) {
+		total++
+	}
+	return total
 }
 
 func TestFileNameUsesHomeDirectory(t *testing.T) {
@@ -115,6 +127,80 @@ func TestGenerateUICreatesPreviewPane(t *testing.T) {
 	}
 }
 
+func TestGenerateUIUsesSavedEditorWidth(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.EditorWidth = 512
+
+	note := GenerateUI()
+	if len(note.tabs) != 1 {
+		t.Fatalf("GenerateUI() tabs = %d, want 1", len(note.tabs))
+	}
+	if got := note.tabs[0].paned.Position(); got != 512 {
+		t.Fatalf("editor paned position = %d, want 512", got)
+	}
+}
+
+func TestResolvedEditorWidthUsesEqualSplitWhenUnset(t *testing.T) {
+	if got := resolvedEditorWidth(0, 800); got != 400 {
+		t.Fatalf("resolvedEditorWidth(0, 800) = %d, want 400", got)
+	}
+	if got := resolvedEditorWidth(512, 800); got != 512 {
+		t.Fatalf("resolvedEditorWidth(512, 800) = %d, want 512", got)
+	}
+}
+
+func TestPersistEditorWidthUpdatesSettings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	persistEditorWidth(520)
+
+	if got := settings.Inst().NotesApp.EditorWidth; got != 520 {
+		t.Fatalf("NotesApp.EditorWidth = %d, want 520", got)
+	}
+}
+
+func TestShouldPersistEditorWidthSkipsBeforeRestore(t *testing.T) {
+	tab := &noteTab{}
+	if shouldPersistEditorWidth(tab, 492) {
+		t.Fatal("shouldPersistEditorWidth() should skip startup notifications before width restore")
+	}
+}
+
+func TestShouldPersistEditorWidthSkipsWhileApplying(t *testing.T) {
+	tab := &noteTab{widthRestored: true, widthPersistOK: true, applyingWidth: true}
+	if shouldPersistEditorWidth(tab, 492) {
+		t.Fatal("shouldPersistEditorWidth() should skip programmatic width changes")
+	}
+}
+
+func TestShouldPersistEditorWidthAllowsUserResizeAfterRestore(t *testing.T) {
+	tab := &noteTab{widthRestored: true, widthPersistOK: true}
+	if !shouldPersistEditorWidth(tab, 492) {
+		t.Fatal("shouldPersistEditorWidth() should allow persistence after width restore completes")
+	}
+}
+
+func TestEditorWidthForPersistenceIgnoresHiddenPreview(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	note.paned.SetPosition(9999)
+	child := note.paned.EndChild()
+	if child == nil {
+		t.Fatal("expected preview child")
+	}
+	gtk.BaseWidget(child).SetVisible(false)
+
+	if width, ok := editorWidthForPersistence(note.paned); ok || width != 0 {
+		t.Fatalf("editorWidthForPersistence() = (%d, %t), want (0, false)", width, ok)
+	}
+}
+
 func TestEnsureInitialNoteFilesMigratesLegacyNote(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -165,7 +251,11 @@ func TestCloseAndReopenNoteTabs(t *testing.T) {
 	}
 
 	note.refreshSidebar()
-	note.openSidebarRow(note.sidebar.RowAtIndex(0))
+	row := note.findSidebarTreePath(closedPath)
+	if row == nil {
+		t.Fatal("expected closed note path in sidebar tree")
+	}
+	note.activateSidebarPath(row)
 	if len(note.tabs) != 2 {
 		t.Fatalf("tabs after reopen = %d, want 2", len(note.tabs))
 	}
@@ -194,9 +284,6 @@ func TestRenameCurrentTabRenamesFileAndTab(t *testing.T) {
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Fatalf("old file should be gone, stat err = %v", err)
-	}
-	if note.renameEntry.Text() != "Project Notes" {
-		t.Fatalf("rename entry = %q, want Project Notes", note.renameEntry.Text())
 	}
 }
 
@@ -245,16 +332,14 @@ func TestSidebarSelectionOpensSecondNote(t *testing.T) {
 
 	note := GenerateUI()
 	note.newNote()
-	if note.sidebar.RowAtIndex(1) == nil {
-		t.Fatal("sidebar should list the second note")
+	notePath := note.tabs[1].path
+	row := note.findSidebarTreePath(notePath)
+	if row == nil {
+		t.Fatal("sidebar should contain the second note")
 	}
-
-	note.openSidebarRow(note.sidebar.RowAtIndex(1))
+	note.activateSidebarPath(row)
 	if note.currentTab != 1 {
 		t.Fatalf("current tab = %d, want 1", note.currentTab)
-	}
-	if note.renameEntry.Text() != note.activeTab().title {
-		t.Fatalf("rename entry = %q, want active title %q", note.renameEntry.Text(), note.activeTab().title)
 	}
 }
 
@@ -265,13 +350,543 @@ func TestSidebarToggleHidesPanel(t *testing.T) {
 
 	note := GenerateUI()
 	note.setSidebarVisible(false)
-	if gtk.BaseWidget(note.sidebarScroll).Visible() {
-		t.Fatal("sidebar should be hidden")
+	if gtk.BaseWidget(note.sidebarBox).Visible() {
+		t.Fatal("sidebar pane content should be hidden")
+	}
+	if !gtk.BaseWidget(note.sidebarToggle).Visible() {
+		t.Fatal("sidebar toggle should stay visible")
+	}
+	if got := note.sidebarPane.Position(); got != 0 {
+		t.Fatalf("hidden sidebar pane position = %d, want 0", got)
 	}
 	note.setSidebarVisible(true)
-	if !gtk.BaseWidget(note.sidebarScroll).Visible() {
-		t.Fatal("sidebar should be visible")
+	if !gtk.BaseWidget(note.sidebarBox).Visible() {
+		t.Fatal("sidebar pane content should be visible")
 	}
+	if got := note.sidebarPane.Position(); got != 260 {
+		t.Fatalf("shown sidebar pane position = %d, want 260", got)
+	}
+	if !gtk.BaseWidget(note.sidebarDragToggle).Visible() || !gtk.BaseWidget(note.sidebarNewNote).Visible() || !gtk.BaseWidget(note.sidebarNewFolder).Visible() {
+		t.Fatal("bottom controls should stay visible")
+	}
+}
+
+func TestSidebarBottomActionsOrderAndDragToggleIcon(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	parent := gtk.BaseWidget(note.sidebarToggle).Parent()
+	if parent == nil {
+		t.Fatal("sidebar toggle should be attached")
+	}
+	first := gtk.BaseWidget(parent).FirstChild()
+	if first == nil || glib.InternObject(first).Native() != glib.InternObject(note.sidebarToggle).Native() {
+		t.Fatal("hide sidebar toggle should be the first bottom action")
+	}
+	second := gtk.BaseWidget(first).NextSibling()
+	if second == nil || glib.InternObject(second).Native() != glib.InternObject(note.sidebarDragToggle).Native() {
+		t.Fatal("drag toggle should be the second bottom action")
+	}
+	label, ok := note.sidebarDragToggle.Child().(*gtk.Label)
+	if !ok {
+		t.Fatal("drag toggle should use a label icon")
+	}
+	if got := label.Text(); got != "↕" {
+		t.Fatalf("drag toggle label = %q, want %q", got, "↕")
+	}
+}
+
+func TestListNoteFilesIncludesNestedFolders(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Client"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	rootNote := filepath.Join(notesDir(), "Root.md")
+	nestedNote := filepath.Join(notesDir(), "Work", "Client", "Spec.md")
+	if err := os.WriteFile(rootNote, []byte("root"), 0o644); err != nil {
+		t.Fatalf("WriteFile(root) error = %v", err)
+	}
+	if err := os.WriteFile(nestedNote, []byte("nested"), 0o644); err != nil {
+		t.Fatalf("WriteFile(nested) error = %v", err)
+	}
+
+	files, err := listNoteFiles()
+	if err != nil {
+		t.Fatalf("listNoteFiles() error = %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("listNoteFiles() len = %d, want 2", len(files))
+	}
+	if files[1].Folder != filepath.Join("Work", "Client") {
+		t.Fatalf("nested file folder = %q, want %q", files[1].Folder, filepath.Join("Work", "Client"))
+	}
+}
+
+func TestCreateFolderAndNewNoteUseSelectedFolder(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	if err := note.createFolder("Work/Client"); err != nil {
+		t.Fatalf("createFolder() error = %v", err)
+	}
+	folderPath := filepath.Join(notesDir(), "Work", "Client")
+	if row := note.findSidebarTreePath(folderPath); row == nil {
+		t.Fatalf("sidebar should contain empty folder path %q", folderPath)
+	}
+	note.newNote()
+
+	if got := relativeNoteFolder(note.activeTab().path); got != filepath.Join("Work", "Client") {
+		t.Fatalf("active note folder = %q, want %q", got, filepath.Join("Work", "Client"))
+	}
+	if _, err := os.Stat(filepath.Join(notesDir(), "Work", "Client")); err != nil {
+		t.Fatalf("created folder stat error = %v", err)
+	}
+}
+
+func TestMoveCurrentNoteToFolderMovesFile(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	oldPath := note.activeTab().path
+	if err := note.moveCurrentNoteToFolder("Projects/Alpha"); err != nil {
+		t.Fatalf("moveCurrentNoteToFolder() error = %v", err)
+	}
+
+	newPath := filepath.Join(notesDir(), "Projects", "Alpha", "Note 1.md")
+	if note.activeTab().path != newPath {
+		t.Fatalf("active tab path = %q, want %q", note.activeTab().path, newPath)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("moved file stat error = %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old path should be gone, stat err = %v", err)
+	}
+}
+
+func TestSidebarFolderRowCollapsesAndExpandsChildren(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.refreshSidebar()
+	row := note.findSidebarTreePath(filepath.Join(notesDir(), "Work"))
+	if row == nil {
+		t.Fatal("expected Work folder entry in sidebar")
+	}
+	if note.sidebarCollapsed["Work"] {
+		t.Fatal("folder should be expanded by default")
+	}
+	note.activateSidebarPath(row)
+	if !note.sidebarCollapsed["Work"] {
+		t.Fatal("folder should collapse on activation")
+	}
+	row = note.findSidebarTreePath(filepath.Join(notesDir(), "Work"))
+	note.activateSidebarPath(row)
+	if note.sidebarCollapsed["Work"] {
+		t.Fatal("folder should expand on second activation")
+	}
+}
+
+func TestRenameSelectedFolderMovesFilesAndOpenTabs(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	oldPath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(oldPath, []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.openNotePath(oldPath)
+	note.selectedFolder = "Work"
+
+	if err := note.renameSelectedFolder("Projects/Work"); err != nil {
+		t.Fatalf("renameSelectedFolder() error = %v", err)
+	}
+
+	newPath := filepath.Join(notesDir(), "Projects", "Work", "Plan.md")
+	if note.activeTab().path != newPath {
+		t.Fatalf("active tab path = %q, want %q", note.activeTab().path, newPath)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("renamed folder file stat error = %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old file should be gone, stat err = %v", err)
+	}
+	if note.selectedFolder != filepath.Join("Projects", "Work") {
+		t.Fatalf("selectedFolder = %q, want %q", note.selectedFolder, filepath.Join("Projects", "Work"))
+	}
+}
+
+func TestDeleteFolderPathRemovesFolderAndClosesTabs(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Client"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	deletePath := filepath.Join(notesDir(), "Work", "Client", "Plan.md")
+	if err := os.WriteFile(deletePath, []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.openNotePath(deletePath)
+	if err := note.deleteFolderPath(filepath.Join(notesDir(), "Work")); err != nil {
+		t.Fatalf("deleteFolderPath() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(notesDir(), "Work")); !os.IsNotExist(err) {
+		t.Fatalf("folder should be removed, stat err = %v", err)
+	}
+	if note.pageForPath(deletePath) >= 0 {
+		t.Fatal("deleted folder note should not remain open")
+	}
+	if len(note.tabs) == 0 {
+		t.Fatal("workspace should still have at least one note open")
+	}
+}
+
+func TestDeleteSidebarContextItemDeletesFolderRowPath(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Client"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	folderPath := filepath.Join(notesDir(), "Work")
+	nestedNote := filepath.Join(notesDir(), "Work", "Client", "Plan.md")
+	if err := os.WriteFile(nestedNote, []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.sidebarMenuKind = sidebarEntryFolder
+	note.sidebarMenuPath = folderPath
+	if err := note.deleteSidebarContextItem(); err != nil {
+		t.Fatalf("deleteSidebarContextItem() error = %v", err)
+	}
+	if _, err := os.Stat(folderPath); !os.IsNotExist(err) {
+		t.Fatalf("folder should be removed, stat err = %v", err)
+	}
+}
+
+func TestMoveSidebarItemMovesFolderIntoTargetFolder(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Archive"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	oldPath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(oldPath, []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.openNotePath(oldPath)
+	if err := note.moveSidebarItem(sidebarEntryFolder, filepath.Join(notesDir(), "Work"), "Archive"); err != nil {
+		t.Fatalf("moveSidebarItem(folder) error = %v", err)
+	}
+
+	newPath := filepath.Join(notesDir(), "Archive", "Work", "Plan.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("moved folder file stat error = %v", err)
+	}
+	if note.pageForPath(newPath) < 0 {
+		t.Fatal("moved folder note should update open tab path")
+	}
+}
+
+func TestRenameSelectedFolderDoesNotDuplicateSidebarRows(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	oldPath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(oldPath, []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.openNotePath(oldPath)
+	note.selectedFolder = "Work"
+	if err := note.renameSelectedFolder("Projects/Work"); err != nil {
+		t.Fatalf("renameSelectedFolder() error = %v", err)
+	}
+
+	if got := countSidebarRows(note.sidebar); got != 3 {
+		t.Fatalf("sidebar row count = %d, want 3", got)
+	}
+	if oldTreePath := note.findSidebarTreePath(filepath.Join(notesDir(), "Work")); oldTreePath != nil {
+		t.Fatal("old folder path should not remain in sidebar")
+	}
+}
+
+func TestApplySidebarContextRenameRenamesNote(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	note.sidebarMenuKind = sidebarEntryNote
+	note.sidebarMenuPath = note.activeTab().path
+	note.sidebarMenuFolder = relativeNoteFolder(note.activeTab().path)
+	note.sidebarMenuEntry = gtk.NewEntry()
+	note.sidebarMenuEntry.SetText("Renamed From Menu")
+
+	if err := note.applySidebarContextRename(); err != nil {
+		t.Fatalf("applySidebarContextRename() error = %v", err)
+	}
+	if got := note.activeTab().title; got != "Renamed From Menu" {
+		t.Fatalf("active tab title = %q, want %q", got, "Renamed From Menu")
+	}
+}
+
+func TestSidebarContextMoveMovesNoteToFolder(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Archive"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	note := GenerateUI()
+	sourcePath := note.activeTab().path
+	note.sidebarMenuKind = sidebarEntryNote
+	note.sidebarMenuPath = sourcePath
+	note.sidebarMenuFolder = relativeNoteFolder(sourcePath)
+	note.sidebarMenuEntry = gtk.NewEntry()
+	note.sidebarMenuEntry.SetText("Archive")
+
+	if err := note.moveSidebarItem(note.sidebarMenuKind, note.sidebarMenuPath, sanitizeFolderPath(note.sidebarMenuEntry.Text())); err != nil {
+		t.Fatalf("moveSidebarItem() error = %v", err)
+	}
+	want := filepath.Join(notesDir(), "Archive", "Note 1.md")
+	if note.activeTab().path != want {
+		t.Fatalf("active tab path = %q, want %q", note.activeTab().path, want)
+	}
+}
+
+func TestSidebarContextMoveMovesNoteToRootFolder(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Archive"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	note := GenerateUI()
+	if err := note.moveCurrentNoteToFolder("Archive"); err != nil {
+		t.Fatalf("moveCurrentNoteToFolder() error = %v", err)
+	}
+	sourcePath := note.activeTab().path
+	note.sidebarMenuKind = sidebarEntryNote
+	note.sidebarMenuPath = sourcePath
+	note.sidebarMenuFolder = relativeNoteFolder(sourcePath)
+	note.sidebarMenuEntry = gtk.NewEntry()
+	note.sidebarMenuEntry.SetText("")
+
+	if err := note.moveSidebarItem(note.sidebarMenuKind, note.sidebarMenuPath, sanitizeFolderPath(note.sidebarMenuEntry.Text())); err != nil {
+		t.Fatalf("moveSidebarItem() error = %v", err)
+	}
+	want := filepath.Join(notesDir(), "Note 1.md")
+	if note.activeTab().path != want {
+		t.Fatalf("active tab path = %q, want %q", note.activeTab().path, want)
+	}
+}
+
+func TestShowSidebarRowMenuSetsRenamePlaceholder(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	row := note.findSidebarTreePath(note.activeTab().path)
+	if row == nil {
+		t.Fatal("expected note tree path")
+	}
+	note.showSidebarRowMenu(note.activeTab().path, sidebarEntryNote, "", row)
+	if got := note.sidebarMenuEntry.PlaceholderText(); got != "Note name" {
+		t.Fatalf("placeholder = %q, want %q", got, "Note name")
+	}
+}
+
+func TestNewNoteNamedInFolderCreatesNamedNote(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	if err := note.newNoteNamedInFolder("Work", "Ideas"); err != nil {
+		t.Fatalf("newNoteNamedInFolder() error = %v", err)
+	}
+
+	want := filepath.Join(notesDir(), "Work", "Ideas.md")
+	if note.activeTab().path != want {
+		t.Fatalf("active tab path = %q, want %q", note.activeTab().path, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("created note stat error = %v", err)
+	}
+}
+
+func TestSubmitSidebarCreateCreatesFolderAndNote(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	note.sidebarCreateEntry = gtk.NewEntry()
+	note.sidebarCreateMode = sidebarEntryFolder
+	note.sidebarCreateFolder = "Work"
+	note.sidebarCreateEntry.SetText("Client")
+	if err := note.submitSidebarCreate(); err != nil {
+		t.Fatalf("submitSidebarCreate(folder) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(notesDir(), "Work", "Client")); err != nil {
+		t.Fatalf("created folder stat error = %v", err)
+	}
+
+	note.sidebarCreateMode = sidebarEntryNote
+	note.sidebarCreateFolder = filepath.Join("Work", "Client")
+	note.sidebarCreateEntry.SetText("Plan")
+	if err := note.submitSidebarCreate(); err != nil {
+		t.Fatalf("submitSidebarCreate(note) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(notesDir(), "Work", "Client", "Plan.md")); err != nil {
+		t.Fatalf("created note stat error = %v", err)
+	}
+}
+
+func TestFolderRowsUseAddIcon(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	note := GenerateUI()
+	row := note.findSidebarTreePath(filepath.Join(notesDir(), "Work"))
+	if row == nil {
+		t.Fatal("expected folder tree path")
+	}
+	button := note.sidebarActionButtons[sidebarEntryKey(sidebarEntryFolder, filepath.Join(notesDir(), "Work"))]
+	if button == nil {
+		t.Fatal("expected folder action button")
+	}
+	child := button.Child()
+	image, ok := child.(*gtk.Image)
+	if !ok {
+		t.Fatal("expected folder action child image")
+	}
+	if got := image.IconName(); got != "list-add-symbolic" {
+		t.Fatalf("folder action icon = %q, want %q", got, "list-add-symbolic")
+	}
+}
+
+func TestSidebarDragHintSupportsFolderAndRootTargets(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.sidebarDragActive = true
+	folderTarget := sidebarDropTarget{
+		Folder: filepath.Join("Work"),
+		Anchor: sidebarEntryKey(sidebarEntryFolder, filepath.Join(notesDir(), "Work")),
+	}
+	note.setSidebarDragTarget(folderTarget)
+	if !gtk.BaseWidget(note.sidebarDropHint).Visible() {
+		t.Fatal("drop hint should be visible during drag")
+	}
+	if got := note.sidebarDropHint.Text(); got != "Drop into Work" {
+		t.Fatalf("folder hint label = %q, want %q", got, "Drop into Work")
+	}
+
+	note.setSidebarDragTarget(sidebarDropTarget{Root: true})
+	if got := note.sidebarDropHint.Text(); got != "Drop into root" {
+		t.Fatalf("root hint label = %q, want %q", got, "Drop into root")
+	}
+}
+
+func TestSidebarUsesResizablePane(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	if note.sidebarPane == nil {
+		t.Fatal("notes workspace should create a resizable sidebar pane")
+	}
+	if got := note.sidebarPane.Position(); got != 260 {
+		t.Fatalf("sidebar pane position = %d, want 260", got)
+	}
+}
+
+func TestQueueSidebarDragRequiresActiveDragMode(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	entry := sidebarEntry{
+		Kind:   sidebarEntryNote,
+		Path:   note.activeTab().path,
+		Folder: relativeNoteFolder(note.activeTab().path),
+	}
+	note.queueSidebarDrag(entry)
+	if note.sidebarDragPending {
+		t.Fatal("drag should not queue while drag mode is disabled")
+	}
+
+	note.sidebarDragToggle.SetActive(true)
+	note.queueSidebarDrag(entry)
+	if !note.sidebarDragPending {
+		t.Fatal("drag should queue while drag mode is enabled")
+	}
+	note.cancelPendingSidebarDrag()
 }
 
 func TestWorkspaceToolbarButtonSupportsGlyphFallback(t *testing.T) {
@@ -283,6 +898,17 @@ func TestWorkspaceToolbarButtonSupportsGlyphFallback(t *testing.T) {
 	}
 	if button.TooltipText() != "Heading 3" {
 		t.Fatalf("tooltip = %q, want Heading 3", button.TooltipText())
+	}
+}
+
+func TestSidebarTargetFolderUsesFolderRowsAndNoteParent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if got := sidebarTargetFolder(sidebarEntryFolder, filepath.Join("/tmp", "notes", "Work"), filepath.Join("Work")); got != filepath.Join("Work") {
+		t.Fatalf("folder target = %q, want %q", got, filepath.Join("Work"))
+	}
+	if got := sidebarTargetFolder(sidebarEntryNote, notePath, filepath.Join("Work")); got != filepath.Join("Work") {
+		t.Fatalf("note target = %q, want %q", got, filepath.Join("Work"))
 	}
 }
 

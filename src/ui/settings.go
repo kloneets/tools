@@ -8,6 +8,7 @@ import (
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/gdrive"
+	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
 )
 
@@ -266,7 +267,7 @@ func (s *Settings) startDriveAuthorization(window *gtk.Window) {
 	s.authLink.SetURI(url)
 	s.authLink.SetVisible(true)
 	s.setStatus("Browser opened. Finish Google authorization and return to the app.")
-	gtk.ShowURI(nil, url, 0)
+	helpers.OpenURI(url)
 
 	go func() {
 		err := <-session.Wait()
