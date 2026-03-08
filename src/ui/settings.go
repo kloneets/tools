@@ -15,6 +15,10 @@ import (
 type Settings struct {
 	SettingsButton       *gtk.Button
 	window               *gtk.Window
+	showPages            *gtk.CheckButton
+	showPassword         *gtk.CheckButton
+	showNotes            *gtk.CheckButton
+	resetWidgetsButton   *gtk.Button
 	noteTabSpaces        *gtk.SpinButton
 	noteVimMode          *gtk.CheckButton
 	noteEditorMono       *gtk.CheckButton
@@ -65,6 +69,7 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 	settingsFrame.SetMarginStart(DefaultMasterPadding)
 	settingsFrame.SetMarginEnd(DefaultMasterPadding)
 
+	s.WidgetSettings(settingsFrame)
 	s.NotesSettings(settingsFrame)
 	s.GDriveSettings(window, settingsFrame)
 
@@ -251,6 +256,33 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	placeholder.Append(frame)
 }
 
+func (s *Settings) WidgetSettings(placeholder *gtk.Box) {
+	current := settings.Inst().UI
+
+	s.showPages = gtk.NewCheckButtonWithLabel("Show Pages")
+	s.showPages.SetActive(current.ShowPages)
+	s.showPassword = gtk.NewCheckButtonWithLabel("Show Password generator")
+	s.showPassword.SetActive(current.ShowPassword)
+	s.showNotes = gtk.NewCheckButtonWithLabel("Show Notes")
+	s.showNotes.SetActive(current.ShowNotes)
+	s.resetWidgetsButton = gtk.NewButtonWithLabel("Reset visible widgets")
+	s.resetWidgetsButton.ConnectClicked(func() {
+		s.showPages.SetActive(true)
+		s.showPassword.SetActive(true)
+		s.showNotes.SetActive(true)
+	})
+
+	content := MainArea()
+	content.Append(s.showPages)
+	content.Append(s.showPassword)
+	content.Append(s.showNotes)
+	content.Append(s.resetWidgetsButton)
+
+	frame := Frame("Visible widgets")
+	frame.SetChild(content)
+	placeholder.Append(frame)
+}
+
 func (s *Settings) startDriveAuthorization(window *gtk.Window) {
 	if s.authSession != nil {
 		s.setStatus("Authorization is already in progress.")
@@ -351,6 +383,15 @@ func (s *Settings) updateLastSyncLabel(current *settings.GDriveSettings) {
 }
 
 func (s *Settings) applyFormToSettings() {
+	if s.showPages != nil {
+		settings.Inst().UI.ShowPages = s.showPages.Active()
+	}
+	if s.showPassword != nil {
+		settings.Inst().UI.ShowPassword = s.showPassword.Active()
+	}
+	if s.showNotes != nil {
+		settings.Inst().UI.ShowNotes = s.showNotes.Active()
+	}
 	if s.noteTabSpaces != nil {
 		settings.Inst().NotesApp.TabSpaces = s.noteTabSpaces.ValueAsInt()
 	}

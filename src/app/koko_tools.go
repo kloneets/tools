@@ -24,8 +24,11 @@ import (
 
 type kokoTools struct {
 	*gtk.Application
-	appWindow *gtk.ApplicationWindow
-	// pages  *pages.KokoPages
+	appWindow     *gtk.ApplicationWindow
+	pagesFrame    *gtk.Frame
+	passwordFrame *gtk.Frame
+	notesFrame    *gtk.Frame
+	leftColumn    *gtk.Box
 }
 
 //go:embed menu.ui
@@ -84,9 +87,13 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	page := pages.PageUi()
 	passw := password.GenerateUI()
 	note := notes.GenerateUI()
+	tools.pagesFrame = page.F
+	tools.passwordFrame = passw.F
+	tools.notesFrame = note.F
 
 	upperLeftWrapper := ui.ToolsWrapper(page.F, ui.DefaultBoxPadding)
 	upperLeftWrapper.Append(note.F)
+	tools.leftColumn = upperLeftWrapper
 
 	upper := gtk.NewBox(gtk.OrientationHorizontal, 2)
 	upper.SetHExpand(true)
@@ -101,8 +108,32 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	mainWrap.Append(helpers.StatusBarInst().B)
 
 	tools.appWindow.SetChild(mainWrap)
+	tools.applyWidgetVisibility(settings.Inst())
+	settings.RegisterSaveHook(func(cfg *settings.UserSettings) {
+		glib.IdleAdd(func() {
+			tools.applyWidgetVisibility(cfg)
+		})
+	})
 
 	return &tools
+}
+
+func (t *kokoTools) applyWidgetVisibility(cfg *settings.UserSettings) {
+	if t == nil || cfg == nil || cfg.UI == nil {
+		return
+	}
+	if t.pagesFrame != nil {
+		gtk.BaseWidget(t.pagesFrame).SetVisible(cfg.UI.ShowPages)
+	}
+	if t.passwordFrame != nil {
+		gtk.BaseWidget(t.passwordFrame).SetVisible(cfg.UI.ShowPassword)
+	}
+	if t.notesFrame != nil {
+		gtk.BaseWidget(t.notesFrame).SetVisible(cfg.UI.ShowNotes)
+	}
+	if t.leftColumn != nil {
+		gtk.BaseWidget(t.leftColumn).SetVisible(cfg.UI.ShowPages || cfg.UI.ShowNotes)
+	}
 }
 
 func makeConfigDirIfNotExists() {

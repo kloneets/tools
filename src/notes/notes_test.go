@@ -371,6 +371,24 @@ func TestSidebarToggleHidesPanel(t *testing.T) {
 	}
 }
 
+func TestSidebarTogglePersistsVisibility(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	note.sidebarToggle.SetActive(false)
+
+	if settings.Inst().NotesApp.SidebarVisible {
+		t.Fatal("sidebar visibility should persist as hidden after toggle")
+	}
+
+	note.sidebarToggle.SetActive(true)
+	if !settings.Inst().NotesApp.SidebarVisible {
+		t.Fatal("sidebar visibility should persist as visible after toggle")
+	}
+}
+
 func TestSidebarBottomActionsOrderAndDragToggleIcon(t *testing.T) {
 	requireGTK(t)
 	t.Setenv("HOME", t.TempDir())

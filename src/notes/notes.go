@@ -173,6 +173,7 @@ func (n *Note) refreshFromSettings() {
 	if n == nil {
 		return
 	}
+	n.applySidebarVisibility(settings.Inst().NotesApp.SidebarVisible)
 	if len(n.tabs) > 0 {
 		n.persistActiveTabState()
 		for _, tab := range n.tabs {

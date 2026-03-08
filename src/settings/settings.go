@@ -18,6 +18,7 @@ type UserSettings struct {
 	PasswordApp PasswordAppSettings `json:"password_app"`
 	PagesApp    PagesAppSettings    `json:"pages_app"`
 	NotesApp    NotesAppSettings    `json:"notes_app"`
+	UI          *UISettings         `json:"ui"`
 	GDrive      *GDriveSettings     `json:"gdrive"`
 }
 
@@ -37,11 +38,35 @@ type PasswordAppSettings struct {
 type NotesAppSettings struct {
 	TabSpaces       int    `json:"tab_spaces"`
 	EditorWidth     int    `json:"editor_width,omitempty"`
+	SidebarVisible  bool   `json:"sidebar_visible"`
 	BodyFont        string `json:"body_font"`
 	MonospaceFont   string `json:"monospace_font"`
 	EditorMonospace bool   `json:"editor_monospace"`
 	PreviewTheme    string `json:"preview_theme"`
 	VimMode         bool   `json:"vim_mode"`
+}
+
+func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
+	type notesAppAlias NotesAppSettings
+	aux := struct {
+		SidebarVisible *bool `json:"sidebar_visible"`
+		*notesAppAlias
+	}{
+		notesAppAlias: (*notesAppAlias)(n),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.SidebarVisible == nil {
+		n.SidebarVisible = true
+	}
+	return nil
+}
+
+type UISettings struct {
+	ShowPages    bool `json:"show_pages"`
+	ShowPassword bool `json:"show_password"`
+	ShowNotes    bool `json:"show_notes"`
 }
 
 type GDriveSettings struct {
@@ -122,17 +147,27 @@ func defaultSettings() *UserSettings {
 			ReadPages:       0,
 		},
 		NotesApp: NotesAppSettings{
-			TabSpaces:     4,
-			BodyFont:      "Cantarell 11",
-			MonospaceFont: "Noto Sans Mono 11",
-			PreviewTheme:  "ide-dark",
+			TabSpaces:      4,
+			SidebarVisible: true,
+			BodyFont:       "Cantarell 11",
+			MonospaceFont:  "Noto Sans Mono 11",
+			PreviewTheme:   "ide-dark",
 		},
+		UI:     defaultUISettings(),
 		GDrive: defaultGDriveSettings(),
 	}
 }
 
 func defaultGDriveSettings() *GDriveSettings {
 	return &GDriveSettings{}
+}
+
+func defaultUISettings() *UISettings {
+	return &UISettings{
+		ShowPages:    true,
+		ShowPassword: true,
+		ShowNotes:    true,
+	}
 }
 
 func normalizeSettings(s *UserSettings) {
@@ -142,8 +177,14 @@ func normalizeSettings(s *UserSettings) {
 	if s.GDrive == nil {
 		s.GDrive = defaultGDriveSettings()
 	}
+	if s.UI == nil {
+		s.UI = defaultUISettings()
+	}
 	if s.NotesApp.TabSpaces <= 0 {
 		s.NotesApp.TabSpaces = 4
+	}
+	if s.NotesApp.BodyFont == "" && s.NotesApp.MonospaceFont == "" && s.NotesApp.PreviewTheme == "" && !s.NotesApp.VimMode && !s.NotesApp.EditorMonospace && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
+		s.NotesApp.SidebarVisible = true
 	}
 	if s.NotesApp.BodyFont == "" {
 		s.NotesApp.BodyFont = "Cantarell 11"

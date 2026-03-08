@@ -43,8 +43,17 @@ func TestDefaultSettings(t *testing.T) {
 	if got.NotesApp.VimMode {
 		t.Fatal("NotesApp.VimMode = true, want false by default")
 	}
+	if !got.NotesApp.SidebarVisible {
+		t.Fatal("NotesApp.SidebarVisible = false, want true by default")
+	}
 	if got.GDrive == nil {
 		t.Fatal("expected default GDrive settings to be initialized")
+	}
+	if got.UI == nil {
+		t.Fatal("expected default UI settings to be initialized")
+	}
+	if !got.UI.ShowPages || !got.UI.ShowPassword || !got.UI.ShowNotes {
+		t.Fatalf("unexpected widget visibility defaults: %#v", got.UI)
 	}
 }
 
@@ -118,6 +127,12 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.GDrive == nil {
 		t.Fatal("normalizeSettings() should initialize GDrive")
 	}
+	if config.UI == nil {
+		t.Fatal("normalizeSettings() should initialize UI settings")
+	}
+	if !config.UI.ShowPages || !config.UI.ShowPassword || !config.UI.ShowNotes {
+		t.Fatalf("normalizeSettings() should default all widgets visible, got %#v", config.UI)
+	}
 	if config.NotesApp.TabSpaces != 4 {
 		t.Fatalf("normalizeSettings() NotesApp.TabSpaces = %d, want 4", config.NotesApp.TabSpaces)
 	}
@@ -138,6 +153,9 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	}
 	if config.NotesApp.VimMode {
 		t.Fatal("normalizeSettings() should leave VimMode disabled by default")
+	}
+	if !config.NotesApp.SidebarVisible {
+		t.Fatal("normalizeSettings() should default sidebar visible")
 	}
 
 	config.NotesApp.PreviewTheme = "neon-burst"
@@ -255,6 +273,27 @@ func TestPersistedNotesEditorWidthReadsFromDisk(t *testing.T) {
 
 	if got := PersistedNotesEditorWidth(); got != 377 {
 		t.Fatalf("PersistedNotesEditorWidth() = %d, want 377", got)
+	}
+}
+
+func TestInitOldSettingsDefaultsSidebarVisible(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsInstance = nil
+
+	dir := filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	data := `{"notes_app":{"tab_spaces":2}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(data), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	Init()
+
+	if !settingsInstance.NotesApp.SidebarVisible {
+		t.Fatal("old settings should default notes sidebar to visible")
 	}
 }
 

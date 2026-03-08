@@ -89,10 +89,12 @@ func (n *Note) buildWorkspace() {
 
 	n.sidebarToggle = gtk.NewToggleButton()
 	n.sidebarToggle.SetIconName("sidebar-show-symbolic")
-	n.sidebarToggle.SetActive(true)
+	n.sidebarToggle.SetActive(settings.Inst().NotesApp.SidebarVisible)
 	n.sidebarToggle.SetTooltipText("Show or hide notes sidebar")
 	n.sidebarToggle.ConnectToggled(func() {
 		n.setSidebarVisible(n.sidebarToggle.Active())
+		settings.Inst().NotesApp.SidebarVisible = n.sidebarToggle.Active()
+		settings.SaveSettings()
 	})
 
 	n.sidebarDragToggle = gtk.NewToggleButton()
@@ -184,6 +186,7 @@ func (n *Note) buildWorkspace() {
 	n.F.SetHExpand(true)
 	n.F.SetVExpand(true)
 	n.F.SetChild(mainArea)
+	n.applySidebarVisibility(settings.Inst().NotesApp.SidebarVisible)
 }
 
 func (n *Note) openInitialTabs() {
@@ -872,6 +875,17 @@ func (n *Note) sidebarFolderExpandIcon(folder string) string {
 }
 
 func (n *Note) setSidebarVisible(visible bool) {
+	if n.sidebarBox == nil || n.sidebarPane == nil {
+		return
+	}
+	if n.sidebarToggle != nil && n.sidebarToggle.Active() != visible {
+		n.sidebarToggle.SetActive(visible)
+		return
+	}
+	n.applySidebarVisibility(visible)
+}
+
+func (n *Note) applySidebarVisibility(visible bool) {
 	if n.sidebarBox == nil || n.sidebarPane == nil {
 		return
 	}
