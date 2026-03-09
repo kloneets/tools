@@ -92,6 +92,23 @@ func TestConfigureMarkdownTagsSetsDeterministicPriorityOrder(t *testing.T) {
 	}
 }
 
+func TestConfigureMarkdownTagsDoesNotIndentCodeBlocks(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	buffer := gtk.NewTextBuffer(nil)
+	configureMarkdownTags(buffer, currentAppearance(), true)
+
+	tag := buffer.TagTable().Lookup(tagCodeBlock)
+	if tag == nil {
+		t.Fatal("missing code block tag")
+	}
+	if got, ok := tag.ObjectProperty("left-margin").(int); !ok || got != 0 {
+		t.Fatalf("code block left-margin = %#v, want 0", tag.ObjectProperty("left-margin"))
+	}
+}
+
 func TestCurrentAppearanceUsesMonospaceEditorWhenEnabled(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()

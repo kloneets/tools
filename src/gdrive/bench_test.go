@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-func BenchmarkSyncablePaths(b *testing.B) {
-	dir := b.TempDir()
+func BenchmarkScanLocalNotesTree(b *testing.B) {
+	root := filepath.Join(b.TempDir(), "notes")
 	for i := 0; i < 200; i++ {
-		name := filepath.Join(dir, "notes", "note-"+string(rune('a'+(i%26)))+"-"+filepath.Base(filepath.Clean(filepath.Join("x", ".."))))
+		name := filepath.Join(root, "note-"+string(rune('a'+(i%26)))+"-"+filepath.Base(filepath.Clean(filepath.Join("x", ".."))))
 		_ = name
 	}
 	for i := 0; i < 100; i++ {
-		path := filepath.Join(dir, "notes", "note-"+itoa(i)+".md")
+		path := filepath.Join(root, "note-"+itoa(i)+".md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			b.Fatalf("MkdirAll() error = %v", err)
 		}
@@ -22,25 +22,16 @@ func BenchmarkSyncablePaths(b *testing.B) {
 			b.Fatalf("WriteFile(%q) error = %v", path, err)
 		}
 	}
-	for i := 0; i < 30; i++ {
-		path := filepath.Join(dir, "root-"+itoa(i)+".json")
-		if err := os.WriteFile(path, []byte("cfg"), 0o644); err != nil {
-			b.Fatalf("WriteFile(%q) error = %v", path, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, filepath.Base(TokenPath())), []byte("token"), 0o644); err != nil {
-		b.Fatalf("WriteFile(token) error = %v", err)
-	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		paths, err := syncablePaths(dir)
+		dirs, files, err := scanLocalNotesTree(root)
 		if err != nil {
-			b.Fatalf("syncablePaths() error = %v", err)
+			b.Fatalf("scanLocalNotesTree() error = %v", err)
 		}
-		if len(paths) == 0 {
-			b.Fatal("syncablePaths() returned no paths")
+		if len(dirs) == 0 && len(files) == 0 {
+			b.Fatal("scanLocalNotesTree() returned no entries")
 		}
 	}
 }

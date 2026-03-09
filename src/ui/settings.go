@@ -3,10 +3,12 @@ package ui
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
+	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/kloneets/tools/src/gdrive"
@@ -16,7 +18,8 @@ import (
 
 type Settings struct {
 	SettingsButton       *gtk.Button
-	window               *gtk.Window
+	panelBackdrop        *gtk.Box
+	panelContainer       *gtk.Box
 	showPages            *gtk.CheckButton
 	showPassword         *gtk.CheckButton
 	showNotes            *gtk.CheckButton
@@ -29,6 +32,7 @@ type Settings struct {
 	noteMonoFontSelect   *gtk.FontButton
 	noteThemeSelect      *gtk.ComboBoxText
 	enableDriveSync      *gtk.CheckButton
+	driveSyncInterval    *gtk.SpinButton
 	connectButton        *gtk.Button
 	refreshFoldersButton *gtk.Button
 	syncNowButton        *gtk.Button
@@ -36,6 +40,8 @@ type Settings struct {
 	authLink             *gtk.LinkButton
 	statusLabel          *gtk.Label
 	lastSyncLabel        *gtk.Label
+	trashList            *gtk.ListBox
+	cleanTrashButton     *gtk.Button
 	searchEntry          *gtk.Entry
 	newFolderEntry       *gtk.Entry
 	folderSelect         *gtk.ComboBoxText
@@ -58,14 +64,24 @@ func (pm *PopoverMenu) NewSettings() *Settings {
 }
 
 func (s *Settings) SettingsWindow(pm *PopoverMenu) {
-	if s.window != nil {
-		s.window.Present()
+	if s.panelContainer != nil {
 		pm.Popover.Hide()
 		return
 	}
 
-	window := newSettingsWindow(mainWindowFromPopover(pm))
-	s.window = window
+	parentWindow := mainWindowFromPopover(pm)
+	overlay := settingsOverlay()
+	if overlay == nil {
+		return
+	}
+
+	backdrop, panel := s.buildSettingsOverlay(parentWindow)
+	s.panelBackdrop = backdrop
+	s.panelContainer = panel
+	overlay.AddOverlay(backdrop)
+	overlay.SetMeasureOverlay(backdrop, false)
+	overlay.AddOverlay(panel)
+	overlay.SetMeasureOverlay(panel, false)
 
 	settingsFrame := MainArea()
 	settingsFrame.SetMarginTop(DefaultMasterPadding)
@@ -74,7 +90,8 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 
 	s.WidgetSettings(settingsFrame)
 	s.NotesSettings(settingsFrame)
-	s.GDriveSettings(window, settingsFrame)
+	s.GDriveSettings(parentWindow, settingsFrame)
+	s.TrashSettings(settingsFrame)
 
 	saveButton := gtk.NewButtonWithLabel("Save")
 	saveButton.ConnectClicked(func() {
@@ -82,12 +99,12 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 			s.setStatus(err.Error())
 			return
 		}
-		window.Close()
+		s.closeSettingsOverlay()
 	})
 
 	cancelButton := gtk.NewButtonWithLabel("Cancel")
 	cancelButton.ConnectClicked(func() {
-		window.Close()
+		s.closeSettingsOverlay()
 	})
 
 	buttonRow := gtk.NewBox(gtk.OrientationHorizontal, DefaultMasterPadding)
@@ -104,19 +121,72 @@ func (s *Settings) SettingsWindow(pm *PopoverMenu) {
 	content.Append(settingsFrame)
 	content.Append(buttonRow)
 
-	window.SetChild(content)
-	window.ConnectCloseRequest(func() bool {
-		if s.authSession != nil {
-			_ = s.authSession.Close()
-			s.authSession = nil
-		}
-		s.window = nil
-		window.Destroy()
-		return false
-	})
-
-	window.Present()
+	scroll := gtk.NewScrolledWindow()
+	scroll.SetHExpand(true)
+	scroll.SetVExpand(true)
+	scroll.SetChild(content)
+	panel.Append(scroll)
 	pm.Popover.Hide()
+}
+
+func (s *Settings) buildSettingsOverlay(parentWindow *gtk.Window) (*gtk.Box, *gtk.Box) {
+	backdrop := gtk.NewBox(gtk.OrientationVertical, 0)
+	backdrop.SetHExpand(true)
+	backdrop.SetVExpand(true)
+	backdrop.SetHAlign(gtk.AlignFill)
+	backdrop.SetVAlign(gtk.AlignFill)
+	backdrop.AddCSSClass("view")
+
+	dismiss := gtk.NewGestureClick()
+	dismiss.SetButton(1)
+	dismiss.ConnectPressed(func(_ int, _ float64, _ float64) {
+		s.closeSettingsOverlay()
+	})
+	gtk.BaseWidget(backdrop).AddController(dismiss)
+
+	panel := gtk.NewBox(gtk.OrientationVertical, 0)
+	panel.SetHAlign(gtk.AlignCenter)
+	panel.SetVAlign(gtk.AlignCenter)
+	panel.SetHExpand(true)
+	panel.SetVExpand(true)
+	panel.SetMarginTop(DefaultMasterPadding * 2)
+	panel.SetMarginBottom(DefaultMasterPadding * 2)
+	panel.SetMarginStart(DefaultMasterPadding * 2)
+	panel.SetMarginEnd(DefaultMasterPadding * 2)
+	panel.SetSizeRequest(920, 640)
+	panel.AddCSSClass("card")
+
+	header := gtk.NewHeaderBar()
+	header.SetShowTitleButtons(false)
+	header.SetTitleWidget(gtk.NewLabel("Settings"))
+	closeButton := IconButton("window-close-symbolic", "Close settings")
+	closeButton.ConnectClicked(func() {
+		s.closeSettingsOverlay()
+	})
+	header.PackEnd(closeButton)
+	panel.Append(header)
+
+	return backdrop, panel
+}
+
+func (s *Settings) closeSettingsOverlay() {
+	if s.authSession != nil {
+		_ = s.authSession.Close()
+		s.authSession = nil
+	}
+
+	overlay := settingsOverlay()
+	if overlay != nil {
+		if s.panelBackdrop != nil {
+			overlay.RemoveOverlay(s.panelBackdrop)
+		}
+		if s.panelContainer != nil {
+			overlay.RemoveOverlay(s.panelContainer)
+		}
+	}
+
+	s.panelBackdrop = nil
+	s.panelContainer = nil
 }
 
 func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
@@ -125,6 +195,8 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 
 	s.enableDriveSync = gtk.NewCheckButtonWithLabel("Enable Google Drive sync")
 	s.enableDriveSync.SetActive(current.Enabled)
+	s.driveSyncInterval = gtk.NewSpinButtonWithRange(1, 3600, 1)
+	s.driveSyncInterval.SetValue(float64(current.SyncIntervalSec))
 
 	s.connectButton = gtk.NewButtonWithLabel("Connect Google Drive")
 	s.connectButton.ConnectClicked(func() {
@@ -192,6 +264,9 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 
 	content := MainArea()
 	content.Append(s.enableDriveSync)
+	intervalRow := FieldWrapper(SectionLabel("Sync interval (seconds)"), DefaultBoxPadding)
+	intervalRow.Append(s.driveSyncInterval)
+	content.Append(intervalRow)
 	content.Append(credentialsLabel)
 	content.Append(s.authLink)
 	content.Append(connectionRow)
@@ -250,6 +325,139 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	frame := Frame("Notes")
 	frame.SetChild(content)
 	placeholder.Append(frame)
+}
+
+func (s *Settings) TrashSettings(placeholder *gtk.Box) {
+	s.trashList = gtk.NewListBox()
+	s.trashList.SetSelectionMode(gtk.SelectionNone)
+	s.cleanTrashButton = gtk.NewButtonWithLabel("Clean trash")
+	s.cleanTrashButton.ConnectClicked(func() {
+		if err := settings.CleanTrash(); err != nil {
+			s.setStatus("Trash clean failed: " + err.Error())
+			return
+		}
+		s.reloadTrashItems()
+		s.setStatus("Trash cleaned.")
+	})
+
+	header := FieldWrapper(SectionLabel("Trash"), DefaultBoxPadding)
+	header.Append(InfoLabel("Right-click a trash item to restore it."))
+	header.Append(s.cleanTrashButton)
+
+	content := MainArea()
+	content.Append(header)
+	content.Append(s.trashList)
+
+	frame := Frame("Notes trash")
+	frame.SetChild(content)
+	placeholder.Append(frame)
+
+	s.reloadTrashItems()
+}
+
+func (s *Settings) reloadTrashItems() {
+	if s.trashList == nil {
+		return
+	}
+
+	for child := s.trashList.FirstChild(); child != nil; {
+		next := gtk.BaseWidget(child).NextSibling()
+		s.trashList.Remove(child)
+		child = next
+	}
+
+	items, err := settings.ListTrashItems()
+	if err != nil {
+		row := gtk.NewListBoxRow()
+		row.SetChild(InfoLabel("Could not load trash: " + err.Error()))
+		s.trashList.Append(row)
+		return
+	}
+	if len(items) == 0 {
+		row := gtk.NewListBoxRow()
+		row.SetChild(InfoLabel("Trash is empty."))
+		s.trashList.Append(row)
+		return
+	}
+
+	for _, item := range items {
+		s.trashList.Append(s.trashListRow(item))
+	}
+}
+
+func (s *Settings) trashListRow(item settings.TrashItem) *gtk.ListBoxRow {
+	row := gtk.NewListBoxRow()
+
+	pathLabel := gtk.NewLabel(filepath.ToSlash(item.RelPath))
+	pathLabel.SetXAlign(0)
+	pathLabel.SetSelectable(true)
+
+	kind := "Note"
+	if item.IsDir {
+		kind = "Folder"
+	}
+	kindLabel := InfoLabel(kind)
+
+	box := gtk.NewBox(gtk.OrientationHorizontal, DefaultBoxPadding)
+	box.SetMarginTop(DefaultBoxPadding)
+	box.SetMarginBottom(DefaultBoxPadding)
+	box.SetMarginStart(DefaultBoxPadding)
+	box.SetMarginEnd(DefaultBoxPadding)
+	box.Append(pathLabel)
+	box.Append(kindLabel)
+	row.SetChild(box)
+
+	popover := s.trashRestorePopover(row, item)
+	click := gtk.NewGestureClick()
+	click.SetButton(3)
+	click.ConnectPressed(func(_ int, x, y float64) {
+		rect := &gdk.Rectangle{}
+		rect.SetX(int(x))
+		rect.SetY(int(y))
+		rect.SetWidth(1)
+		rect.SetHeight(1)
+		popover.SetPointingTo(rect)
+		if canPopupSettingsPopover(row) {
+			popover.Popup()
+		}
+	})
+	gtk.BaseWidget(row).AddController(click)
+
+	return row
+}
+
+func (s *Settings) trashRestorePopover(parent gtk.Widgetter, item settings.TrashItem) *gtk.Popover {
+	popover := gtk.NewPopover()
+	popover.SetHasArrow(true)
+	popover.SetAutohide(true)
+	popover.SetParent(parent)
+
+	restoreButton := gtk.NewButtonWithLabel("Restore")
+	restoreButton.ConnectClicked(func() {
+		target, err := settings.RestoreTrashItem(item.Path)
+		if err != nil {
+			s.setStatus("Restore failed: " + err.Error())
+			return
+		}
+		popover.Popdown()
+		s.reloadTrashItems()
+		relPath, relErr := filepath.Rel(settings.NotesRootDir(), target)
+		if relErr != nil {
+			s.setStatus("Restored from trash: " + filepath.Base(target))
+			return
+		}
+		s.setStatus("Restored from trash: " + filepath.ToSlash(relPath))
+	})
+
+	box := gtk.NewBox(gtk.OrientationVertical, DefaultBoxPadding)
+	box.SetMarginTop(DefaultBoxPadding)
+	box.SetMarginBottom(DefaultBoxPadding)
+	box.SetMarginStart(DefaultBoxPadding)
+	box.SetMarginEnd(DefaultBoxPadding)
+	box.Append(InfoLabel(filepath.ToSlash(item.RelPath)))
+	box.Append(restoreButton)
+	popover.SetChild(box)
+	return popover
 }
 
 func (s *Settings) WidgetSettings(placeholder *gtk.Box) {
@@ -412,6 +620,9 @@ func (s *Settings) applyFormToSettings() {
 
 	g := settings.Inst().GDrive
 	g.Enabled = s.enableDriveSync.Active()
+	if s.driveSyncInterval != nil {
+		g.SyncIntervalSec = s.driveSyncInterval.ValueAsInt()
+	}
 
 	selectedID := s.folderSelect.ActiveID()
 	if selectedID != "" && !strings.HasPrefix(selectedID, folderGroupPrefix) {
@@ -613,26 +824,25 @@ func choiceSelect(options [][2]string, current string) *gtk.ComboBoxText {
 	return selectBox
 }
 
-func newSettingsWindow(parent *gtk.Window) *gtk.Window {
-	window := gtk.NewWindow()
-	window.SetTitle("Settings")
-	window.SetDefaultSize(780, 420)
-	window.SetModal(false)
-	window.SetDeletable(true)
-	window.SetDestroyWithParent(true)
-	window.SetHideOnClose(false)
-	if parent != nil {
-		window.SetTransientFor(parent)
+func canPopupSettingsPopover(parent gtk.Widgetter) bool {
+	if parent == nil {
+		return false
 	}
-	header := gtk.NewHeaderBar()
-	header.SetShowTitleButtons(true)
-	header.SetTitleWidget(gtk.NewLabel("Settings"))
-	window.SetTitlebar(header)
+	widget := gtk.BaseWidget(parent)
+	return widget.Root() != nil && widget.Native() != nil && widget.Mapped()
+}
 
-	return window
+func settingsOverlay() *gtk.Overlay {
+	if globals := helpers.CurrentGlobals(); globals != nil {
+		return globals.MainOverlay
+	}
+	return nil
 }
 
 func mainWindowFromPopover(pm *PopoverMenu) *gtk.Window {
+	if globals := helpers.CurrentGlobals(); globals != nil && globals.MainWindow != nil {
+		return globals.MainWindow
+	}
 	if pm == nil || pm.Popover == nil {
 		return nil
 	}

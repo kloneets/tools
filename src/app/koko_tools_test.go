@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -115,5 +117,59 @@ func TestPersistAppWindowStateStoresWindowDefaultSize(t *testing.T) {
 	}
 	if settings.Inst().AppWindow.Maximized {
 		t.Fatal("AppWindow.Maximized = true, want false")
+	}
+}
+
+func TestParseMacAppearanceOutputRecognizesDark(t *testing.T) {
+	if !parseMacAppearanceOutput([]byte("Dark\n")) {
+		t.Fatal("expected Dark output to enable dark appearance")
+	}
+	if parseMacAppearanceOutput([]byte("Light\n")) {
+		t.Fatal("expected non-Dark output to disable dark appearance")
+	}
+}
+
+func TestSystemPrefersDarkAppearanceReturnsFalseWhenReaderFails(t *testing.T) {
+	original := macAppearanceReader
+	defer func() {
+		macAppearanceReader = original
+	}()
+
+	macAppearanceReader = func(context.Context) ([]byte, error) {
+		return nil, errors.New("boom")
+	}
+
+	preferDark, ok := systemPrefersDarkAppearanceForOS(context.Background(), "darwin")
+	if ok {
+		t.Fatal("expected failed appearance probe to return ok=false")
+	}
+	if preferDark {
+		t.Fatal("expected failed appearance probe to return preferDark=false")
+	}
+}
+
+func TestSystemPrefersDarkAppearanceReadsDarkOnDarwin(t *testing.T) {
+	original := macAppearanceReader
+	defer func() {
+		macAppearanceReader = original
+	}()
+
+	macAppearanceReader = func(context.Context) ([]byte, error) {
+		return []byte("Dark\n"), nil
+	}
+
+	preferDark, ok := systemPrefersDarkAppearanceForOS(context.Background(), "darwin")
+	if !ok || !preferDark {
+		t.Fatalf("systemPrefersDarkAppearanceForOS() = (%t, %t), want (true, true)", preferDark, ok)
+	}
+}
+
+func TestSystemPrefersDarkAppearanceSkipsNonDarwin(t *testing.T) {
+	preferDark, ok := systemPrefersDarkAppearanceForOS(context.Background(), "linux")
+	if ok {
+		t.Fatal("expected non-darwin appearance probe to return ok=false")
+	}
+	if preferDark {
+		t.Fatal("expected non-darwin appearance probe to return preferDark=false")
 	}
 }

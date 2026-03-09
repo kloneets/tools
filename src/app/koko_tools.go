@@ -6,8 +6,12 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
 
 	_ "embed"
 
@@ -33,6 +37,10 @@ type kokoTools struct {
 
 //go:embed menu.ui
 var menuXML string
+
+var macAppearanceReader = func(ctx context.Context) ([]byte, error) {
+	return exec.CommandContext(ctx, "defaults", "read", "-g", "AppleInterfaceStyle").Output()
+}
 
 func InitApp() {
 	helpers.InitGlobals()
@@ -74,6 +82,8 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	gb := menuBuilder.GetObject("gears").Cast().(*gtk.MenuButton)
 	gb.SetPopover(ui.Popover(gb).Popover)
 
+	applySystemAppearancePreference(ctx)
+
 	tools.appWindow = gtk.NewApplicationWindow(app)
 	tools.appWindow.SetTitlebar(menu)
 	if iconName := helpers.WindowIconName(); iconName != "" {
@@ -81,10 +91,14 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	}
 	restoreAppWindowState(&tools.appWindow.Window, settings.Inst())
 	tools.appWindow.ConnectCloseRequest(func() bool {
+		if err := notes.FlushCurrentNoteState(); err != nil {
+			log.Println("notes flush error:", err)
+		}
 		persistAppWindowState(&tools.appWindow.Window)
 		return false
 	})
 	tools.appWindow.SetTitle("Koko tools")
+	helpers.SetMainWindow(&tools.appWindow.Window)
 
 	helpers.InitStatusBar()
 
@@ -111,15 +125,67 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	mainWrap.Append(upper)
 	mainWrap.Append(helpers.StatusBarInst().B)
 
-	tools.appWindow.SetChild(mainWrap)
+	overlay := gtk.NewOverlay()
+	overlay.SetChild(mainWrap)
+	helpers.SetMainOverlay(overlay)
+	tools.appWindow.SetChild(overlay)
 	tools.applyWidgetVisibility(settings.Inst())
 	settings.RegisterSaveHook(func(cfg *settings.UserSettings) {
 		glib.IdleAdd(func() {
 			tools.applyWidgetVisibility(cfg)
 		})
 	})
+	startPeriodicDriveSync(ctx)
 
 	return &tools
+}
+
+func applySystemAppearancePreference(ctx context.Context) {
+	gtkSettings := gtk.SettingsGetDefault()
+	if gtkSettings == nil {
+		return
+	}
+
+	preferDark, ok := systemPrefersDarkAppearance(ctx)
+	if !ok {
+		gtkSettings.ResetProperty("gtk-application-prefer-dark-theme")
+		return
+	}
+	gtkSettings.SetObjectProperty("gtk-application-prefer-dark-theme", preferDark)
+}
+
+func systemPrefersDarkAppearance(ctx context.Context) (bool, bool) {
+	return systemPrefersDarkAppearanceForOS(ctx, runtime.GOOS)
+}
+
+func systemPrefersDarkAppearanceForOS(ctx context.Context, goos string) (bool, bool) {
+	if goos != "darwin" {
+		return false, false
+	}
+
+	output, err := macAppearanceReader(ctx)
+	if err != nil {
+		return false, false
+	}
+	return parseMacAppearanceOutput(output), true
+}
+
+func parseMacAppearanceOutput(output []byte) bool {
+	return strings.EqualFold(strings.TrimSpace(string(output)), "Dark")
+}
+
+func startPeriodicDriveSync(ctx context.Context) {
+	go func() {
+		for {
+			wait := settings.DriveSyncInterval()
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+				settings.StartDriveSync()
+			}
+		}
+	}()
 }
 
 func restoreAppWindowState(window *gtk.Window, cfg *settings.UserSettings) {

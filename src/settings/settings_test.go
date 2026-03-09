@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,9 @@ func TestDefaultSettings(t *testing.T) {
 	}
 	if got.GDrive == nil {
 		t.Fatal("expected default GDrive settings to be initialized")
+	}
+	if got.GDrive.SyncIntervalSec != 10 {
+		t.Fatalf("GDrive.SyncIntervalSec = %d, want 10", got.GDrive.SyncIntervalSec)
 	}
 	if got.UI == nil {
 		t.Fatal("expected default UI settings to be initialized")
@@ -136,6 +140,9 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.GDrive == nil {
 		t.Fatal("normalizeSettings() should initialize GDrive")
 	}
+	if config.GDrive.SyncIntervalSec != 10 {
+		t.Fatalf("normalizeSettings() GDrive.SyncIntervalSec = %d, want 10", config.GDrive.SyncIntervalSec)
+	}
 	if config.UI == nil {
 		t.Fatal("normalizeSettings() should initialize UI settings")
 	}
@@ -201,6 +208,19 @@ func TestGDriveReady(t *testing.T) {
 	config.Enabled = false
 	if config.Ready() {
 		t.Fatal("Ready() should return false when sync is disabled")
+	}
+}
+
+func TestDriveSyncIntervalDefaultsToTenSeconds(t *testing.T) {
+	settingsInstance = nil
+	if got := DriveSyncInterval(); got != 10*time.Second {
+		t.Fatalf("DriveSyncInterval() = %v, want 10s", got)
+	}
+
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.SyncIntervalSec = 45
+	if got := DriveSyncInterval(); got != 45*time.Second {
+		t.Fatalf("DriveSyncInterval() = %v, want 45s", got)
 	}
 }
 
@@ -340,12 +360,138 @@ func TestNormalizeSettingsClearsNegativeEditorFontSize(t *testing.T) {
 		NotesApp: NotesAppSettings{
 			EditorFontSize: -4,
 		},
+		GDrive: &GDriveSettings{
+			SyncIntervalSec: -1,
+		},
 	}
 
 	normalizeSettings(config)
 
 	if config.NotesApp.EditorFontSize != 0 {
 		t.Fatalf("normalizeSettings() EditorFontSize = %d, want 0", config.NotesApp.EditorFontSize)
+	}
+	if config.GDrive.SyncIntervalSec != 10 {
+		t.Fatalf("normalizeSettings() SyncIntervalSec = %d, want 10", config.GDrive.SyncIntervalSec)
+	}
+}
+
+func TestDriveSyncSettingsJSONExcludesFontSettings(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.NotesApp.BodyFont = "IBM Plex Sans 13"
+	settingsInstance.NotesApp.MonospaceFont = "JetBrains Mono 15"
+	settingsInstance.NotesApp.EditorFontSize = 19
+	settingsInstance.NotesApp.EditorMonospace = true
+	settingsInstance.NotesApp.PreviewTheme = "paper-light"
+
+	data, err := driveSyncSettingsJSON()
+	if err != nil {
+		t.Fatalf("driveSyncSettingsJSON() error = %v", err)
+	}
+
+	var got UserSettings
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if got.NotesApp.BodyFont != "" {
+		t.Fatalf("BodyFont = %q, want empty", got.NotesApp.BodyFont)
+	}
+	if got.NotesApp.MonospaceFont != "" {
+		t.Fatalf("MonospaceFont = %q, want empty", got.NotesApp.MonospaceFont)
+	}
+	if got.NotesApp.EditorFontSize != 0 {
+		t.Fatalf("EditorFontSize = %d, want 0", got.NotesApp.EditorFontSize)
+	}
+	if got.NotesApp.EditorMonospace {
+		t.Fatal("EditorMonospace = true, want false")
+	}
+	if got.NotesApp.PreviewTheme != "paper-light" {
+		t.Fatalf("PreviewTheme = %q, want paper-light", got.NotesApp.PreviewTheme)
+	}
+}
+
+func TestRestoreDriveSourceOfTruthPrefersRemoteButKeepsLocalFonts(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.NotesApp.BodyFont = "IBM Plex Sans 13"
+	settingsInstance.NotesApp.MonospaceFont = "JetBrains Mono 14"
+	settingsInstance.NotesApp.EditorFontSize = 18
+	settingsInstance.NotesApp.EditorMonospace = true
+	settingsInstance.UI.ShowPages = false
+
+	originalLoader := driveSettingsLoader
+	originalRestorer := driveNotesRestorer
+	defer func() {
+		driveSettingsLoader = originalLoader
+		driveNotesRestorer = originalRestorer
+	}()
+
+	driveSettingsLoader = func(string) ([]byte, bool, error) {
+		return []byte(`{"notes_app":{"tab_spaces":2,"preview_theme":"paper-light"},"ui":{"show_pages":true,"show_password":false,"show_notes":true},"gdrive":{"enabled":true,"folder_id":"folder-1"}}`), true, nil
+	}
+	called := false
+	driveNotesRestorer = func(folderID string) error {
+		called = folderID == "folder-1"
+		return nil
+	}
+
+	messages := restoreDriveSourceOfTruth()
+
+	if !called {
+		t.Fatal("expected driveNotesRestorer to be called")
+	}
+	if settingsInstance.NotesApp.TabSpaces != 2 {
+		t.Fatalf("TabSpaces = %d, want 2", settingsInstance.NotesApp.TabSpaces)
+	}
+	if settingsInstance.UI.ShowPages != true || settingsInstance.UI.ShowPassword != false {
+		t.Fatalf("UI = %#v, want remote values", settingsInstance.UI)
+	}
+	if settingsInstance.NotesApp.BodyFont != "IBM Plex Sans 13" {
+		t.Fatalf("BodyFont = %q, want preserved local font", settingsInstance.NotesApp.BodyFont)
+	}
+	if settingsInstance.NotesApp.MonospaceFont != "JetBrains Mono 14" {
+		t.Fatalf("MonospaceFont = %q, want preserved local font", settingsInstance.NotesApp.MonospaceFont)
+	}
+	if settingsInstance.NotesApp.EditorFontSize != 18 || !settingsInstance.NotesApp.EditorMonospace {
+		t.Fatalf("editor font settings = %#v, want preserved local values", settingsInstance.NotesApp)
+	}
+	if len(messages) != 1 || messages[0] != "Drive data restored" {
+		t.Fatalf("messages = %#v, want Drive data restored", messages)
+	}
+}
+
+func TestRestoreDriveSourceOfTruthFallsBackOnInvalidRemoteSettings(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.UI.ShowPages = false
+
+	originalLoader := driveSettingsLoader
+	originalRestorer := driveNotesRestorer
+	defer func() {
+		driveSettingsLoader = originalLoader
+		driveNotesRestorer = originalRestorer
+	}()
+
+	driveSettingsLoader = func(string) ([]byte, bool, error) {
+		return []byte("{broken"), true, nil
+	}
+	restored := false
+	driveNotesRestorer = func(string) error {
+		restored = true
+		return nil
+	}
+
+	messages := restoreDriveSourceOfTruth()
+
+	if restored {
+		t.Fatal("driveNotesRestorer should not run when remote settings are invalid")
+	}
+	if settingsInstance.UI.ShowPages != false {
+		t.Fatal("local settings should remain unchanged")
+	}
+	if len(messages) != 1 || !strings.Contains(messages[0], "Drive settings are invalid") {
+		t.Fatalf("messages = %#v, want invalid drive settings message", messages)
 	}
 }
 

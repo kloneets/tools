@@ -10,6 +10,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
 )
@@ -112,6 +113,9 @@ func TestGenerateUICreatesPreviewPane(t *testing.T) {
 	if note.preview == nil || note.previewBuffer == nil {
 		t.Fatal("GenerateUI() should create markdown preview widgets")
 	}
+	if tab := note.activeTab(); tab == nil || tab.previewScroll == nil || tab.editorScroll == nil {
+		t.Fatal("GenerateUI() should create editor and preview scrollers")
+	}
 	if note.preview.Editable() {
 		t.Fatal("preview should be read-only")
 	}
@@ -128,6 +132,24 @@ func TestGenerateUICreatesPreviewPane(t *testing.T) {
 		if gtk.BaseWidget(commandRow).NextSibling() != nil {
 			t.Fatal("command row should be the last child in the notes layout")
 		}
+	}
+}
+
+func TestGenerateUICreatesLineNumberGutterAndWrapToggle(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	tab := note.activeTab()
+	if tab == nil {
+		t.Fatal("expected an active tab")
+	}
+	if tab.lineNumberGutter == nil || tab.lineNumberScroll == nil {
+		t.Fatal("editor should create a line number gutter")
+	}
+	if tab.wrapToggle == nil || !tab.wrapToggle.Active() {
+		t.Fatal("editor should create an enabled wrap toggle by default")
 	}
 }
 
@@ -152,6 +174,80 @@ func TestResolvedEditorWidthUsesEqualSplitWhenUnset(t *testing.T) {
 	}
 	if got := resolvedEditorWidth(512, 800); got != 512 {
 		t.Fatalf("resolvedEditorWidth(512, 800) = %d, want 512", got)
+	}
+}
+
+func TestResolvedEditorWidthClampsSavedWidthToKeepPreviewVisible(t *testing.T) {
+	if got := resolvedEditorWidth(900, 800); got != 620 {
+		t.Fatalf("resolvedEditorWidth(900, 800) = %d, want 620", got)
+	}
+}
+
+func TestResolvedEditorWidthUsesEqualSplitForSmallWindows(t *testing.T) {
+	if got := resolvedEditorWidth(500, 300); got != 150 {
+		t.Fatalf("resolvedEditorWidth(500, 300) = %d, want 150", got)
+	}
+}
+
+func TestNeedsEditorWidthReapplyDetectsResizeClamp(t *testing.T) {
+	if !needsEditorWidthReapply(512, 512, 600) {
+		t.Fatal("needsEditorWidthReapply() should request a reapply when resize clamp changes the desired width")
+	}
+}
+
+func TestNeedsEditorWidthReapplySkipsWhenWidthAlreadyMatches(t *testing.T) {
+	if needsEditorWidthReapply(620, 900, 800) {
+		t.Fatal("needsEditorWidthReapply() should skip when current width already matches the clamped desired width")
+	}
+}
+
+func TestContinueMarkdownListBullet(t *testing.T) {
+	text, cursor, ok := continueMarkdownList("- item", len([]rune("- item")))
+	if !ok {
+		t.Fatal("continueMarkdownList() should continue bullet lists")
+	}
+	if text != "- item\n- " {
+		t.Fatalf("continueMarkdownList() text = %q, want %q", text, "- item\n- ")
+	}
+	if cursor != len([]rune("- item\n- ")) {
+		t.Fatalf("continueMarkdownList() cursor = %d", cursor)
+	}
+}
+
+func TestContinueMarkdownListOrdered(t *testing.T) {
+	text, _, ok := continueMarkdownList("9. item", len([]rune("9. item")))
+	if !ok {
+		t.Fatal("continueMarkdownList() should continue ordered lists")
+	}
+	if text != "9. item\n10. " {
+		t.Fatalf("continueMarkdownList() text = %q, want %q", text, "9. item\n10. ")
+	}
+}
+
+func TestContinueMarkdownListChecklistUnchecked(t *testing.T) {
+	text, _, ok := continueMarkdownList("- [x] done", len([]rune("- [x] done")))
+	if !ok {
+		t.Fatal("continueMarkdownList() should continue checklist items")
+	}
+	if text != "- [x] done\n- [ ] " {
+		t.Fatalf("continueMarkdownList() text = %q, want %q", text, "- [x] done\n- [ ] ")
+	}
+}
+
+func TestContinueMarkdownListStopsOnEmptyItem(t *testing.T) {
+	text, cursor, ok := continueMarkdownList("- ", len([]rune("- ")))
+	if !ok {
+		t.Fatal("continueMarkdownList() should handle empty list items")
+	}
+	if text != "" || cursor != 0 {
+		t.Fatalf("continueMarkdownList() = (%q, %d), want empty text at cursor 0", text, cursor)
+	}
+}
+
+func TestContinueMarkdownListSkipsCodeFence(t *testing.T) {
+	text := "```go\n- item"
+	if _, _, ok := continueMarkdownList(text, len([]rune(text))); ok {
+		t.Fatal("continueMarkdownList() should not continue lists inside code fences")
 	}
 }
 
@@ -307,7 +403,7 @@ func TestRenameCurrentTabKeepsUnicodeLetters(t *testing.T) {
 	}
 }
 
-func TestDeleteCurrentNoteRemovesFileAndKeepsWorkspaceAlive(t *testing.T) {
+func TestDeleteCurrentNoteMovesFileToTrashAndKeepsWorkspaceAlive(t *testing.T) {
 	requireGTK(t)
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -322,7 +418,11 @@ func TestDeleteCurrentNoteRemovesFileAndKeepsWorkspaceAlive(t *testing.T) {
 		t.Fatalf("deleteCurrentNote() error = %v", err)
 	}
 	if _, err := os.Stat(deletePath); !os.IsNotExist(err) {
-		t.Fatalf("deleted note should be removed, stat err = %v", err)
+		t.Fatalf("deleted note should leave original path, stat err = %v", err)
+	}
+	trashPath := filepath.Join(settings.NotesTrashDir(), "Note 2.md")
+	if _, err := os.Stat(trashPath); err != nil {
+		t.Fatalf("trash note stat error = %v", err)
 	}
 	if len(note.tabs) == 0 {
 		t.Fatal("workspace should keep at least one note open")
@@ -448,6 +548,30 @@ func TestListNoteFilesIncludesNestedFolders(t *testing.T) {
 	}
 }
 
+func TestListNoteFilesSkipsTrashTree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	trashDir := filepath.Join(settings.NotesTrashDir(), "Work")
+	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(trashDir, "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Root.md"), []byte("root"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	files, err := listNoteFiles()
+	if err != nil {
+		t.Fatalf("listNoteFiles() error = %v", err)
+	}
+	if len(files) != 1 || filepath.Base(files[0].Path) != "Root.md" {
+		t.Fatalf("listNoteFiles() = %#v, want only Root.md", files)
+	}
+}
+
 func TestCreateFolderAndNewNoteUseSelectedFolder(t *testing.T) {
 	requireGTK(t)
 	t.Setenv("HOME", t.TempDir())
@@ -562,7 +686,7 @@ func TestRenameSelectedFolderMovesFilesAndOpenTabs(t *testing.T) {
 	}
 }
 
-func TestDeleteFolderPathRemovesFolderAndClosesTabs(t *testing.T) {
+func TestDeleteFolderPathMovesFolderToTrashAndClosesTabs(t *testing.T) {
 	requireGTK(t)
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -581,7 +705,10 @@ func TestDeleteFolderPathRemovesFolderAndClosesTabs(t *testing.T) {
 		t.Fatalf("deleteFolderPath() error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(notesDir(), "Work")); !os.IsNotExist(err) {
-		t.Fatalf("folder should be removed, stat err = %v", err)
+		t.Fatalf("folder should leave original path, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(settings.NotesTrashDir(), "Work", "Client", "Plan.md")); err != nil {
+		t.Fatalf("trash folder note stat error = %v", err)
 	}
 	if note.pageForPath(deletePath) >= 0 {
 		t.Fatal("deleted folder note should not remain open")
@@ -612,7 +739,10 @@ func TestDeleteSidebarContextItemDeletesFolderRowPath(t *testing.T) {
 		t.Fatalf("deleteSidebarContextItem() error = %v", err)
 	}
 	if _, err := os.Stat(folderPath); !os.IsNotExist(err) {
-		t.Fatalf("folder should be removed, stat err = %v", err)
+		t.Fatalf("folder should leave original path, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(settings.NotesTrashDir(), "Work", "Client", "Plan.md")); err != nil {
+		t.Fatalf("trash folder note stat error = %v", err)
 	}
 }
 
@@ -1518,4 +1648,57 @@ func TestSaveSpecificTabRunsWriteAsync(t *testing.T) {
 	}
 
 	close(release)
+}
+
+func TestFlushCurrentNoteStateWritesTabsAndSyncsOnce(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "client-secret-1")
+	settings.Init()
+
+	originalWrite := noteWriteFile
+	originalSync := noteSyncDriveData
+	defer func() {
+		noteWriteFile = originalWrite
+		noteSyncDriveData = originalSync
+	}()
+
+	var writes []string
+	noteWriteFile = func(name string, data []byte, _ os.FileMode) error {
+		writes = append(writes, name+":"+string(data))
+		return nil
+	}
+
+	syncCalls := 0
+	noteSyncDriveData = func() error {
+		syncCalls++
+		return nil
+	}
+
+	settings.Inst().GDrive.Enabled = true
+	settings.Inst().GDrive.FolderID = "folder-1"
+	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(token dir) error = %v", err)
+	}
+	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(token) error = %v", err)
+	}
+
+	note := GenerateUI()
+	note.buffer.SetText("first")
+	note.newNote()
+	note.notebook.SetCurrentPage(1)
+	note.switchToTab(1)
+	note.buffer.SetText("second")
+
+	if err := FlushCurrentNoteState(); err != nil {
+		t.Fatalf("FlushCurrentNoteState() error = %v", err)
+	}
+	if len(writes) != 2 {
+		t.Fatalf("write calls = %d, want 2", len(writes))
+	}
+	if syncCalls != 1 {
+		t.Fatalf("sync calls = %d, want 1", syncCalls)
+	}
 }

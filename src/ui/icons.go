@@ -1,6 +1,14 @@
 package ui
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/diamondburned/gotk4/pkg/gdkpixbuf/v2"
+	gio "github.com/diamondburned/gotk4/pkg/gio/v2"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/helpers"
 )
@@ -37,9 +45,41 @@ func IconGlyph(iconName string) string {
 }
 
 func iconImage(iconName string) *gtk.Image {
-	image := gtk.NewImageFromFile(helpers.FontAwesomeIconPath(IconGlyph(iconName)))
+	image := gtk.NewImageFromPixbuf(loadIconPixbuf(iconName))
 	image.SetPixelSize(16)
 	return image
+}
+
+func loadIconPixbuf(iconName string) *gdkpixbuf.Pixbuf {
+	path := helpers.FontAwesomeIconPath(IconGlyph(iconName))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	stream := gio.NewMemoryInputStreamFromBytes(glib.NewBytes(injectIconColor(data, iconForegroundColor())))
+	pixbuf, err := gdkpixbuf.NewPixbufFromStreamAtScale(context.Background(), stream, 16, 16, true)
+	if err != nil {
+		return nil
+	}
+	return pixbuf
+}
+
+func iconForegroundColor() string {
+	gtkSettings := gtk.SettingsGetDefault()
+	if gtkSettings == nil {
+		return "#1f1f1f"
+	}
+	if preferDark, ok := gtkSettings.ObjectProperty("gtk-application-prefer-dark-theme").(bool); ok && preferDark {
+		return "#f5f7ff"
+	}
+	return "#1f1f1f"
+}
+
+func injectIconColor(svg []byte, color string) []byte {
+	replacement := fmt.Sprintf(`<path fill="%s" `, color)
+	text := strings.ReplaceAll(string(svg), "<path ", replacement)
+	return []byte(text)
 }
 
 func IconButton(iconName string, tooltip string) *gtk.Button {

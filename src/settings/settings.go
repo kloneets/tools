@@ -79,6 +79,7 @@ type UISettings struct {
 
 type GDriveSettings struct {
 	Enabled         bool   `json:"enabled"`
+	SyncIntervalSec int    `json:"sync_interval_sec"`
 	FolderID        string `json:"folder_id"`
 	FolderName      string `json:"folder_name"`
 	LastSyncAt      string `json:"last_sync_at"`
@@ -90,6 +91,8 @@ var settingsInstance *UserSettings
 var saveHooks []func(*UserSettings)
 var driveSyncInFlight atomic.Bool
 var driveSyncFunc func() error
+var driveSettingsLoader func(string) ([]byte, bool, error)
+var driveNotesRestorer func(string) error
 var statusUpdater = func(text string) {
 	glib.IdleAdd(func() {
 		helpers.StatusBarInst().UpdateStatusBar(text)
@@ -97,7 +100,11 @@ var statusUpdater = func(text string) {
 }
 
 func init() {
-	driveSyncFunc = SyncDriveData
+	driveSyncFunc = syncDriveDataCore
+	driveSettingsLoader = func(folderID string) ([]byte, bool, error) {
+		return gdrive.DownloadFile(folderID, "settings.json")
+	}
+	driveNotesRestorer = gdrive.RestoreNotesTree
 }
 
 func Inst() *UserSettings {
@@ -117,6 +124,8 @@ func Init() *[]string {
 		log.Println(msg)
 		messages = append(messages, msg)
 		settingsInstance = defaultSettings()
+		normalizeSettings(settingsInstance)
+		messages = append(messages, restoreDriveSourceOfTruth()...)
 		return &messages
 	}
 
@@ -137,6 +146,7 @@ func Init() *[]string {
 	}
 
 	normalizeSettings(settingsInstance)
+	messages = append(messages, restoreDriveSourceOfTruth()...)
 
 	return &messages
 }
@@ -171,7 +181,9 @@ func defaultSettings() *UserSettings {
 }
 
 func defaultGDriveSettings() *GDriveSettings {
-	return &GDriveSettings{}
+	return &GDriveSettings{
+		SyncIntervalSec: 10,
+	}
 }
 
 func defaultUISettings() *UISettings {
@@ -188,6 +200,9 @@ func normalizeSettings(s *UserSettings) {
 	}
 	if s.GDrive == nil {
 		s.GDrive = defaultGDriveSettings()
+	}
+	if s.GDrive.SyncIntervalSec <= 0 {
+		s.GDrive.SyncIntervalSec = 10
 	}
 	if s.UI == nil {
 		s.UI = defaultUISettings()
@@ -256,6 +271,20 @@ func (g *GDriveSettings) Ready() bool {
 
 func SaveSettings() {
 	saveSettings(true, true)
+}
+
+func StartDriveSync() {
+	if settingsInstance == nil || !settingsInstance.GDrive.Ready() {
+		return
+	}
+	startDriveSyncAsync()
+}
+
+func DriveSyncInterval() time.Duration {
+	if settingsInstance == nil || settingsInstance.GDrive == nil || settingsInstance.GDrive.SyncIntervalSec <= 0 {
+		return 10 * time.Second
+	}
+	return time.Duration(settingsInstance.GDrive.SyncIntervalSec) * time.Second
 }
 
 func SaveNotesEditorWidth(width int) {
@@ -345,7 +374,7 @@ func startDriveSyncAsync() {
 	go func() {
 		defer driveSyncInFlight.Store(false)
 
-		if err := driveSyncFunc(); err != nil {
+		if err := syncDriveDataOnce(); err != nil {
 			log.Println("gdrive settings sync error:", err)
 			statusUpdater("Settings saved locally, Drive sync failed")
 			return
@@ -356,25 +385,112 @@ func startDriveSyncAsync() {
 }
 
 func SyncDriveData() error {
+	if !driveSyncInFlight.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer driveSyncInFlight.Store(false)
+	return syncDriveDataOnce()
+}
+
+func syncDriveDataOnce() error {
+	if driveSyncFunc != nil {
+		return driveSyncFunc()
+	}
+	return syncDriveDataCore()
+}
+
+func syncDriveDataCore() error {
 	if settingsInstance == nil || !settingsInstance.GDrive.Ready() {
 		return nil
 	}
 
-	err := gdrive.SyncAppData(settingsInstance.GDrive.FolderID)
+	settingsData, dataErr := driveSyncSettingsJSON()
+	if dataErr != nil {
+		recordSyncResult(dataErr)
+		saveSettings(false, false)
+		return dataErr
+	}
+
+	err := gdrive.SyncAppData(settingsInstance.GDrive.FolderID, settingsData)
 	recordSyncResult(err)
 	saveSettings(false, false)
 
-	if err == nil {
-		if syncErr := gdrive.SyncFile(settingsInstance.GDrive.FolderID, fileName()); syncErr != nil {
-			recordSyncResult(syncErr)
-			saveSettings(false, false)
-			return syncErr
-		}
-		recordSyncResult(nil)
-		saveSettings(false, false)
+	return err
+}
+
+func driveSyncSettingsJSON() ([]byte, error) {
+	if settingsInstance == nil {
+		return nil, nil
 	}
 
-	return err
+	clone := *settingsInstance
+	if settingsInstance.UI != nil {
+		uiCopy := *settingsInstance.UI
+		clone.UI = &uiCopy
+	}
+	if settingsInstance.GDrive != nil {
+		gDriveCopy := *settingsInstance.GDrive
+		clone.GDrive = &gDriveCopy
+	}
+
+	clone.NotesApp.BodyFont = ""
+	clone.NotesApp.MonospaceFont = ""
+	clone.NotesApp.EditorFontSize = 0
+	clone.NotesApp.EditorMonospace = false
+
+	return json.Marshal(&clone)
+}
+
+type localFontSettings struct {
+	BodyFont        string
+	MonospaceFont   string
+	EditorFontSize  int
+	EditorMonospace bool
+}
+
+func restoreDriveSourceOfTruth() []string {
+	if settingsInstance == nil || !settingsInstance.GDrive.Ready() {
+		return nil
+	}
+
+	data, found, err := driveSettingsLoader(settingsInstance.GDrive.FolderID)
+	if err != nil {
+		msg := "Drive settings fetch failed, using local settings: " + err.Error()
+		log.Println(msg)
+		return []string{msg}
+	}
+	if !found || len(data) == 0 {
+		return nil
+	}
+
+	localFonts := localFontSettings{
+		BodyFont:        settingsInstance.NotesApp.BodyFont,
+		MonospaceFont:   settingsInstance.NotesApp.MonospaceFont,
+		EditorFontSize:  settingsInstance.NotesApp.EditorFontSize,
+		EditorMonospace: settingsInstance.NotesApp.EditorMonospace,
+	}
+
+	var remote UserSettings
+	if err := json.Unmarshal(data, &remote); err != nil {
+		msg := "Drive settings are invalid, using local settings: " + err.Error()
+		log.Println(msg)
+		return []string{msg}
+	}
+
+	normalizeSettings(&remote)
+	remote.NotesApp.BodyFont = localFonts.BodyFont
+	remote.NotesApp.MonospaceFont = localFonts.MonospaceFont
+	remote.NotesApp.EditorFontSize = localFonts.EditorFontSize
+	remote.NotesApp.EditorMonospace = localFonts.EditorMonospace
+	settingsInstance = &remote
+
+	if err := driveNotesRestorer(settingsInstance.GDrive.FolderID); err != nil {
+		msg := "Drive notes restore failed, using local notes: " + err.Error()
+		log.Println(msg)
+		return []string{msg}
+	}
+
+	return []string{"Drive data restored"}
 }
 
 func recordSyncResult(err error) {

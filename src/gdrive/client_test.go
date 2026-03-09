@@ -72,27 +72,58 @@ func TestHasCredentialsUsesBuiltInSecret(t *testing.T) {
 	}
 }
 
-func TestSyncablePathsSkipsTokenOnly(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"settings.json", "notes.txt", "credentials.json", "gdrive_token.json"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
-			t.Fatalf("WriteFile(%q) error = %v", name, err)
-		}
+func TestScanLocalNotesTreeReturnsRelativeDirectoriesAndFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "Projects", "Alpha"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
 	}
-	nestedDir := filepath.Join(dir, "notes")
-	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(notes) error = %v", err)
+	if err := os.WriteFile(filepath.Join(root, "Root.md"), []byte("root"), 0o644); err != nil {
+		t.Fatalf("WriteFile(Root.md) error = %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(nestedDir, "Note 1.md"), []byte("note"), 0o644); err != nil {
-		t.Fatalf("WriteFile(Note 1.md) error = %v", err)
+	if err := os.WriteFile(filepath.Join(root, "Projects", "Alpha", "Spec.md"), []byte("spec"), 0o644); err != nil {
+		t.Fatalf("WriteFile(Spec.md) error = %v", err)
 	}
 
-	paths, err := syncablePaths(dir)
+	dirs, files, err := scanLocalNotesTree(root)
 	if err != nil {
-		t.Fatalf("syncablePaths() error = %v", err)
+		t.Fatalf("scanLocalNotesTree() error = %v", err)
 	}
-	if len(paths) != 4 {
-		t.Fatalf("syncablePaths() len = %d, want 4", len(paths))
+	if len(dirs) != 2 || dirs[0] != "Projects" || dirs[1] != "Projects/Alpha" {
+		t.Fatalf("dirs = %#v, want [Projects Projects/Alpha]", dirs)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files len = %d, want 2", len(files))
+	}
+	if files[0].RelPath != "Projects/Alpha/Spec.md" {
+		t.Fatalf("files[0].RelPath = %q, want Projects/Alpha/Spec.md", files[0].RelPath)
+	}
+	if files[1].RelPath != "Root.md" {
+		t.Fatalf("files[1].RelPath = %q, want Root.md", files[1].RelPath)
+	}
+}
+
+func TestScanLocalNotesTreeMissingDirectoryIsEmpty(t *testing.T) {
+	dirs, files, err := scanLocalNotesTree(filepath.Join(t.TempDir(), "missing"))
+	if err != nil {
+		t.Fatalf("scanLocalNotesTree() error = %v", err)
+	}
+	if len(dirs) != 0 || len(files) != 0 {
+		t.Fatalf("scanLocalNotesTree() = %#v / %#v, want empty", dirs, files)
+	}
+}
+
+func TestSortedPathsDescendingDeletesDeepestFoldersFirst(t *testing.T) {
+	paths := sortedPathsDescending(map[string]remoteDriveEntry{
+		"Projects":             {ID: "1", RelPath: "Projects"},
+		"Projects/Alpha":       {ID: "2", RelPath: "Projects/Alpha"},
+		"Projects/Alpha/Specs": {ID: "3", RelPath: "Projects/Alpha/Specs"},
+	})
+
+	if len(paths) != 3 {
+		t.Fatalf("sortedPathsDescending() len = %d, want 3", len(paths))
+	}
+	if paths[0] != "Projects/Alpha/Specs" || paths[1] != "Projects/Alpha" || paths[2] != "Projects" {
+		t.Fatalf("sortedPathsDescending() = %#v", paths)
 	}
 }
 
@@ -137,5 +168,32 @@ func TestDriveUpdateFileDoesNotIncludeParent(t *testing.T) {
 	}
 	if len(file.Parents) != 0 {
 		t.Fatalf("driveUpdateFile() parents = %#v, want empty", file.Parents)
+	}
+}
+
+func TestVersionedDriveFileNameAppendsVersionSuffix(t *testing.T) {
+	if got := versionedDriveFileName("Plan.md", 3); got != "Plan (version 3).md" {
+		t.Fatalf("versionedDriveFileName() = %q, want %q", got, "Plan (version 3).md")
+	}
+}
+
+func TestDriveTrashRelativePathWrapsNotesUnderTrash(t *testing.T) {
+	if got := driveTrashRelativePath("Work/Plan.md"); got != "trash/Work/Plan.md" {
+		t.Fatalf("driveTrashRelativePath() = %q, want %q", got, "trash/Work/Plan.md")
+	}
+	if got := driveTrashRelativePath("trash/Work/Plan.md"); got != "trash/Work/Plan.md" {
+		t.Fatalf("driveTrashRelativePath() existing trash = %q", got)
+	}
+}
+
+func TestIsVersionedDriveFileNameMatchesExpectedPattern(t *testing.T) {
+	if !isVersionedDriveFileName("Plan.md", "Plan (version 2).md") {
+		t.Fatal("expected versioned filename to match")
+	}
+	if isVersionedDriveFileName("Plan.md", "Plan 2.md") {
+		t.Fatal("unexpected non-versioned filename match")
+	}
+	if isVersionedDriveFileName("Plan.md", "Another (version 2).md") {
+		t.Fatal("unexpected base-name mismatch")
 	}
 }

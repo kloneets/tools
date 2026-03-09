@@ -1,11 +1,13 @@
 package gdrive
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -35,6 +37,17 @@ type Folder struct {
 type AuthorizationSession struct {
 	server *http.Server
 	result chan error
+}
+
+type localNoteFile struct {
+	RelPath string
+	Path    string
+}
+
+type remoteDriveEntry struct {
+	ID       string
+	RelPath  string
+	ParentID string
 }
 
 const (
@@ -202,6 +215,42 @@ func ListFolders() ([]Folder, error) {
 	return folders, nil
 }
 
+func DownloadFile(folderID string, name string) ([]byte, bool, error) {
+	if folderID == "" {
+		return nil, false, errors.New("drive folder id is required")
+	}
+
+	service, err := serviceFromCredentials()
+	if err != nil {
+		return nil, false, err
+	}
+
+	return downloadDriveFile(service, folderID, name)
+}
+
+func RestoreNotesTree(folderID string) error {
+	if folderID == "" {
+		return errors.New("drive folder id is required")
+	}
+
+	service, err := serviceFromCredentials()
+	if err != nil {
+		return err
+	}
+
+	notesFolderID, found, err := findFolder(service, folderID, "notes")
+	if err != nil {
+		return err
+	}
+
+	localRoot := filepath.Join(appConfigDir(), "notes")
+	if !found {
+		return resetLocalNotesRoot(localRoot)
+	}
+
+	return restoreNotesTree(service, notesFolderID, localRoot)
+}
+
 func CreateFolder(name string, parentID string) (Folder, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -231,20 +280,28 @@ func CreateFolder(name string, parentID string) (Folder, error) {
 	return folders[0], nil
 }
 
-func SyncAppData(folderID string) error {
-	paths, err := syncablePaths(appConfigDir())
+func SyncAppData(folderID string, settingsData []byte) error {
+	if folderID == "" {
+		return errors.New("drive folder id is required")
+	}
+
+	service, err := serviceFromCredentials()
 	if err != nil {
 		return err
 	}
-	if len(paths) == 0 {
-		return nil
-	}
-	for _, path := range paths {
-		if err := SyncFile(folderID, path); err != nil {
+
+	if len(settingsData) > 0 {
+		if err := syncBytes(service, folderID, "settings.json", settingsData, "application/json"); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	notesFolderID, err := ensureFolder(service, folderID, "notes")
+	if err != nil {
+		return err
+	}
+
+	return syncNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes"))
 }
 
 func SyncFile(folderID string, localPath string) error {
@@ -257,8 +314,166 @@ func SyncFile(folderID string, localPath string) error {
 		return err
 	}
 
-	name := filepath.Base(localPath)
-	query := fmt.Sprintf("name='%s' and '%s' in parents and trashed=false", escapeQueryValue(name), escapeQueryValue(folderID))
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("read local file: %w", err)
+	}
+	contentType := mime.TypeByExtension(filepath.Ext(localPath))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	return upsertDriveFileData(service, folderID, filepath.Base(localPath), data, contentType, false)
+}
+
+func syncNotesTree(service *drive.Service, notesFolderID string, localRoot string) error {
+	localDirs, localFiles, err := scanLocalNotesTree(localRoot)
+	if err != nil {
+		return err
+	}
+
+	dirIDs := map[string]string{"": notesFolderID}
+	for _, relDir := range localDirs {
+		dirID, err := ensureFolderPath(service, notesFolderID, relDir)
+		if err != nil {
+			return err
+		}
+		dirIDs[relDir] = dirID
+	}
+
+	desiredFiles := make(map[string]struct{}, len(localFiles))
+	for _, file := range localFiles {
+		parentRel := filepath.ToSlash(filepath.Dir(file.RelPath))
+		if parentRel == "." {
+			parentRel = ""
+		}
+		parentID, ok := dirIDs[parentRel]
+		if !ok {
+			var err error
+			parentID, err = ensureFolderPath(service, notesFolderID, parentRel)
+			if err != nil {
+				return err
+			}
+			dirIDs[parentRel] = parentID
+		}
+		if err := syncLocalFileToParent(service, parentID, filepath.Base(file.RelPath), file.Path); err != nil {
+			return err
+		}
+		desiredFiles[file.RelPath] = struct{}{}
+	}
+
+	desiredDirs := make(map[string]struct{}, len(localDirs))
+	for _, relDir := range localDirs {
+		desiredDirs[relDir] = struct{}{}
+	}
+
+	remoteDirs, remoteFiles, err := listRemoteNotesTree(service, notesFolderID)
+	if err != nil {
+		return err
+	}
+
+	for relPath, file := range remoteFiles {
+		if _, ok := desiredFiles[relPath]; ok {
+			continue
+		}
+		if isDriveTrashRelativePath(relPath) {
+			if err := service.Files.Delete(file.ID).Do(); err != nil {
+				return fmt.Errorf("delete drive trash file %q: %w", relPath, err)
+			}
+			continue
+		}
+		if err := moveDriveEntryToTrash(service, notesFolderID, file); err != nil {
+			return fmt.Errorf("move drive file %q to trash: %w", relPath, err)
+		}
+	}
+
+	remoteDirPaths := sortedPathsDescending(remoteDirs)
+	for _, relPath := range remoteDirPaths {
+		if _, ok := desiredDirs[relPath]; ok {
+			continue
+		}
+		if err := deleteDriveFolderIfEmpty(service, remoteDirs[relPath]); err != nil {
+			return fmt.Errorf("delete drive folder %q: %w", relPath, err)
+		}
+	}
+
+	return nil
+}
+
+func restoreNotesTree(service *drive.Service, notesFolderID string, localRoot string) error {
+	if err := resetLocalNotesRoot(localRoot); err != nil {
+		return err
+	}
+
+	type queueItem struct {
+		folderID string
+		localDir string
+	}
+	queue := []queueItem{{folderID: notesFolderID, localDir: localRoot}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		children, err := listDriveChildren(service, current.folderID)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			localPath := filepath.Join(current.localDir, child.Name)
+			if child.MimeType == "application/vnd.google-apps.folder" {
+				if err := os.MkdirAll(localPath, 0o755); err != nil {
+					return fmt.Errorf("create local notes folder %q: %w", localPath, err)
+				}
+				queue = append(queue, queueItem{folderID: child.Id, localDir: localPath})
+				continue
+			}
+
+			data, err := downloadDriveFileByID(service, child.Id)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(localPath, data, 0o644); err != nil {
+				return fmt.Errorf("write local note %q: %w", localPath, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func resetLocalNotesRoot(localRoot string) error {
+	if err := os.RemoveAll(localRoot); err != nil {
+		return fmt.Errorf("clear local notes tree: %w", err)
+	}
+	if err := os.MkdirAll(localRoot, 0o755); err != nil {
+		return fmt.Errorf("create local notes root: %w", err)
+	}
+	return nil
+}
+
+func syncBytes(service *drive.Service, folderID string, name string, data []byte, contentType string) error {
+	return upsertDriveFileData(service, folderID, name, data, contentType, false)
+}
+
+func syncLocalFileToParent(service *drive.Service, folderID string, name string, localPath string) error {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("read local file: %w", err)
+	}
+	contentType := mime.TypeByExtension(filepath.Ext(localPath))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	return upsertDriveFileData(service, folderID, name, data, contentType, true)
+}
+
+func upsertDriveFileData(service *drive.Service, folderID string, name string, data []byte, contentType string, versionOnConflict bool) error {
+	query := fmt.Sprintf(
+		"name='%s' and '%s' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+		escapeQueryValue(name),
+		escapeQueryValue(folderID),
+	)
 	list, err := service.Files.List().
 		Q(query).
 		Fields("files(id,name)").
@@ -268,31 +483,456 @@ func SyncFile(folderID string, localPath string) error {
 		return fmt.Errorf("query existing drive file: %w", err)
 	}
 
-	fileHandle, err := os.Open(localPath)
-	if err != nil {
-		return fmt.Errorf("open local file: %w", err)
-	}
-	defer fileHandle.Close()
-
-	contentType := mime.TypeByExtension(filepath.Ext(localPath))
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
 	if len(list.Files) == 0 {
-		_, err = service.Files.Create(driveCreateFile(name, folderID)).Media(fileHandle, googleapi.ContentType(contentType)).Do()
+		_, err = service.Files.Create(driveCreateFile(name, folderID)).Media(bytes.NewReader(data), googleapi.ContentType(contentType)).Do()
 		if err != nil {
 			return fmt.Errorf("create drive file: %w", err)
 		}
 		return nil
 	}
 
-	_, err = service.Files.Update(list.Files[0].Id, driveUpdateFile(name)).Media(fileHandle, googleapi.ContentType(contentType)).Do()
+	if versionOnConflict {
+		remoteData, err := downloadDriveFileByID(service, list.Files[0].Id)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(remoteData, data) {
+			return nil
+		}
+		exists, err := hasMatchingVersionedDriveFile(service, folderID, name, data)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+		versionName, err := nextVersionedDriveFileName(service, folderID, name)
+		if err != nil {
+			return err
+		}
+		_, err = service.Files.Create(driveCreateFile(versionName, folderID)).Media(bytes.NewReader(data), googleapi.ContentType(contentType)).Do()
+		if err != nil {
+			return fmt.Errorf("create drive versioned file: %w", err)
+		}
+		return nil
+	}
+
+	_, err = service.Files.Update(list.Files[0].Id, driveUpdateFile(name)).Media(bytes.NewReader(data), googleapi.ContentType(contentType)).Do()
 	if err != nil {
 		return fmt.Errorf("update drive file: %w", err)
 	}
-
 	return nil
+}
+
+func nextVersionedDriveFileName(service *drive.Service, folderID string, name string) (string, error) {
+	for version := 2; ; version++ {
+		candidate := versionedDriveFileName(name, version)
+		_, found, err := findFile(service, folderID, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return candidate, nil
+		}
+	}
+}
+
+func versionedDriveFileName(name string, version int) string {
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	return fmt.Sprintf("%s (version %d)%s", base, version, ext)
+}
+
+func versionedDriveFolderName(name string, version int) string {
+	return fmt.Sprintf("%s %d", name, version)
+}
+
+func hasMatchingVersionedDriveFile(service *drive.Service, folderID string, name string, data []byte) (bool, error) {
+	children, err := listDriveChildren(service, folderID)
+	if err != nil {
+		return false, err
+	}
+	for _, child := range children {
+		if child.MimeType == "application/vnd.google-apps.folder" {
+			continue
+		}
+		if !isVersionedDriveFileName(name, child.Name) {
+			continue
+		}
+		childData, err := downloadDriveFileByID(service, child.Id)
+		if err != nil {
+			return false, err
+		}
+		if bytes.Equal(childData, data) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isVersionedDriveFileName(name string, candidate string) bool {
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	if ext == "" {
+		return strings.HasPrefix(candidate, base+" (version ") && strings.HasSuffix(candidate, ")")
+	}
+	return strings.HasPrefix(candidate, base+" (version ") && strings.HasSuffix(candidate, ")"+ext)
+}
+
+func ensureFolderPath(service *drive.Service, rootFolderID string, relPath string) (string, error) {
+	relPath = filepath.ToSlash(strings.TrimSpace(relPath))
+	if relPath == "" || relPath == "." {
+		return rootFolderID, nil
+	}
+
+	parentID := rootFolderID
+	for _, part := range strings.Split(relPath, "/") {
+		if part == "" || part == "." {
+			continue
+		}
+		folderID, err := ensureFolder(service, parentID, part)
+		if err != nil {
+			return "", err
+		}
+		parentID = folderID
+	}
+	return parentID, nil
+}
+
+func ensureFolder(service *drive.Service, parentID string, name string) (string, error) {
+	folderID, found, err := findFolder(service, parentID, name)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return folderID, nil
+	}
+
+	created, err := service.Files.Create(&drive.File{
+		Name:     name,
+		MimeType: "application/vnd.google-apps.folder",
+		Parents:  []string{parentID},
+	}).Fields("id").Do()
+	if err != nil {
+		return "", fmt.Errorf("create drive folder %q: %w", name, err)
+	}
+	return created.Id, nil
+}
+
+func findFolder(service *drive.Service, parentID string, name string) (string, bool, error) {
+	query := fmt.Sprintf(
+		"name='%s' and '%s' in parents and trashed=false and mimeType='application/vnd.google-apps.folder'",
+		escapeQueryValue(name),
+		escapeQueryValue(parentID),
+	)
+	list, err := service.Files.List().
+		Q(query).
+		Fields("files(id,name)").
+		PageSize(1).
+		Do()
+	if err != nil {
+		return "", false, fmt.Errorf("query drive folder %q: %w", name, err)
+	}
+	if len(list.Files) > 0 {
+		return list.Files[0].Id, true, nil
+	}
+	return "", false, nil
+}
+
+func findFile(service *drive.Service, parentID string, name string) (string, bool, error) {
+	query := fmt.Sprintf(
+		"name='%s' and '%s' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+		escapeQueryValue(name),
+		escapeQueryValue(parentID),
+	)
+	list, err := service.Files.List().
+		Q(query).
+		Fields("files(id,name)").
+		PageSize(1).
+		Do()
+	if err != nil {
+		return "", false, fmt.Errorf("query drive file %q: %w", name, err)
+	}
+	if len(list.Files) > 0 {
+		return list.Files[0].Id, true, nil
+	}
+	return "", false, nil
+}
+
+func listRemoteNotesTree(service *drive.Service, rootFolderID string) (map[string]remoteDriveEntry, map[string]remoteDriveEntry, error) {
+	dirs := make(map[string]remoteDriveEntry)
+	files := make(map[string]remoteDriveEntry)
+
+	type queueItem struct {
+		folderID string
+		relPath  string
+	}
+	queue := []queueItem{{folderID: rootFolderID, relPath: ""}}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		children, err := listDriveChildren(service, current.folderID)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, child := range children {
+			childRel := child.Name
+			if current.relPath != "" {
+				childRel = current.relPath + "/" + child.Name
+			}
+			if child.MimeType == "application/vnd.google-apps.folder" {
+				dirs[childRel] = remoteDriveEntry{ID: child.Id, RelPath: childRel, ParentID: current.folderID}
+				queue = append(queue, queueItem{folderID: child.Id, relPath: childRel})
+				continue
+			}
+			files[childRel] = remoteDriveEntry{ID: child.Id, RelPath: childRel, ParentID: current.folderID}
+		}
+	}
+
+	return dirs, files, nil
+}
+
+func listDriveChildren(service *drive.Service, parentID string) ([]*drive.File, error) {
+	children := make([]*drive.File, 0, 32)
+	pageToken := ""
+	for {
+		call := service.Files.List().
+			Q(fmt.Sprintf("'%s' in parents and trashed=false", escapeQueryValue(parentID))).
+			Fields("nextPageToken,files(id,name,mimeType,parents)").
+			OrderBy("folder,name").
+			PageSize(1000)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("list drive children: %w", err)
+		}
+		children = append(children, resp.Files...)
+		if resp.NextPageToken == "" {
+			return children, nil
+		}
+		pageToken = resp.NextPageToken
+	}
+}
+
+func downloadDriveFile(service *drive.Service, folderID string, name string) ([]byte, bool, error) {
+	query := fmt.Sprintf(
+		"name='%s' and '%s' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+		escapeQueryValue(name),
+		escapeQueryValue(folderID),
+	)
+	list, err := service.Files.List().
+		Q(query).
+		Fields("files(id,name)").
+		PageSize(1).
+		Do()
+	if err != nil {
+		return nil, false, fmt.Errorf("query drive file %q: %w", name, err)
+	}
+	if len(list.Files) == 0 {
+		return nil, false, nil
+	}
+
+	data, err := downloadDriveFileByID(service, list.Files[0].Id)
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func downloadDriveFileByID(service *drive.Service, fileID string) ([]byte, error) {
+	resp, err := service.Files.Get(fileID).Download()
+	if err != nil {
+		return nil, fmt.Errorf("download drive file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read drive file: %w", err)
+	}
+	return data, nil
+}
+
+func scanLocalNotesTree(root string) ([]string, []localNoteFile, error) {
+	dirs := make([]string, 0, 16)
+	files := make([]localNoteFile, 0, 32)
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+
+		if d.IsDir() {
+			dirs = append(dirs, relPath)
+			return nil
+		}
+		files = append(files, localNoteFile{RelPath: relPath, Path: path})
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("scan local notes tree: %w", err)
+	}
+
+	sort.Strings(dirs)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].RelPath < files[j].RelPath
+	})
+	return dirs, files, nil
+}
+
+func sortedPathsDescending(values map[string]remoteDriveEntry) []string {
+	paths := make([]string, 0, len(values))
+	for path := range values {
+		paths = append(paths, path)
+	}
+	sort.Slice(paths, func(i, j int) bool {
+		depthI := strings.Count(paths[i], "/")
+		depthJ := strings.Count(paths[j], "/")
+		if depthI != depthJ {
+			return depthI > depthJ
+		}
+		return paths[i] > paths[j]
+	})
+	return paths
+}
+
+func moveDriveEntryToTrash(service *drive.Service, notesFolderID string, entry remoteDriveEntry) error {
+	targetRel := driveTrashRelativePath(entry.RelPath)
+	return moveDriveEntryToRelPath(service, notesFolderID, entry, targetRel, false)
+}
+
+func moveDriveEntryToRelPath(service *drive.Service, notesFolderID string, entry remoteDriveEntry, targetRel string, isDir bool) error {
+	targetRel = filepath.ToSlash(filepath.Clean(targetRel))
+	if targetRel == "." || targetRel == "" {
+		return errors.New("target path is required")
+	}
+
+	targetParentRel := filepath.ToSlash(filepath.Dir(targetRel))
+	if targetParentRel == "." {
+		targetParentRel = ""
+	}
+	targetParentID, err := ensureFolderPath(service, notesFolderID, targetParentRel)
+	if err != nil {
+		return err
+	}
+
+	targetName, deleteSource, err := resolveDriveMoveTargetName(service, targetParentID, entry, filepath.Base(targetRel), isDir)
+	if err != nil {
+		return err
+	}
+	if deleteSource {
+		return service.Files.Delete(entry.ID).Do()
+	}
+	if targetName == filepath.Base(entry.RelPath) && entry.ParentID == targetParentID {
+		return nil
+	}
+
+	call := service.Files.Update(entry.ID, driveUpdateFile(targetName))
+	if entry.ParentID != "" && entry.ParentID != targetParentID {
+		call = call.AddParents(targetParentID).RemoveParents(entry.ParentID)
+	} else if entry.ParentID == "" && targetParentID != "" {
+		call = call.AddParents(targetParentID)
+	}
+	if _, err := call.Do(); err != nil {
+		return fmt.Errorf("update drive entry location: %w", err)
+	}
+	return nil
+}
+
+func resolveDriveMoveTargetName(service *drive.Service, targetParentID string, entry remoteDriveEntry, targetName string, isDir bool) (string, bool, error) {
+	existingID, found, err := findDriveEntry(service, targetParentID, targetName, isDir)
+	if err != nil {
+		return "", false, err
+	}
+	if !found || existingID == entry.ID {
+		return targetName, false, nil
+	}
+	if !isDir {
+		sourceData, err := downloadDriveFileByID(service, entry.ID)
+		if err != nil {
+			return "", false, err
+		}
+		targetData, err := downloadDriveFileByID(service, existingID)
+		if err != nil {
+			return "", false, err
+		}
+		if bytes.Equal(sourceData, targetData) {
+			return "", true, nil
+		}
+	}
+
+	nextName, err := nextAvailableDriveEntryName(service, targetParentID, targetName, isDir)
+	if err != nil {
+		return "", false, err
+	}
+	return nextName, false, nil
+}
+
+func nextAvailableDriveEntryName(service *drive.Service, parentID string, name string, isDir bool) (string, error) {
+	for version := 2; ; version++ {
+		candidate := versionedDriveFileName(name, version)
+		if isDir {
+			candidate = versionedDriveFolderName(name, version)
+		}
+		_, found, err := findDriveEntry(service, parentID, candidate, isDir)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return candidate, nil
+		}
+	}
+}
+
+func findDriveEntry(service *drive.Service, parentID string, name string, isDir bool) (string, bool, error) {
+	if isDir {
+		return findFolder(service, parentID, name)
+	}
+	return findFile(service, parentID, name)
+}
+
+func deleteDriveFolderIfEmpty(service *drive.Service, entry remoteDriveEntry) error {
+	children, err := listDriveChildren(service, entry.ID)
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 {
+		return nil
+	}
+	if err := service.Files.Delete(entry.ID).Do(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func isDriveTrashRelativePath(relPath string) bool {
+	relPath = filepath.ToSlash(filepath.Clean(relPath))
+	return relPath == "trash" || strings.HasPrefix(relPath, "trash/")
+}
+
+func driveTrashRelativePath(relPath string) string {
+	relPath = filepath.ToSlash(filepath.Clean(relPath))
+	if relPath == "." || relPath == "" {
+		return "trash"
+	}
+	if isDriveTrashRelativePath(relPath) {
+		return relPath
+	}
+	return filepath.ToSlash(filepath.Join("trash", relPath))
 }
 
 func driveCreateFile(name string, folderID string) *drive.File {
@@ -379,31 +1019,6 @@ func serviceFromCredentials() (*drive.Service, error) {
 	}
 
 	return service, nil
-}
-
-func syncablePaths(dir string) ([]string, error) {
-	paths := make([]string, 0, 8)
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if filepath.Base(path) == filepath.Base(TokenPath()) {
-			return nil
-		}
-		paths = append(paths, path)
-		return nil
-	})
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read app config dir: %w", err)
-	}
-	sort.Strings(paths)
-	return paths, nil
 }
 
 func escapeQueryValue(value string) string {

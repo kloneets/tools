@@ -93,29 +93,18 @@ func TestInfoLabelLeftAlignsWrappedText(t *testing.T) {
 	}
 }
 
-func TestNewSettingsWindowUsesPreferencesStyleDefaults(t *testing.T) {
+func TestSettingsOverlayUsesGlobalOverlay(t *testing.T) {
 	requireGTK(t)
+	t.Cleanup(func() {
+		helpers.InitGlobals()
+	})
 
-	parent := gtk.NewWindow()
-	window := newSettingsWindow(parent)
+	helpers.InitGlobals()
+	overlay := gtk.NewOverlay()
+	helpers.SetMainOverlay(overlay)
 
-	if window.Title() != "Settings" {
-		t.Fatalf("newSettingsWindow() title = %q, want Settings", window.Title())
-	}
-	if window.Modal() {
-		t.Fatal("newSettingsWindow() should not be modal")
-	}
-	if !window.DestroyWithParent() {
-		t.Fatal("newSettingsWindow() should be destroyed with parent")
-	}
-	if window.HideOnClose() {
-		t.Fatal("newSettingsWindow() should destroy on close")
-	}
-	if !window.Deletable() {
-		t.Fatal("newSettingsWindow() should be deletable")
-	}
-	if window.Titlebar() == nil {
-		t.Fatal("newSettingsWindow() should have a titlebar")
+	if got := settingsOverlay(); got != overlay {
+		t.Fatal("settingsOverlay() should return global overlay")
 	}
 }
 
@@ -177,6 +166,14 @@ func TestFolderDisplayLabelAddsSuffixOnlyForDuplicates(t *testing.T) {
 	}
 }
 
+func TestInjectIconColorAddsFillToPaths(t *testing.T) {
+	svg := []byte(`<svg><path d="M0 0"/></svg>`)
+	got := string(injectIconColor(svg, "#ffffff"))
+	if got != `<svg><path fill="#ffffff" d="M0 0"/></svg>` {
+		t.Fatalf("injectIconColor() = %q", got)
+	}
+}
+
 func TestLastSyncSummaryIncludesErrorMessage(t *testing.T) {
 	summary := lastSyncSummary(&settings.GDriveSettings{
 		LastSyncAt:      "2026-03-07T17:35:34+02:00",
@@ -228,5 +225,52 @@ func TestEffectiveEditorFontSizeUsesOverrideThenCurrentFont(t *testing.T) {
 	})
 	if body != 12 {
 		t.Fatalf("effectiveEditorFontSize() body = %d, want 12", body)
+	}
+}
+
+func TestGDriveSettingsCreatesSyncIntervalControl(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().GDrive.SyncIntervalSec = 25
+
+	s := &Settings{}
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	window := gtk.NewWindow()
+	s.GDriveSettings(window, box)
+
+	if s.driveSyncInterval == nil {
+		t.Fatal("expected drive sync interval control")
+	}
+	if got := s.driveSyncInterval.ValueAsInt(); got != 25 {
+		t.Fatalf("driveSyncInterval = %d, want 25", got)
+	}
+}
+
+func TestTrashSettingsCreatesTrashListAndCleanButton(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	trashFile := settings.NotesTrashDir() + "/Plan.md"
+	if err := os.MkdirAll(settings.NotesTrashDir(), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(trashFile, []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	s := &Settings{}
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	s.TrashSettings(box)
+
+	if s.trashList == nil {
+		t.Fatal("expected trash list control")
+	}
+	if s.cleanTrashButton == nil {
+		t.Fatal("expected clean trash button")
+	}
+	if s.trashList.RowAtIndex(0) == nil {
+		t.Fatal("expected at least one trash row")
 	}
 }

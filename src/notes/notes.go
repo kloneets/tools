@@ -52,6 +52,7 @@ type Note struct {
 	previewLinks         []markdownLink
 	paned                *gtk.Paned
 	previewToggle        *gtk.ToggleButton
+	wrapToggle           *gtk.ToggleButton
 	commandEntry         *gtk.Entry
 	vimInsertMode        bool
 	vimPendingOp         string
@@ -77,6 +78,13 @@ var saveCounter atomic.Int64
 var currentNote *Note
 var noteWriteFile = os.WriteFile
 var noteSyncDriveData = settings.SyncDriveData
+
+func FlushCurrentNoteState() error {
+	if currentNote == nil {
+		return nil
+	}
+	return currentNote.flushAllTabs(true)
+}
 
 func GenerateUI() *Note {
 	saveCounter.Store(0)
@@ -105,6 +113,7 @@ func noteScrolledWindow(child gtk.Widgetter) *gtk.ScrolledWindow {
 	scrollW := gtk.NewScrolledWindow()
 	scrollW.SetHExpand(true)
 	scrollW.SetVExpand(true)
+	scrollW.SetPolicy(gtk.PolicyAutomatic, gtk.PolicyAutomatic)
 	scrollW.SetPropagateNaturalHeight(true)
 	scrollW.SetPropagateNaturalWidth(true)
 	scrollW.SetMaxContentHeight(400)
@@ -126,6 +135,9 @@ func (n *Note) applyMarkdownFormatting() {
 		return
 	}
 	configureMarkdownTags(n.buffer, currentAppearance(), false)
+	if tab := n.activeTab(); tab != nil {
+		n.applyEditorWrap(tab)
+	}
 
 	start := n.buffer.StartIter()
 	end := n.buffer.EndIter()
@@ -296,6 +308,11 @@ func (n *Note) markdownKeyController() *gtk.EventControllerKey {
 			n.insertTabSpaces()
 			return true
 		}
+		if keyval == gdk.KEY_Return || keyval == gdk.KEY_KP_Enter {
+			if n.continueMarkdownList() {
+				return true
+			}
+		}
 		return false
 	})
 	return controller
@@ -361,6 +378,11 @@ func (n *Note) handleVimKey(keyval uint) bool {
 		case gdk.KEY_Tab:
 			n.insertTabSpaces()
 			return true
+		case gdk.KEY_Return, gdk.KEY_KP_Enter:
+			if n.continueMarkdownList() {
+				return true
+			}
+			return false
 		default:
 			return false
 		}
@@ -1118,6 +1140,108 @@ func maxInt(a, b int) int {
 	return b
 }
 
+func (n *Note) continueMarkdownList() bool {
+	if n.buffer == nil {
+		return false
+	}
+	if _, _, ok := n.buffer.SelectionBounds(); ok {
+		return false
+	}
+	handled := false
+	n.transformBuffer(func(text string, start, end int) (string, int, int) {
+		updated, cursor, ok := continueMarkdownList(text, start)
+		handled = ok
+		if !ok {
+			return text, start, end
+		}
+		return updated, cursor, cursor
+	})
+	return handled
+}
+
+func continueMarkdownList(text string, cursor int) (string, int, bool) {
+	runes := []rune(text)
+	if cursor < 0 || cursor > len(runes) || insideMarkdownCodeFence(runes, cursor) {
+		return text, cursor, false
+	}
+
+	lineStart := cursor
+	for lineStart > 0 && runes[lineStart-1] != '\n' {
+		lineStart--
+	}
+	lineEnd := cursor
+	for lineEnd < len(runes) && runes[lineEnd] != '\n' {
+		lineEnd++
+	}
+
+	line := string(runes[lineStart:lineEnd])
+	prefix, empty, ok := nextMarkdownListPrefix(line)
+	if !ok {
+		return text, cursor, false
+	}
+	if empty {
+		updated := string(runes[:lineStart]) + string(runes[lineEnd:])
+		return updated, lineStart, true
+	}
+
+	insert := "\n" + prefix
+	updated := string(runes[:cursor]) + insert + string(runes[cursor:])
+	return updated, cursor + len([]rune(insert)), true
+}
+
+func nextMarkdownListPrefix(line string) (string, bool, bool) {
+	indentLen := 0
+	for indentLen < len(line) && (line[indentLen] == ' ' || line[indentLen] == '\t') {
+		indentLen++
+	}
+	indent := line[:indentLen]
+	trimmed := line[indentLen:]
+
+	switch {
+	case strings.HasPrefix(trimmed, "- [ ] "):
+		return indent + "- [ ] ", strings.TrimSpace(trimmed[6:]) == "", true
+	case strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
+		return indent + "- [ ] ", strings.TrimSpace(trimmed[6:]) == "", true
+	case strings.HasPrefix(trimmed, "- "):
+		return indent + "- ", strings.TrimSpace(trimmed[2:]) == "", true
+	case strings.HasPrefix(trimmed, "* "):
+		return indent + "* ", strings.TrimSpace(trimmed[2:]) == "", true
+	}
+
+	number := 0
+	markerEnd := 0
+	for markerEnd < len(trimmed) && trimmed[markerEnd] >= '0' && trimmed[markerEnd] <= '9' {
+		number = number*10 + int(trimmed[markerEnd]-'0')
+		markerEnd++
+	}
+	if markerEnd == 0 || markerEnd+1 >= len(trimmed) {
+		return "", false, false
+	}
+	separator := trimmed[markerEnd]
+	if (separator != '.' && separator != ')') || trimmed[markerEnd+1] != ' ' {
+		return "", false, false
+	}
+	return fmt.Sprintf("%s%d%c ", indent, number+1, separator), strings.TrimSpace(trimmed[markerEnd+2:]) == "", true
+}
+
+func insideMarkdownCodeFence(runes []rune, cursor int) bool {
+	inFence := false
+	lineStart := 0
+	for idx := 0; idx <= len(runes); idx++ {
+		if idx < len(runes) && runes[idx] != '\n' {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimLeft(string(runes[lineStart:idx]), " \t"), "```") {
+			inFence = !inFence
+		}
+		if idx >= cursor {
+			return inFence
+		}
+		lineStart = idx + 1
+	}
+	return inFence
+}
+
 func (n *Note) togglePreview() {
 	if n.previewToggle == nil {
 		return
@@ -1206,24 +1330,36 @@ func (n *Note) saveSpecificTab(tab *noteTab, sync bool) {
 	go n.persistTabSnapshot(tab, file, text, sync)
 }
 
+func (n *Note) flushAllTabs(sync bool) error {
+	if n == nil {
+		return nil
+	}
+
+	var wroteAny bool
+	for _, tab := range n.tabs {
+		if tab == nil || tab.buffer == nil {
+			continue
+		}
+		file := tab.path
+		text := tab.buffer.Text(tab.buffer.StartIter(), tab.buffer.EndIter(), true)
+		if err := n.writeTabSnapshot(tab, file, text); err != nil {
+			return err
+		}
+		wroteAny = true
+	}
+
+	if sync && wroteAny && settings.Inst().GDrive.Ready() {
+		if err := noteSyncDriveData(); err != nil {
+			n.statusMessage("Notes saved locally, Drive sync failed")
+			return err
+		}
+	}
+	return nil
+}
+
 func (n *Note) persistTabSnapshot(tab *noteTab, file string, text string, sync bool) {
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-		log.Println("Notes dir error: ", err)
-		tab.waitingToSave = false
-		if n.activeTab() == tab {
-			n.WaitingToSave = false
-		}
-		return
-	}
-	if helpers.Globals().Debug {
-		log.Println(text)
-	}
-	if err := noteWriteFile(file, []byte(text), 0o644); err != nil {
+	if err := n.writeTabSnapshot(tab, file, text); err != nil {
 		log.Println(err)
-		tab.waitingToSave = false
-		if n.activeTab() == tab {
-			n.WaitingToSave = false
-		}
 		return
 	}
 	count := saveCounter.Add(1)
@@ -1243,4 +1379,29 @@ func (n *Note) persistTabSnapshot(tab *noteTab, file string, text string, sync b
 	if n.activeTab() == tab {
 		n.WaitingToSave = false
 	}
+}
+
+func (n *Note) writeTabSnapshot(tab *noteTab, file string, text string) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		tab.waitingToSave = false
+		if n.activeTab() == tab {
+			n.WaitingToSave = false
+		}
+		return fmt.Errorf("notes dir error: %w", err)
+	}
+	if helpers.Globals().Debug {
+		log.Println(text)
+	}
+	if err := noteWriteFile(file, []byte(text), 0o644); err != nil {
+		tab.waitingToSave = false
+		if n.activeTab() == tab {
+			n.WaitingToSave = false
+		}
+		return err
+	}
+	tab.waitingToSave = false
+	if n.activeTab() == tab {
+		n.WaitingToSave = false
+	}
+	return nil
 }

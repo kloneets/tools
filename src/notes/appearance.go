@@ -281,7 +281,6 @@ func markdownTagConfig(name string, appearance notesAppearance, preview bool) fu
 			tag.SetObjectProperty("family", appearance.monoFamily)
 			tag.SetObjectProperty("size-points", appearance.monoSize)
 			tag.SetObjectProperty("background", appearance.palette.codeBackground)
-			tag.SetObjectProperty("left-margin", 14)
 			tag.SetObjectProperty("right-margin", 14)
 			tag.SetObjectProperty("pixels-above-lines", 6)
 			tag.SetObjectProperty("pixels-below-lines", 6)

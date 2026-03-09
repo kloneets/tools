@@ -20,32 +20,41 @@ import (
 )
 
 type noteTab struct {
-	title           string
-	path            string
-	tabLabel        *gtk.Label
-	root            *gtk.Box
-	note            *gtk.TextView
-	buffer          *gtk.TextBuffer
-	preview         *gtk.TextView
-	previewBuffer   *gtk.TextBuffer
-	previewLinks    []markdownLink
-	paned           *gtk.Paned
-	previewToggle   *gtk.ToggleButton
-	commandEntry    *gtk.Entry
-	vimInsertMode   bool
-	vimPendingOp    string
-	selectionMode   vimSelectionMode
-	selectionMark   int
-	selectionCursor int
-	yankRegister    vimRegister
-	commandMode     bool
-	lastSearch      string
-	lastSearchPos   int
-	waitingToSave   bool
-	widthRestored   bool
-	applyingWidth   bool
-	widthPersistOK  bool
-	widthApplySeq   int64
+	title            string
+	path             string
+	tabLabel         *gtk.Label
+	root             *gtk.Box
+	editorWrap       *gtk.Box
+	note             *gtk.TextView
+	buffer           *gtk.TextBuffer
+	editorScroll     *gtk.ScrolledWindow
+	lineNumberScroll *gtk.ScrolledWindow
+	lineNumberGutter *gtk.Fixed
+	lineNumberLabels []*gtk.Label
+	previewScroll    *gtk.ScrolledWindow
+	preview          *gtk.TextView
+	previewBuffer    *gtk.TextBuffer
+	previewLinks     []markdownLink
+	paned            *gtk.Paned
+	previewToggle    *gtk.ToggleButton
+	wrapToggle       *gtk.ToggleButton
+	commandEntry     *gtk.Entry
+	wrapEnabled      bool
+	vimInsertMode    bool
+	vimPendingOp     string
+	selectionMode    vimSelectionMode
+	selectionMark    int
+	selectionCursor  int
+	yankRegister     vimRegister
+	commandMode      bool
+	lastSearch       string
+	lastSearchPos    int
+	waitingToSave    bool
+	widthRestored    bool
+	applyingWidth    bool
+	widthPersistOK   bool
+	widthApplySeq    int64
+	lastPanedWidth   int
 }
 
 type noteFile struct {
@@ -205,12 +214,12 @@ func (n *Note) createTab(path string, text string) *noteTab {
 
 	tab.buffer = styledBuffer(false)
 	tab.buffer.SetText(text)
+	tab.wrapEnabled = true
 	tab.note = gtk.NewTextView()
 	tab.note.SetBuffer(tab.buffer)
 	gtk.BaseWidget(tab.note).SetName("notes-editor")
 	tab.note.SetHExpand(true)
 	tab.note.SetVExpand(true)
-	tab.note.SetWrapMode(gtk.WrapWord)
 	tab.note.SetSizeRequest(300, 200)
 	tab.note.SetMarginStart(ui.DefaultBoxPadding)
 	tab.note.SetMarginEnd(ui.DefaultBoxPadding)
@@ -232,8 +241,22 @@ func (n *Note) createTab(path string, text string) *noteTab {
 	tab.preview.AddController(n.previewClickController())
 	tab.preview.AddController(n.previewMotionController())
 
-	editorScroll := noteScrolledWindow(tab.note)
-	previewScroll := noteScrolledWindow(tab.preview)
+	tab.editorScroll = noteScrolledWindow(tab.note)
+	tab.lineNumberGutter = gtk.NewFixed()
+	gtk.BaseWidget(tab.lineNumberGutter).SetName("notes-line-numbers")
+	tab.lineNumberScroll = noteScrolledWindow(tab.lineNumberGutter)
+	tab.lineNumberScroll.SetHExpand(false)
+	tab.lineNumberScroll.SetMinContentWidth(52)
+	tab.lineNumberScroll.SetMaxContentWidth(52)
+	tab.lineNumberScroll.SetPolicy(gtk.PolicyNever, gtk.PolicyNever)
+	tab.lineNumberScroll.SetVAdjustment(tab.editorScroll.VAdjustment())
+	tab.editorWrap = gtk.NewBox(gtk.OrientationHorizontal, 0)
+	tab.editorWrap.Append(tab.lineNumberScroll)
+	tab.editorWrap.Append(tab.editorScroll)
+	tab.previewScroll = noteScrolledWindow(tab.preview)
+	tab.previewScroll.SetVAdjustment(tab.editorScroll.VAdjustment())
+	n.applyEditorWrap(tab)
+	n.refreshLineNumbers(tab)
 
 	tab.paned = gtk.NewPaned(gtk.OrientationHorizontal)
 	tab.paned.SetHExpand(true)
@@ -248,8 +271,13 @@ func (n *Note) createTab(path string, text string) *noteTab {
 	gtk.BaseWidget(tab.paned).ConnectMap(func() {
 		scheduleApplyEditorWidth(tab)
 	})
-	tab.paned.SetStartChild(editorScroll)
-	tab.paned.SetEndChild(previewScroll)
+	gtk.BaseWidget(tab.paned).AddTickCallback(func(_ gtk.Widgetter, _ gdk.FrameClocker) bool {
+		trackEditorWidthResize(tab)
+		n.refreshLineNumbers(tab)
+		return true
+	})
+	tab.paned.SetStartChild(tab.editorWrap)
+	tab.paned.SetEndChild(tab.previewScroll)
 
 	tab.commandEntry = gtk.NewEntry()
 	tab.commandEntry.SetHExpand(true)
@@ -288,6 +316,7 @@ func (n *Note) createTab(path string, text string) *noteTab {
 		}
 		n.applyMarkdownFormatting()
 		n.updatePreview()
+		n.refreshLineNumbers(tab)
 		n.autoSaveForTab(tab)
 	})
 
@@ -337,6 +366,15 @@ func (n *Note) markdownToolbarForTab(tab *noteTab) *gtk.Box {
 		button.ConnectClicked(action.fn)
 		row.Append(button)
 	}
+	wrapToggle := ui.IconToggleButton("sidebar-show-symbolic", "Toggle line wrapping")
+	wrapToggle.SetActive(tab.wrapEnabled)
+	wrapToggle.ConnectToggled(func() {
+		tab.wrapEnabled = wrapToggle.Active()
+		n.applyEditorWrap(tab)
+		n.refreshLineNumbers(tab)
+	})
+	tab.wrapToggle = wrapToggle
+	row.Append(wrapToggle)
 	return row
 }
 
@@ -451,6 +489,7 @@ func (n *Note) loadTab(tab *noteTab) {
 	n.previewLinks = slices.Clone(tab.previewLinks)
 	n.paned = tab.paned
 	n.previewToggle = tab.previewToggle
+	n.wrapToggle = tab.wrapToggle
 	n.commandEntry = tab.commandEntry
 	n.vimInsertMode = tab.vimInsertMode
 	n.vimPendingOp = tab.vimPendingOp
@@ -472,6 +511,7 @@ func (n *Note) clearActivePointers() {
 	n.previewLinks = nil
 	n.paned = nil
 	n.previewToggle = nil
+	n.wrapToggle = nil
 	n.commandEntry = nil
 	n.vimPendingOp = ""
 	n.selectionMode = vimSelectionNone
@@ -1411,7 +1451,7 @@ func (n *Note) deleteCurrentNote() error {
 	}
 	path := tab.path
 	n.closeCurrentTab()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if _, err := settings.MoveNoteToTrash(path); err != nil {
 		return err
 	}
 	files, err := listNoteFiles()
@@ -1422,7 +1462,7 @@ func (n *Note) deleteCurrentNote() error {
 		n.newNote()
 	}
 	n.refreshSidebar()
-	n.statusMessage("Deleted note: " + noteTitleFromPath(path))
+	n.statusMessage("Moved note to trash: " + noteTitleFromPath(path))
 	return nil
 }
 
@@ -1440,7 +1480,7 @@ func (n *Note) deleteFolderPath(path string) error {
 			n.closeCurrentTab()
 		}
 	}
-	if err := os.RemoveAll(path); err != nil {
+	if _, err := settings.MoveFolderToTrash(path); err != nil {
 		return err
 	}
 	files, err := listNoteFiles()
@@ -1457,7 +1497,7 @@ func (n *Note) deleteFolderPath(path string) error {
 			return err
 		}
 	}
-	n.statusMessage("Deleted folder: " + filepath.ToSlash(sourceFolder))
+	n.statusMessage("Moved folder to trash: " + filepath.ToSlash(sourceFolder))
 	return nil
 }
 
@@ -1574,20 +1614,26 @@ func listNoteFiles() ([]noteFile, error) {
 		if path == notesDir() {
 			return nil
 		}
+		relPath, err := filepath.Rel(notesDir(), path)
+		if err != nil {
+			return err
+		}
 		if d.IsDir() {
+			if settings.IsTrashRelativePath(relPath) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
 		if ext != ".md" && ext != ".txt" {
 			return nil
 		}
-		relPath, err := filepath.Rel(notesDir(), path)
-		if err != nil {
-			return err
-		}
 		relDir := filepath.Dir(relPath)
 		if relDir == "." {
 			relDir = ""
+		}
+		if settings.IsTrashRelativePath(relPath) || settings.IsTrashRelativePath(relDir) {
+			return nil
 		}
 		files = append(files, noteFile{
 			Title:   noteTitleFromPath(path),
@@ -1761,6 +1807,9 @@ func listNoteFolders() ([]string, error) {
 		}
 		if rel == "." || rel == "" {
 			return nil
+		}
+		if settings.IsTrashRelativePath(rel) {
+			return filepath.SkipDir
 		}
 		folders[rel] = struct{}{}
 		return nil
@@ -1952,14 +2001,116 @@ func scheduleApplyEditorWidth(tab *noteTab) {
 	})
 }
 
-func resolvedEditorWidth(savedWidth int, allocatedWidth int) int {
-	if savedWidth > 0 {
-		return savedWidth
+func trackEditorWidthResize(tab *noteTab) {
+	if tab == nil || tab.paned == nil {
+		return
 	}
-	if allocatedWidth > 0 {
+	allocated := gtk.BaseWidget(tab.paned).AllocatedWidth()
+	if allocated <= 0 || allocated == tab.lastPanedWidth {
+		return
+	}
+	tab.lastPanedWidth = allocated
+	if !tab.widthPersistOK {
+		return
+	}
+	if width, ok := editorWidthForPersistence(tab.paned); ok && !needsEditorWidthReapply(width, settings.PersistedNotesEditorWidth(), allocated) {
+		return
+	}
+	applyEditorWidth(tab)
+}
+
+func needsEditorWidthReapply(currentWidth int, savedWidth int, allocatedWidth int) bool {
+	return currentWidth != resolvedEditorWidth(savedWidth, allocatedWidth)
+}
+
+func resolvedEditorWidth(savedWidth int, allocatedWidth int) int {
+	if allocatedWidth <= 0 {
+		if savedWidth > 0 {
+			return savedWidth
+		}
+		return 0
+	}
+
+	width := savedWidth
+	if width <= 0 {
+		width = allocatedWidth / 2
+	}
+
+	maxWidth := maxEditorWidth(allocatedWidth)
+	if maxWidth <= 0 {
 		return allocatedWidth / 2
 	}
-	return 0
+	if width > maxWidth {
+		return maxWidth
+	}
+	return width
+}
+
+func maxEditorWidth(allocatedWidth int) int {
+	const minPreviewWidth = 180
+
+	if allocatedWidth <= 0 {
+		return 0
+	}
+	if allocatedWidth <= minPreviewWidth*2 {
+		return allocatedWidth / 2
+	}
+	return allocatedWidth - minPreviewWidth
+}
+
+func (n *Note) applyEditorWrap(tab *noteTab) {
+	if tab == nil || tab.note == nil || tab.buffer == nil {
+		return
+	}
+	wrapMode := gtk.WrapNone
+	if tab.wrapEnabled {
+		wrapMode = gtk.WrapWordChar
+	}
+	tab.note.SetWrapMode(wrapMode)
+	if bodyTag := tab.buffer.TagTable().Lookup(tagEditorBody); bodyTag != nil {
+		bodyTag.SetObjectProperty("wrap-mode", int(wrapMode))
+	}
+	if codeTag := tab.buffer.TagTable().Lookup(tagCodeBlock); codeTag != nil {
+		codeTag.SetObjectProperty("wrap-mode", int(gtk.WrapNone))
+	}
+}
+
+func (n *Note) refreshLineNumbers(tab *noteTab) {
+	if tab == nil || tab.note == nil || tab.buffer == nil || tab.lineNumberGutter == nil {
+		return
+	}
+	if gtk.BaseWidget(tab.note).Mapped() == false {
+		return
+	}
+
+	for _, label := range tab.lineNumberLabels {
+		tab.lineNumberGutter.Remove(label)
+	}
+	tab.lineNumberLabels = tab.lineNumberLabels[:0]
+
+	iter := tab.buffer.StartIter()
+	lastHeight := 0
+	for {
+		lineIter := *iter
+		rect := tab.note.IterLocation(&lineIter)
+		if rect == nil {
+			break
+		}
+
+		label := gtk.NewLabel(strconv.Itoa(lineIter.Line() + 1))
+		label.SetXAlign(1)
+		label.SetHAlign(gtk.AlignEnd)
+		label.SetSizeRequest(40, maxInt(rect.Height(), 1))
+		label.AddCSSClass("dim-label")
+		tab.lineNumberGutter.Put(label, 6, float64(rect.Y()))
+		tab.lineNumberLabels = append(tab.lineNumberLabels, label)
+		lastHeight = rect.Y() + rect.Height()
+
+		if !iter.ForwardLine() {
+			break
+		}
+	}
+	tab.lineNumberGutter.SetSizeRequest(52, maxInt(lastHeight+tab.note.TopMargin()+tab.note.PixelsBelowLines(), 1))
 }
 
 func editorWidthForPersistence(paned *gtk.Paned) (int, bool) {
