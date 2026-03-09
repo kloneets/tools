@@ -3,10 +3,12 @@ package ui
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	coreglib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
@@ -22,8 +24,9 @@ type Settings struct {
 	noteTabSpaces        *gtk.SpinButton
 	noteVimMode          *gtk.CheckButton
 	noteEditorMono       *gtk.CheckButton
-	noteFontSelect       *gtk.ComboBoxText
-	noteMonoFontSelect   *gtk.ComboBoxText
+	noteEditorFontSize   *gtk.SpinButton
+	noteFontSelect       *gtk.FontButton
+	noteMonoFontSelect   *gtk.FontButton
 	noteThemeSelect      *gtk.ComboBoxText
 	enableDriveSync      *gtk.CheckButton
 	connectButton        *gtk.Button
@@ -213,20 +216,10 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	s.noteVimMode.SetActive(current.VimMode)
 	s.noteEditorMono = gtk.NewCheckButtonWithLabel("Use monospace font in editor")
 	s.noteEditorMono.SetActive(current.EditorMonospace)
-	s.noteFontSelect = fontChoiceSelect([]string{
-		"Cantarell 11",
-		"Noto Sans 11",
-		"IBM Plex Sans 11",
-		"Source Sans 3 11",
-		"Literata 12",
-	}, current.BodyFont)
-	s.noteMonoFontSelect = fontChoiceSelect([]string{
-		"Noto Sans Mono 11",
-		"JetBrains Mono 11",
-		"Fira Code 11",
-		"IBM Plex Mono 11",
-		"Source Code Pro 11",
-	}, current.MonospaceFont)
+	s.noteEditorFontSize = gtk.NewSpinButtonWithRange(8, 40, 1)
+	s.noteEditorFontSize.SetValue(float64(effectiveEditorFontSize(current)))
+	s.noteFontSelect = fontButtonSelect(current.BodyFont, "Choose notes font", false)
+	s.noteMonoFontSelect = fontButtonSelect(current.MonospaceFont, "Choose code font", true)
 	s.noteThemeSelect = choiceSelect([][2]string{
 		{"ide-dark", "IDE Dark"},
 		{"neon-burst", "Neon Burst"},
@@ -236,6 +229,8 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 
 	tabRow := FieldWrapper(SectionLabel("Tab spaces"), DefaultBoxPadding)
 	tabRow.Append(s.noteTabSpaces)
+	editorSizeRow := FieldWrapper(SectionLabel("Editor font size"), DefaultBoxPadding)
+	editorSizeRow.Append(s.noteEditorFontSize)
 	fontRow := FieldWrapper(SectionLabel("Notes font"), DefaultBoxPadding)
 	fontRow.Append(s.noteFontSelect)
 	monoFontRow := FieldWrapper(SectionLabel("Code font"), DefaultBoxPadding)
@@ -245,6 +240,7 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 
 	content := MainArea()
 	content.Append(tabRow)
+	content.Append(editorSizeRow)
 	content.Append(s.noteVimMode)
 	content.Append(s.noteEditorMono)
 	content.Append(fontRow)
@@ -401,11 +397,14 @@ func (s *Settings) applyFormToSettings() {
 	if s.noteEditorMono != nil {
 		settings.Inst().NotesApp.EditorMonospace = s.noteEditorMono.Active()
 	}
-	if s.noteFontSelect != nil && s.noteFontSelect.ActiveID() != "" {
-		settings.Inst().NotesApp.BodyFont = s.noteFontSelect.ActiveID()
+	if s.noteEditorFontSize != nil {
+		settings.Inst().NotesApp.EditorFontSize = s.noteEditorFontSize.ValueAsInt()
 	}
-	if s.noteMonoFontSelect != nil && s.noteMonoFontSelect.ActiveID() != "" {
-		settings.Inst().NotesApp.MonospaceFont = s.noteMonoFontSelect.ActiveID()
+	if s.noteFontSelect != nil && s.noteFontSelect.Font() != "" {
+		settings.Inst().NotesApp.BodyFont = s.noteFontSelect.Font()
+	}
+	if s.noteMonoFontSelect != nil && s.noteMonoFontSelect.Font() != "" {
+		settings.Inst().NotesApp.MonospaceFont = s.noteMonoFontSelect.Font()
 	}
 	if s.noteThemeSelect != nil && s.noteThemeSelect.ActiveID() != "" {
 		settings.Inst().NotesApp.PreviewTheme = s.noteThemeSelect.ActiveID()
@@ -554,17 +553,52 @@ func shortFolderID(id string) string {
 	return id[:8]
 }
 
-func fontChoiceSelect(options []string, current string) *gtk.ComboBoxText {
-	items := make([][2]string, 0, len(options)+1)
-	seen := make(map[string]bool, len(options)+1)
-	for _, option := range options {
-		items = append(items, [2]string{option, option})
-		seen[option] = true
+func fontButtonSelect(current string, title string, monospaceOnly bool) *gtk.FontButton {
+	if strings.TrimSpace(current) == "" {
+		current = "Cantarell 11"
+		if monospaceOnly {
+			current = "Noto Sans Mono 11"
+		}
 	}
-	if current != "" && !seen[current] {
-		items = append(items, [2]string{current, current})
+	button := gtk.NewFontButtonWithFont(current)
+	button.SetTitle(title)
+	button.SetModal(true)
+	button.SetUseFont(false)
+	button.SetUseSize(true)
+	button.SetLevel(gtk.FontChooserLevelFamily | gtk.FontChooserLevelSize)
+	button.SetPreviewText("AaBbYyZz 0123456789")
+	if monospaceOnly {
+		button.SetFilterFunc(func(family pango.FontFamilier, _ pango.FontFacer) bool {
+			return pango.BaseFontFamily(family).IsMonospace()
+		})
 	}
-	return choiceSelect(items, current)
+	return button
+}
+
+func effectiveEditorFontSize(current settings.NotesAppSettings) int {
+	if current.EditorFontSize > 0 {
+		return current.EditorFontSize
+	}
+	if current.EditorMonospace {
+		return fontSpecSize(current.MonospaceFont, 11)
+	}
+	return fontSpecSize(current.BodyFont, 11)
+}
+
+func fontSpecSize(spec string, fallback int) int {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return fallback
+	}
+	parts := strings.Fields(spec)
+	if len(parts) == 0 {
+		return fallback
+	}
+	size, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil || size <= 0 {
+		return fallback
+	}
+	return size
 }
 
 func choiceSelect(options [][2]string, current string) *gtk.ComboBoxText {

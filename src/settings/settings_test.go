@@ -28,6 +28,15 @@ func TestDefaultSettings(t *testing.T) {
 	if got.NotesApp.EditorWidth != 0 {
 		t.Fatalf("NotesApp.EditorWidth = %d, want 0", got.NotesApp.EditorWidth)
 	}
+	if got.NotesApp.EditorFontSize != 0 {
+		t.Fatalf("NotesApp.EditorFontSize = %d, want 0", got.NotesApp.EditorFontSize)
+	}
+	if got.AppWindow.Width != 600 || got.AppWindow.Height != 300 {
+		t.Fatalf("AppWindow = %#v, want 600x300", got.AppWindow)
+	}
+	if got.AppWindow.Maximized {
+		t.Fatal("AppWindow.Maximized = true, want false by default")
+	}
 	if got.NotesApp.BodyFont != "Cantarell 11" {
 		t.Fatalf("NotesApp.BodyFont = %q, want Cantarell 11", got.NotesApp.BodyFont)
 	}
@@ -130,6 +139,9 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.UI == nil {
 		t.Fatal("normalizeSettings() should initialize UI settings")
 	}
+	if config.AppWindow.Width != 600 || config.AppWindow.Height != 300 {
+		t.Fatalf("normalizeSettings() AppWindow = %#v, want 600x300", config.AppWindow)
+	}
 	if !config.UI.ShowPages || !config.UI.ShowPassword || !config.UI.ShowNotes {
 		t.Fatalf("normalizeSettings() should default all widgets visible, got %#v", config.UI)
 	}
@@ -138,6 +150,9 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	}
 	if config.NotesApp.EditorWidth != 0 {
 		t.Fatalf("normalizeSettings() NotesApp.EditorWidth = %d, want 0", config.NotesApp.EditorWidth)
+	}
+	if config.NotesApp.EditorFontSize != 0 {
+		t.Fatalf("normalizeSettings() NotesApp.EditorFontSize = %d, want 0", config.NotesApp.EditorFontSize)
 	}
 	if config.NotesApp.BodyFont != "Cantarell 11" {
 		t.Fatalf("normalizeSettings() NotesApp.BodyFont = %q", config.NotesApp.BodyFont)
@@ -276,6 +291,29 @@ func TestPersistedNotesEditorWidthReadsFromDisk(t *testing.T) {
 	}
 }
 
+func TestSaveAppWindowStatePersistsValue(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	settingsInstance = defaultSettings()
+
+	SaveAppWindowState(1234, 777, true)
+
+	if settingsInstance.AppWindow.Width != 1234 || settingsInstance.AppWindow.Height != 777 || !settingsInstance.AppWindow.Maximized {
+		t.Fatalf("AppWindow = %#v, want width=1234 height=777 maximized=true", settingsInstance.AppWindow)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(data), `"app_window":{"width":1234,"height":777,"maximized":true}`) {
+		t.Fatalf("saved settings missing app_window: %s", string(data))
+	}
+}
+
 func TestInitOldSettingsDefaultsSidebarVisible(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -294,6 +332,20 @@ func TestInitOldSettingsDefaultsSidebarVisible(t *testing.T) {
 
 	if !settingsInstance.NotesApp.SidebarVisible {
 		t.Fatal("old settings should default notes sidebar to visible")
+	}
+}
+
+func TestNormalizeSettingsClearsNegativeEditorFontSize(t *testing.T) {
+	config := &UserSettings{
+		NotesApp: NotesAppSettings{
+			EditorFontSize: -4,
+		},
+	}
+
+	normalizeSettings(config)
+
+	if config.NotesApp.EditorFontSize != 0 {
+		t.Fatalf("normalizeSettings() EditorFontSize = %d, want 0", config.NotesApp.EditorFontSize)
 	}
 }
 

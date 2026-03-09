@@ -29,3 +29,9 @@ func TestWindowIconNameByPlatform(t *testing.T) {
 		t.Fatalf("windowIconName(linux) = %q, want %q", got, "media-tape")
 	}
 }
+
+func TestFontAwesomeSolidPathUsesExpectedAssetName(t *testing.T) {
+	if got := filepath.Base(FontAwesomeSolidPath()); got != "fa-solid-900.ttf" {
+		t.Fatalf("FontAwesomeSolidPath() basename = %q, want %q", got, "fa-solid-900.ttf")
+	}
+}

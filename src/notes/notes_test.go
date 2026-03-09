@@ -24,6 +24,10 @@ func requireGTK(t *testing.T) {
 	gtkInitOnce.Do(func() {
 		gtk.DisableSetlocale()
 		gtkInitOK = gtk.InitCheck()
+		if gtkInitOK {
+			helpers.InitGlobals()
+			helpers.InitStatusBar()
+		}
 	})
 	if !gtkInitOK {
 		t.Skip("GTK could not be initialized in this environment")
@@ -407,12 +411,12 @@ func TestSidebarBottomActionsOrderAndDragToggleIcon(t *testing.T) {
 	if second == nil || glib.InternObject(second).Native() != glib.InternObject(note.sidebarDragToggle).Native() {
 		t.Fatal("drag toggle should be the second bottom action")
 	}
-	label, ok := note.sidebarDragToggle.Child().(*gtk.Label)
+	image, ok := note.sidebarDragToggle.Child().(*gtk.Image)
 	if !ok {
-		t.Fatal("drag toggle should use a label icon")
+		t.Fatal("drag toggle should use an image icon")
 	}
-	if got := label.Text(); got != "↕" {
-		t.Fatalf("drag toggle label = %q, want %q", got, "↕")
+	if image.Paintable() == nil {
+		t.Fatal("drag toggle icon should load a paintable")
 	}
 }
 
@@ -832,8 +836,8 @@ func TestFolderRowsUseAddIcon(t *testing.T) {
 	if !ok {
 		t.Fatal("expected folder action child image")
 	}
-	if got := image.IconName(); got != "list-add-symbolic" {
-		t.Fatalf("folder action icon = %q, want %q", got, "list-add-symbolic")
+	if image.Paintable() == nil {
+		t.Fatal("folder action icon should load a paintable")
 	}
 }
 

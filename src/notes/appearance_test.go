@@ -107,3 +107,18 @@ func TestCurrentAppearanceUsesMonospaceEditorWhenEnabled(t *testing.T) {
 		t.Fatalf("preview font = %q/%v, want Cantarell/11", appearance.previewFamily, appearance.previewSize)
 	}
 }
+
+func TestCurrentAppearanceUsesEditorFontSizeOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.BodyFont = "Cantarell 11"
+	settings.Inst().NotesApp.EditorFontSize = 18
+
+	appearance := currentAppearance()
+	if appearance.editorFamily != "Cantarell" || appearance.editorSize != 18 {
+		t.Fatalf("editor font = %q/%v, want Cantarell/18", appearance.editorFamily, appearance.editorSize)
+	}
+	if appearance.previewSize != 11 {
+		t.Fatalf("preview size = %v, want 11", appearance.previewSize)
+	}
+}

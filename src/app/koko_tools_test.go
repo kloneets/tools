@@ -82,3 +82,38 @@ func TestApplyWidgetVisibility(t *testing.T) {
 		t.Fatal("left column should be hidden when pages and notes are hidden")
 	}
 }
+
+func TestRestoreAppWindowStateAppliesSavedSize(t *testing.T) {
+	requireGTK(t)
+
+	window := gtk.NewWindow()
+	restoreAppWindowState(window, &settings.UserSettings{
+		AppWindow: settings.AppWindowSettings{
+			Width:  910,
+			Height: 620,
+		},
+	})
+
+	width, height := window.DefaultSize()
+	if width != 910 || height != 620 {
+		t.Fatalf("window default size = %dx%d, want 910x620", width, height)
+	}
+}
+
+func TestPersistAppWindowStateStoresWindowDefaultSize(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	window := gtk.NewWindow()
+	window.SetDefaultSize(840, 520)
+
+	persistAppWindowState(window)
+
+	if settings.Inst().AppWindow.Width != 840 || settings.Inst().AppWindow.Height != 520 {
+		t.Fatalf("AppWindow = %#v, want width=840 height=520", settings.Inst().AppWindow)
+	}
+	if settings.Inst().AppWindow.Maximized {
+		t.Fatal("AppWindow.Maximized = true, want false")
+	}
+}

@@ -31,8 +31,7 @@ func PageUi() *KokoPages {
 	p.sbEntry = gtk.NewEntry()
 	p.sbEntry.SetText(fmt.Sprint(appSettings.SecondBookPages))
 	p.resLabel = gtk.NewLabel("")
-	p.calcButton = gtk.NewButtonFromIconName("input-dialpad")
-	p.calcButton.SetTooltipText("Calculate")
+	p.calcButton = ui.IconButton("input-dialpad", "Calculate")
 	p.calcButton.ConnectClicked(p.Calculate)
 
 	hBox := gtk.NewBox(gtk.OrientationHorizontal, 0)

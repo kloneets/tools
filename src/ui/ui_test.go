@@ -1,12 +1,14 @@
 package ui
 
 import (
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/gdrive"
+	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
 )
 
@@ -141,6 +143,22 @@ func TestCustomMenuSkipsWidgetItemsWithoutWidgetMap(t *testing.T) {
 	}
 }
 
+func TestIconButtonUsesBundledFontAwesomeImage(t *testing.T) {
+	requireGTK(t)
+
+	button := IconButton("list-add-symbolic", "New note")
+	image, ok := button.Child().(*gtk.Image)
+	if !ok {
+		t.Fatal("IconButton() should attach an image child")
+	}
+	if got := image.PixelSize(); got != 16 {
+		t.Fatalf("IconButton() pixel size = %d, want 16", got)
+	}
+	if _, err := os.Stat(helpers.FontAwesomeIconPath(IconGlyph("list-add-symbolic"))); err != nil {
+		t.Fatalf("IconButton() asset missing: %v", err)
+	}
+}
+
 func TestFolderDisplayLabelAddsSuffixOnlyForDuplicates(t *testing.T) {
 	folder := folderDisplayLabel(
 		gdrive.Folder{ID: "1234567890", Path: "Drive / Projects / Koko"},
@@ -169,5 +187,46 @@ func TestLastSyncSummaryIncludesErrorMessage(t *testing.T) {
 	want := "Last sync: 2026-03-07T17:35:34+02:00 (error)\ncreate drive file: 403 forbidden"
 	if summary != want {
 		t.Fatalf("lastSyncSummary() = %q, want %q", summary, want)
+	}
+}
+
+func TestFontButtonSelectUsesSystemFontChooserSettings(t *testing.T) {
+	requireGTK(t)
+
+	button := fontButtonSelect("Cantarell 13", "Choose notes font", false)
+
+	if button.Font() != "Cantarell 13" {
+		t.Fatalf("fontButtonSelect() font = %q, want Cantarell 13", button.Font())
+	}
+	if !button.UseSize() {
+		t.Fatal("fontButtonSelect() should show the selected size")
+	}
+	if button.Level() != gtk.FontChooserLevelFamily|gtk.FontChooserLevelSize {
+		t.Fatalf("fontButtonSelect() level = %v", button.Level())
+	}
+}
+
+func TestEffectiveEditorFontSizeUsesOverrideThenCurrentFont(t *testing.T) {
+	override := effectiveEditorFontSize(settings.NotesAppSettings{
+		BodyFont:       "Cantarell 11",
+		EditorFontSize: 17,
+	})
+	if override != 17 {
+		t.Fatalf("effectiveEditorFontSize() override = %d, want 17", override)
+	}
+
+	mono := effectiveEditorFontSize(settings.NotesAppSettings{
+		EditorMonospace: true,
+		MonospaceFont:   "JetBrains Mono 14",
+	})
+	if mono != 14 {
+		t.Fatalf("effectiveEditorFontSize() monospace = %d, want 14", mono)
+	}
+
+	body := effectiveEditorFontSize(settings.NotesAppSettings{
+		BodyFont: "IBM Plex Sans 12",
+	})
+	if body != 12 {
+		t.Fatalf("effectiveEditorFontSize() body = %d, want 12", body)
 	}
 }

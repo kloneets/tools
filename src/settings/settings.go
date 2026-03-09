@@ -18,8 +18,15 @@ type UserSettings struct {
 	PasswordApp PasswordAppSettings `json:"password_app"`
 	PagesApp    PagesAppSettings    `json:"pages_app"`
 	NotesApp    NotesAppSettings    `json:"notes_app"`
+	AppWindow   AppWindowSettings   `json:"app_window"`
 	UI          *UISettings         `json:"ui"`
 	GDrive      *GDriveSettings     `json:"gdrive"`
+}
+
+type AppWindowSettings struct {
+	Width     int  `json:"width"`
+	Height    int  `json:"height"`
+	Maximized bool `json:"maximized"`
 }
 
 type PagesAppSettings struct {
@@ -38,6 +45,7 @@ type PasswordAppSettings struct {
 type NotesAppSettings struct {
 	TabSpaces       int    `json:"tab_spaces"`
 	EditorWidth     int    `json:"editor_width,omitempty"`
+	EditorFontSize  int    `json:"editor_font_size,omitempty"`
 	SidebarVisible  bool   `json:"sidebar_visible"`
 	BodyFont        string `json:"body_font"`
 	MonospaceFont   string `json:"monospace_font"`
@@ -146,6 +154,10 @@ func defaultSettings() *UserSettings {
 			SecondBookPages: 0,
 			ReadPages:       0,
 		},
+		AppWindow: AppWindowSettings{
+			Width:  600,
+			Height: 300,
+		},
 		NotesApp: NotesAppSettings{
 			TabSpaces:      4,
 			SidebarVisible: true,
@@ -180,8 +192,17 @@ func normalizeSettings(s *UserSettings) {
 	if s.UI == nil {
 		s.UI = defaultUISettings()
 	}
+	if s.AppWindow.Width <= 0 {
+		s.AppWindow.Width = 600
+	}
+	if s.AppWindow.Height <= 0 {
+		s.AppWindow.Height = 300
+	}
 	if s.NotesApp.TabSpaces <= 0 {
 		s.NotesApp.TabSpaces = 4
+	}
+	if s.NotesApp.EditorFontSize < 0 {
+		s.NotesApp.EditorFontSize = 0
 	}
 	if s.NotesApp.BodyFont == "" && s.NotesApp.MonospaceFont == "" && s.NotesApp.PreviewTheme == "" && !s.NotesApp.VimMode && !s.NotesApp.EditorMonospace && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
@@ -248,6 +269,20 @@ func SaveNotesEditorWidth(width int) {
 	saveSettings(false, false)
 }
 
+func SaveAppWindowState(width int, height int, maximized bool) {
+	if settingsInstance == nil {
+		return
+	}
+	if width > 0 {
+		settingsInstance.AppWindow.Width = width
+	}
+	if height > 0 {
+		settingsInstance.AppWindow.Height = height
+	}
+	settingsInstance.AppWindow.Maximized = maximized
+	saveSettings(false, false)
+}
+
 func PersistedNotesEditorWidth() int {
 	if settingsInstance != nil && settingsInstance.NotesApp.EditorWidth > 0 {
 		return settingsInstance.NotesApp.EditorWidth
@@ -274,6 +309,11 @@ func PersistedNotesEditorWidth() int {
 
 func saveSettings(sync bool, notifyHooks bool) {
 	file := fileName()
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		log.Println(err)
+		statusUpdater("Couldn't prepare settings directory... :(")
+		return
+	}
 	dataString, err := json.Marshal(settingsInstance)
 	if err != nil {
 		log.Println(err)

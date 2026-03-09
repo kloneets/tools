@@ -67,6 +67,9 @@ func currentAppearance() notesAppearance {
 		editorFamily = monoFamily
 		editorSize = monoSize
 	}
+	if noteSettings.EditorFontSize > 0 {
+		editorSize = float64(noteSettings.EditorFontSize)
+	}
 	return notesAppearance{
 		editorFamily:  editorFamily,
 		editorSize:    editorSize,

@@ -79,7 +79,11 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	if iconName := helpers.WindowIconName(); iconName != "" {
 		tools.appWindow.SetIconName(iconName)
 	}
-	tools.appWindow.SetDefaultSize(600, 300)
+	restoreAppWindowState(&tools.appWindow.Window, settings.Inst())
+	tools.appWindow.ConnectCloseRequest(func() bool {
+		persistAppWindowState(&tools.appWindow.Window)
+		return false
+	})
 	tools.appWindow.SetTitle("Koko tools")
 
 	helpers.InitStatusBar()
@@ -116,6 +120,38 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	})
 
 	return &tools
+}
+
+func restoreAppWindowState(window *gtk.Window, cfg *settings.UserSettings) {
+	if window == nil || cfg == nil {
+		return
+	}
+	width := cfg.AppWindow.Width
+	height := cfg.AppWindow.Height
+	if width <= 0 {
+		width = 600
+	}
+	if height <= 0 {
+		height = 300
+	}
+	window.SetDefaultSize(width, height)
+	if cfg.AppWindow.Maximized {
+		window.Maximize()
+	}
+}
+
+func persistAppWindowState(window *gtk.Window) {
+	if window == nil {
+		return
+	}
+	width, height := window.DefaultSize()
+	if width <= 0 {
+		width = settings.Inst().AppWindow.Width
+	}
+	if height <= 0 {
+		height = settings.Inst().AppWindow.Height
+	}
+	settings.SaveAppWindowState(width, height, window.IsMaximized())
 }
 
 func (t *kokoTools) applyWidgetVisibility(cfg *settings.UserSettings) {

@@ -87,19 +87,15 @@ func (n *Note) buildWorkspace() {
 		n.switchToTab(int(pageNum))
 	})
 
-	n.sidebarToggle = gtk.NewToggleButton()
-	n.sidebarToggle.SetIconName("sidebar-show-symbolic")
+	n.sidebarToggle = ui.IconToggleButton("sidebar-show-symbolic", "Show or hide notes sidebar")
 	n.sidebarToggle.SetActive(settings.Inst().NotesApp.SidebarVisible)
-	n.sidebarToggle.SetTooltipText("Show or hide notes sidebar")
 	n.sidebarToggle.ConnectToggled(func() {
 		n.setSidebarVisible(n.sidebarToggle.Active())
 		settings.Inst().NotesApp.SidebarVisible = n.sidebarToggle.Active()
 		settings.SaveSettings()
 	})
 
-	n.sidebarDragToggle = gtk.NewToggleButton()
-	n.sidebarDragToggle.SetTooltipText("Toggle drag mode")
-	n.sidebarDragToggle.SetChild(gtk.NewLabel("↕"))
+	n.sidebarDragToggle = ui.IconToggleButton("arrows-up-down", "Toggle drag mode")
 	n.sidebarDragToggle.ConnectToggled(func() {
 		n.cancelPendingSidebarDrag()
 		if !n.sidebarDragToggle.Active() {
@@ -328,10 +324,8 @@ func (n *Note) markdownToolbarForTab(tab *noteTab) *gtk.Box {
 		{icon: "format-justify-left-symbolic", tooltip: "Quote", fn: func() { n.prefixLines("> ", "quote") }},
 	} {
 		if action.icon == "document-preview-symbolic" {
-			toggle := gtk.NewToggleButton()
-			toggle.SetIconName(action.icon)
+			toggle := ui.IconToggleButton(action.icon, action.tooltip)
 			toggle.SetActive(true)
-			toggle.SetTooltipText(action.tooltip)
 			toggle.ConnectToggled(func() {
 				n.setPreviewVisible(toggle.Active())
 			})
@@ -905,6 +899,14 @@ func (n *Note) showSidebarContextMenu(row *gtk.ListBoxRow, parent gtk.Widgetter)
 	n.showSidebarRowMenu(entry.Path, entry.Kind, entry.Folder, parent)
 }
 
+func canPopupPopover(parent gtk.Widgetter) bool {
+	if parent == nil {
+		return false
+	}
+	widget := gtk.BaseWidget(parent)
+	return widget.Root() != nil && widget.Native() != nil && widget.Mapped()
+}
+
 func (n *Note) showSidebarRowActions(row *gtk.ListBoxRow, parent gtk.Widgetter) {
 	entry, ok := n.sidebarEntryForRow(row)
 	if !ok {
@@ -926,7 +928,9 @@ func (n *Note) showSidebarRowActions(row *gtk.ListBoxRow, parent gtk.Widgetter) 
 			gtk.BaseWidget(n.sidebarCreate).Unparent()
 		}
 		n.sidebarCreate.SetParent(parent)
-		n.sidebarCreate.Popup()
+		if canPopupPopover(parent) {
+			n.sidebarCreate.Popup()
+		}
 		return
 	}
 	n.showSidebarRowMenu(entry.Path, entry.Kind, entry.Folder, parent)
@@ -956,7 +960,9 @@ func (n *Note) showSidebarRowMenu(rowPath string, kind sidebarEntryKind, folder 
 		gtk.BaseWidget(n.sidebarMenu).Unparent()
 	}
 	n.sidebarMenu.SetParent(parent)
-	n.sidebarMenu.Popup()
+	if canPopupPopover(parent) {
+		n.sidebarMenu.Popup()
+	}
 }
 
 func (n *Note) buildSidebarContextMenu() *gtk.Popover {
@@ -1037,7 +1043,9 @@ func (n *Note) showSidebarCreatePopover(parent gtk.Widgetter, mode sidebarEntryK
 		gtk.BaseWidget(n.sidebarCreate).Unparent()
 	}
 	n.sidebarCreate.SetParent(parent)
-	n.sidebarCreate.Popup()
+	if canPopupPopover(parent) {
+		n.sidebarCreate.Popup()
+	}
 }
 
 func (n *Note) buildSidebarCreatePopover() *gtk.Popover {
@@ -1859,9 +1867,7 @@ func (n *Note) autoSaveForTab(tab *noteTab) {
 }
 
 func workspaceIconButton(iconName string, tooltip string) *gtk.Button {
-	button := gtk.NewButtonFromIconName(iconName)
-	button.SetTooltipText(tooltip)
-	return button
+	return ui.IconButton(iconName, tooltip)
 }
 
 func workspaceToolbarButton(iconName string, glyph string, tooltip string) *gtk.Button {
@@ -1920,6 +1926,7 @@ func scheduleApplyEditorWidth(tab *noteTab) {
 	tab.widthApplySeq = seq
 	tab.widthRestored = false
 	tab.widthPersistOK = false
+	applyEditorWidth(tab)
 	glib.IdleAdd(func() {
 		if tab.widthApplySeq != seq {
 			return

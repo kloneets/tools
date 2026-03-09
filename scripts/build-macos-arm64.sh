@@ -15,6 +15,7 @@ ICONSET_DIR="$DIST_DIR/koko-tools.iconset"
 ICON_PNG="assets/koko-tools-icon-120.png"
 ICON_SVG="assets/koko-tools-icon.svg"
 ICON_ICNS="$RESOURCES_DIR/koko-tools.icns"
+ASSETS_DIR="assets"
 
 build_bundle=false
 if [[ "${1:-}" == "--bundle" ]]; then
@@ -38,8 +39,8 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
 go build -o "$DIST_DIR/$BINARY_NAME" .
-cp "$ICON_PNG" "$DIST_DIR/"
-cp "$ICON_SVG" "$DIST_DIR/"
+mkdir -p "$DIST_DIR/assets"
+cp -R "$ASSETS_DIR/." "$DIST_DIR/assets/"
 
 if [[ "$build_bundle" == false ]]; then
   echo "Built $DIST_DIR/$BINARY_NAME"
@@ -48,8 +49,8 @@ fi
 
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$DIST_DIR/$BINARY_NAME" "$MACOS_DIR/$BINARY_NAME"
-cp "$ICON_PNG" "$RESOURCES_DIR/"
-cp "$ICON_SVG" "$RESOURCES_DIR/"
+mkdir -p "$RESOURCES_DIR/assets"
+cp -R "$ASSETS_DIR/." "$RESOURCES_DIR/assets/"
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
