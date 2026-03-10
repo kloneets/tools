@@ -13,6 +13,7 @@ import (
 
 	glib "github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
+	gio "github.com/diamondburned/gotk4/pkg/gio/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
@@ -20,41 +21,37 @@ import (
 )
 
 type noteTab struct {
-	title            string
-	path             string
-	tabLabel         *gtk.Label
-	root             *gtk.Box
-	editorWrap       *gtk.Box
-	note             *gtk.TextView
-	buffer           *gtk.TextBuffer
-	editorScroll     *gtk.ScrolledWindow
-	lineNumberScroll *gtk.ScrolledWindow
-	lineNumberGutter *gtk.Fixed
-	lineNumberLabels []*gtk.Label
-	previewScroll    *gtk.ScrolledWindow
-	preview          *gtk.TextView
-	previewBuffer    *gtk.TextBuffer
-	previewLinks     []markdownLink
-	paned            *gtk.Paned
-	previewToggle    *gtk.ToggleButton
-	wrapToggle       *gtk.ToggleButton
-	commandEntry     *gtk.Entry
-	wrapEnabled      bool
-	vimInsertMode    bool
-	vimPendingOp     string
-	selectionMode    vimSelectionMode
-	selectionMark    int
-	selectionCursor  int
-	yankRegister     vimRegister
-	commandMode      bool
-	lastSearch       string
-	lastSearchPos    int
-	waitingToSave    bool
-	widthRestored    bool
-	applyingWidth    bool
-	widthPersistOK   bool
-	widthApplySeq    int64
-	lastPanedWidth   int
+	title           string
+	path            string
+	tabLabel        *gtk.Label
+	root            *gtk.Box
+	note            *gtk.TextView
+	buffer          *gtk.TextBuffer
+	editorScroll    *gtk.ScrolledWindow
+	previewScroll   *gtk.ScrolledWindow
+	preview         *gtk.TextView
+	previewBuffer   *gtk.TextBuffer
+	previewLinks    []markdownLink
+	paned           *gtk.Paned
+	previewToggle   *gtk.ToggleButton
+	wrapToggle      *gtk.ToggleButton
+	commandEntry    *gtk.Entry
+	wrapEnabled     bool
+	vimInsertMode   bool
+	vimPendingOp    string
+	selectionMode   vimSelectionMode
+	selectionMark   int
+	selectionCursor int
+	yankRegister    vimRegister
+	commandMode     bool
+	lastSearch      string
+	lastSearchPos   int
+	waitingToSave   bool
+	widthRestored   bool
+	applyingWidth   bool
+	widthPersistOK  bool
+	widthApplySeq   int64
+	lastPanedWidth  int
 }
 
 type noteFile struct {
@@ -162,6 +159,18 @@ func (n *Note) buildWorkspace() {
 	})
 	n.sidebarActions.Append(n.sidebarNewFolder)
 
+	n.sidebarImportFile = workspaceIconButton("text-x-generic-symbolic", "Import markdown file")
+	n.sidebarImportFile.ConnectClicked(func() {
+		n.showImportMarkdownFileDialog()
+	})
+	n.sidebarActions.Append(n.sidebarImportFile)
+
+	n.sidebarImportFolder = workspaceIconButton("folder-symbolic", "Import markdown folder")
+	n.sidebarImportFolder.ConnectClicked(func() {
+		n.showImportMarkdownFolderDialog()
+	})
+	n.sidebarActions.Append(n.sidebarImportFolder)
+
 	n.sidebarContent = gtk.NewBox(gtk.OrientationVertical, ui.DefaultBoxPadding)
 	n.sidebarContent.SetVExpand(true)
 	n.sidebarContent.Append(n.sidebarScroll)
@@ -211,7 +220,6 @@ func (n *Note) createTab(path string, text string) *noteTab {
 		title: noteTitleFromPath(path),
 		path:  path,
 	}
-
 	tab.buffer = styledBuffer(false)
 	tab.buffer.SetText(text)
 	tab.wrapEnabled = true
@@ -220,7 +228,6 @@ func (n *Note) createTab(path string, text string) *noteTab {
 	gtk.BaseWidget(tab.note).SetName("notes-editor")
 	tab.note.SetHExpand(true)
 	tab.note.SetVExpand(true)
-	tab.note.SetSizeRequest(300, 200)
 	tab.note.SetMarginStart(ui.DefaultBoxPadding)
 	tab.note.SetMarginEnd(ui.DefaultBoxPadding)
 	tab.note.SetMarginTop(ui.DefaultBoxPadding)
@@ -242,27 +249,17 @@ func (n *Note) createTab(path string, text string) *noteTab {
 	tab.preview.AddController(n.previewMotionController())
 
 	tab.editorScroll = noteScrolledWindow(tab.note)
-	tab.lineNumberGutter = gtk.NewFixed()
-	gtk.BaseWidget(tab.lineNumberGutter).SetName("notes-line-numbers")
-	tab.lineNumberScroll = noteScrolledWindow(tab.lineNumberGutter)
-	tab.lineNumberScroll.SetHExpand(false)
-	tab.lineNumberScroll.SetMinContentWidth(52)
-	tab.lineNumberScroll.SetMaxContentWidth(52)
-	tab.lineNumberScroll.SetPolicy(gtk.PolicyNever, gtk.PolicyNever)
-	tab.lineNumberScroll.SetVAdjustment(tab.editorScroll.VAdjustment())
-	tab.editorWrap = gtk.NewBox(gtk.OrientationHorizontal, 0)
-	tab.editorWrap.Append(tab.lineNumberScroll)
-	tab.editorWrap.Append(tab.editorScroll)
 	tab.previewScroll = noteScrolledWindow(tab.preview)
-	tab.previewScroll.SetVAdjustment(tab.editorScroll.VAdjustment())
+	n.syncEditorAndPreviewScroll(tab)
 	n.applyEditorWrap(tab)
-	n.refreshLineNumbers(tab)
 
 	tab.paned = gtk.NewPaned(gtk.OrientationHorizontal)
 	tab.paned.SetHExpand(true)
 	tab.paned.SetVExpand(true)
 	tab.paned.SetResizeStartChild(true)
 	tab.paned.SetResizeEndChild(true)
+	tab.paned.SetShrinkStartChild(true)
+	tab.paned.SetShrinkEndChild(true)
 	glib.BaseObject(tab.paned).NotifyProperty("position", func() {
 		if width, ok := editorWidthForPersistence(tab.paned); ok && shouldPersistEditorWidth(tab, width) {
 			persistEditorWidth(width)
@@ -273,10 +270,9 @@ func (n *Note) createTab(path string, text string) *noteTab {
 	})
 	gtk.BaseWidget(tab.paned).AddTickCallback(func(_ gtk.Widgetter, _ gdk.FrameClocker) bool {
 		trackEditorWidthResize(tab)
-		n.refreshLineNumbers(tab)
 		return true
 	})
-	tab.paned.SetStartChild(tab.editorWrap)
+	tab.paned.SetStartChild(tab.editorScroll)
 	tab.paned.SetEndChild(tab.previewScroll)
 
 	tab.commandEntry = gtk.NewEntry()
@@ -316,7 +312,6 @@ func (n *Note) createTab(path string, text string) *noteTab {
 		}
 		n.applyMarkdownFormatting()
 		n.updatePreview()
-		n.refreshLineNumbers(tab)
 		n.autoSaveForTab(tab)
 	})
 
@@ -371,7 +366,6 @@ func (n *Note) markdownToolbarForTab(tab *noteTab) *gtk.Box {
 	wrapToggle.ConnectToggled(func() {
 		tab.wrapEnabled = wrapToggle.Active()
 		n.applyEditorWrap(tab)
-		n.refreshLineNumbers(tab)
 	})
 	tab.wrapToggle = wrapToggle
 	row.Append(wrapToggle)
@@ -1274,8 +1268,166 @@ func (n *Note) createFolder(rawFolder string) error {
 	return nil
 }
 
+func (n *Note) showImportMarkdownFileDialog() {
+	dialog := n.newImportDialog("Import markdown file", gtk.FileChooserActionOpen, "Import")
+	if dialog == nil {
+		n.statusMessage("Import file dialog is unavailable")
+		return
+	}
+	dialog.SetFilter(markdownImportFilter())
+	dialog.ConnectResponse(func(responseID int) {
+		defer dialog.Destroy()
+		if gtk.ResponseType(responseID) != gtk.ResponseAccept {
+			return
+		}
+		file := dialog.File()
+		if file == nil {
+			return
+		}
+		importedPath, err := importMarkdownFileIntoFolder(file.Path(), n.selectedFolder)
+		if err != nil {
+			n.statusMessage("Import failed: " + err.Error())
+			return
+		}
+		if importedPath == "" {
+			n.statusMessage("Only markdown files can be imported")
+			return
+		}
+		n.openNotePath(importedPath)
+		n.refreshSidebar()
+		n.statusMessage("Imported note: " + noteTitleFromPath(importedPath))
+	})
+	dialog.Show()
+}
+
+func (n *Note) showImportMarkdownFolderDialog() {
+	dialog := n.newImportDialog("Import markdown folder", gtk.FileChooserActionSelectFolder, "Import")
+	if dialog == nil {
+		n.statusMessage("Import folder dialog is unavailable")
+		return
+	}
+	dialog.ConnectResponse(func(responseID int) {
+		defer dialog.Destroy()
+		if gtk.ResponseType(responseID) != gtk.ResponseAccept {
+			return
+		}
+		file := dialog.File()
+		if file == nil {
+			return
+		}
+		importedPaths, err := importMarkdownFolderIntoFolder(file.Path(), n.selectedFolder)
+		if err != nil {
+			n.statusMessage("Import failed: " + err.Error())
+			return
+		}
+		if len(importedPaths) == 0 {
+			n.statusMessage("No markdown files found to import")
+			return
+		}
+		n.openNotePath(importedPaths[0])
+		n.refreshSidebar()
+		n.statusMessage(fmt.Sprintf("Imported %d markdown note(s)", len(importedPaths)))
+	})
+	dialog.Show()
+}
+
+func (n *Note) newImportDialog(title string, action gtk.FileChooserAction, acceptLabel string) *gtk.FileChooserNative {
+	var parent *gtk.Window
+	if globals := helpers.CurrentGlobals(); globals != nil {
+		parent = globals.MainWindow
+	}
+	dialog := gtk.NewFileChooserNative(title, parent, action, acceptLabel, "Cancel")
+	if dialog == nil {
+		return nil
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		_ = dialog.SetCurrentFolder(gio.NewFileForPath(cwd))
+	}
+	return dialog
+}
+
+func markdownImportFilter() *gtk.FileFilter {
+	filter := gtk.NewFileFilter()
+	filter.SetName("Markdown files")
+	filter.AddPattern("*.md")
+	filter.AddPattern("*.markdown")
+	return filter
+}
+
 func (n *Note) newNoteInFolder(folder string) error {
 	return n.newNoteNamedInFolder(folder, "")
+}
+
+func importMarkdownFileIntoFolder(sourcePath string, targetFolder string) (string, error) {
+	if !isImportableMarkdownPath(sourcePath) {
+		return "", nil
+	}
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	destinationPath := uniqueNotePathInFolder(sanitizeFolderPath(targetFolder), noteTitleFromPath(sourcePath), "")
+	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(destinationPath, content, 0o644); err != nil {
+		return "", err
+	}
+	return destinationPath, nil
+}
+
+func importMarkdownFolderIntoFolder(sourceFolder string, targetFolder string) ([]string, error) {
+	sourceFolder = filepath.Clean(sourceFolder)
+	rootFolder := sanitizeFolderPath(filepath.Join(targetFolder, filepath.Base(sourceFolder)))
+	importedPaths := make([]string, 0)
+
+	err := filepath.WalkDir(sourceFolder, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !isImportableMarkdownPath(path) {
+			return nil
+		}
+
+		relativeDir := ""
+		if parent := filepath.Dir(path); parent != sourceFolder {
+			rel, err := filepath.Rel(sourceFolder, parent)
+			if err != nil {
+				return err
+			}
+			relativeDir = sanitizeFolderPath(rel)
+		}
+
+		importFolder := rootFolder
+		if relativeDir != "" {
+			importFolder = filepath.Join(rootFolder, relativeDir)
+		}
+		importedPath, err := importMarkdownFileIntoFolder(path, importFolder)
+		if err != nil {
+			return err
+		}
+		if importedPath != "" {
+			importedPaths = append(importedPaths, importedPath)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(importedPaths)
+	return importedPaths, nil
+}
+
+func isImportableMarkdownPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown":
+		return true
+	default:
+		return false
+	}
 }
 
 func (n *Note) newNoteNamedInFolder(folder string, rawTitle string) error {
@@ -2075,42 +2227,40 @@ func (n *Note) applyEditorWrap(tab *noteTab) {
 	}
 }
 
-func (n *Note) refreshLineNumbers(tab *noteTab) {
-	if tab == nil || tab.note == nil || tab.buffer == nil || tab.lineNumberGutter == nil {
-		return
-	}
-	if gtk.BaseWidget(tab.note).Mapped() == false {
+func (n *Note) syncEditorAndPreviewScroll(tab *noteTab) {
+	if tab == nil || tab.editorScroll == nil || tab.previewScroll == nil {
 		return
 	}
 
-	for _, label := range tab.lineNumberLabels {
-		tab.lineNumberGutter.Remove(label)
+	editorAdjustment := tab.editorScroll.VAdjustment()
+	previewAdjustment := tab.previewScroll.VAdjustment()
+	if editorAdjustment == nil || previewAdjustment == nil {
+		return
 	}
-	tab.lineNumberLabels = tab.lineNumberLabels[:0]
 
-	iter := tab.buffer.StartIter()
-	lastHeight := 0
-	for {
-		lineIter := *iter
-		rect := tab.note.IterLocation(&lineIter)
-		if rect == nil {
-			break
+	var syncingPreview bool
+	syncPreview := func() {
+		if syncingPreview {
+			return
 		}
-
-		label := gtk.NewLabel(strconv.Itoa(lineIter.Line() + 1))
-		label.SetXAlign(1)
-		label.SetHAlign(gtk.AlignEnd)
-		label.SetSizeRequest(40, maxInt(rect.Height(), 1))
-		label.AddCSSClass("dim-label")
-		tab.lineNumberGutter.Put(label, 6, float64(rect.Y()))
-		tab.lineNumberLabels = append(tab.lineNumberLabels, label)
-		lastHeight = rect.Y() + rect.Height()
-
-		if !iter.ForwardLine() {
-			break
+		upper := previewAdjustment.Upper()
+		pageSize := previewAdjustment.PageSize()
+		value := editorAdjustment.Value()
+		maxValue := upper - pageSize
+		if maxValue < 0 {
+			maxValue = 0
 		}
+		if value > maxValue {
+			value = maxValue
+		}
+		syncingPreview = true
+		previewAdjustment.SetValue(value)
+		syncingPreview = false
 	}
-	tab.lineNumberGutter.SetSizeRequest(52, maxInt(lastHeight+tab.note.TopMargin()+tab.note.PixelsBelowLines(), 1))
+
+	editorAdjustment.ConnectValueChanged(func() {
+		syncPreview()
+	})
 }
 
 func editorWidthForPersistence(paned *gtk.Paned) (int, bool) {

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math"
 	"os"
 	"sync"
 	"testing"
@@ -187,6 +188,19 @@ func TestLastSyncSummaryIncludesErrorMessage(t *testing.T) {
 	}
 }
 
+func TestLastSyncSummaryIncludesConflictMessage(t *testing.T) {
+	summary := lastSyncSummary(&settings.GDriveSettings{
+		LastSyncAt:      "2026-03-07T17:35:34+02:00",
+		LastSyncStatus:  "conflict",
+		LastSyncMessage: "Drive data changed remotely since the last sync",
+	})
+
+	want := "Last sync: 2026-03-07T17:35:34+02:00 (conflict)\nDrive data changed remotely since the last sync"
+	if summary != want {
+		t.Fatalf("lastSyncSummary() = %q, want %q", summary, want)
+	}
+}
+
 func TestFontButtonSelectUsesSystemFontChooserSettings(t *testing.T) {
 	requireGTK(t)
 
@@ -225,6 +239,24 @@ func TestEffectiveEditorFontSizeUsesOverrideThenCurrentFont(t *testing.T) {
 	})
 	if body != 12 {
 		t.Fatalf("effectiveEditorFontSize() body = %d, want 12", body)
+	}
+}
+
+func TestNotesSettingsCreatesLineSpacingControl(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.LineSpacing = 0.65
+
+	s := &Settings{}
+	box := gtk.NewBox(gtk.OrientationVertical, 0)
+	s.NotesSettings(box)
+
+	if s.noteLineSpacing == nil {
+		t.Fatal("expected line spacing control")
+	}
+	if got := s.noteLineSpacing.Value(); math.Abs(got-0.65) > 0.0001 {
+		t.Fatalf("noteLineSpacing = %v, want 0.65", got)
 	}
 }
 

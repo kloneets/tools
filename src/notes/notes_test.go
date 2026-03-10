@@ -10,7 +10,6 @@ import (
 	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
 )
@@ -135,7 +134,7 @@ func TestGenerateUICreatesPreviewPane(t *testing.T) {
 	}
 }
 
-func TestGenerateUICreatesLineNumberGutterAndWrapToggle(t *testing.T) {
+func TestGenerateUICreatesWrapToggle(t *testing.T) {
 	requireGTK(t)
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -144,9 +143,6 @@ func TestGenerateUICreatesLineNumberGutterAndWrapToggle(t *testing.T) {
 	tab := note.activeTab()
 	if tab == nil {
 		t.Fatal("expected an active tab")
-	}
-	if tab.lineNumberGutter == nil || tab.lineNumberScroll == nil {
-		t.Fatal("editor should create a line number gutter")
 	}
 	if tab.wrapToggle == nil || !tab.wrapToggle.Active() {
 		t.Fatal("editor should create an enabled wrap toggle by default")
@@ -165,6 +161,27 @@ func TestGenerateUIUsesSavedEditorWidth(t *testing.T) {
 	}
 	if got := note.tabs[0].paned.Position(); got != 512 {
 		t.Fatalf("editor paned position = %d, want 512", got)
+	}
+	if !note.tabs[0].paned.ShrinkStartChild() || !note.tabs[0].paned.ShrinkEndChild() {
+		t.Fatal("editor paned should allow both children to shrink")
+	}
+}
+
+func TestNoteScrolledWindowDoesNotPropagateNaturalSize(t *testing.T) {
+	requireGTK(t)
+
+	scroll := noteScrolledWindow(gtk.NewLabel("note"))
+	if scroll.PropagateNaturalHeight() {
+		t.Fatal("note scroller should not propagate natural height")
+	}
+	if scroll.PropagateNaturalWidth() {
+		t.Fatal("note scroller should not propagate natural width")
+	}
+	if scroll.MinContentHeight() != 0 {
+		t.Fatalf("note scroller min content height = %d, want 0", scroll.MinContentHeight())
+	}
+	if scroll.MinContentWidth() != 0 {
+		t.Fatalf("note scroller min content width = %d, want 0", scroll.MinContentWidth())
 	}
 }
 
@@ -470,7 +487,7 @@ func TestSidebarToggleHidesPanel(t *testing.T) {
 	if got := note.sidebarPane.Position(); got != 260 {
 		t.Fatalf("shown sidebar pane position = %d, want 260", got)
 	}
-	if !gtk.BaseWidget(note.sidebarDragToggle).Visible() || !gtk.BaseWidget(note.sidebarNewNote).Visible() || !gtk.BaseWidget(note.sidebarNewFolder).Visible() {
+	if !gtk.BaseWidget(note.sidebarDragToggle).Visible() || !gtk.BaseWidget(note.sidebarNewNote).Visible() || !gtk.BaseWidget(note.sidebarNewFolder).Visible() || !gtk.BaseWidget(note.sidebarImportFile).Visible() || !gtk.BaseWidget(note.sidebarImportFolder).Visible() {
 		t.Fatal("bottom controls should stay visible")
 	}
 }
@@ -545,6 +562,87 @@ func TestListNoteFilesIncludesNestedFolders(t *testing.T) {
 	}
 	if files[1].Folder != filepath.Join("Work", "Client") {
 		t.Fatalf("nested file folder = %q, want %q", files[1].Folder, filepath.Join("Work", "Client"))
+	}
+}
+
+func TestImportMarkdownFileIntoFolderCopiesMarkdown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "Ideas.md")
+	if err := os.WriteFile(sourcePath, []byte("# imported"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	importedPath, err := importMarkdownFileIntoFolder(sourcePath, filepath.Join("Work", "Client"))
+	if err != nil {
+		t.Fatalf("importMarkdownFileIntoFolder() error = %v", err)
+	}
+	if importedPath == "" {
+		t.Fatal("importMarkdownFileIntoFolder() should return the created note path")
+	}
+	if got := filepath.Base(importedPath); got != "Ideas.md" {
+		t.Fatalf("imported filename = %q, want Ideas.md", got)
+	}
+	content, err := os.ReadFile(importedPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(content) != "# imported" {
+		t.Fatalf("imported content = %q, want %q", string(content), "# imported")
+	}
+}
+
+func TestImportMarkdownFileIntoFolderSkipsNonMarkdown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "Ideas.txt")
+	if err := os.WriteFile(sourcePath, []byte("ignored"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	importedPath, err := importMarkdownFileIntoFolder(sourcePath, "")
+	if err != nil {
+		t.Fatalf("importMarkdownFileIntoFolder() error = %v", err)
+	}
+	if importedPath != "" {
+		t.Fatalf("importMarkdownFileIntoFolder() = %q, want empty path for non-markdown import", importedPath)
+	}
+}
+
+func TestImportMarkdownFolderIntoFolderCopiesOnlyMarkdownTree(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sourceRoot := filepath.Join(t.TempDir(), "External Notes")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "Sub"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "Plan.md"), []byte("root"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "Sub", "Deep.markdown"), []byte("nested"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skip.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	importedPaths, err := importMarkdownFolderIntoFolder(sourceRoot, "Imported")
+	if err != nil {
+		t.Fatalf("importMarkdownFolderIntoFolder() error = %v", err)
+	}
+	if len(importedPaths) != 2 {
+		t.Fatalf("imported file count = %d, want 2", len(importedPaths))
+	}
+	if got := relativeNoteFolder(importedPaths[0]); got != filepath.Join("Imported", "External Notes") {
+		t.Fatalf("first imported folder = %q", got)
+	}
+	if got := relativeNoteFolder(importedPaths[1]); got != filepath.Join("Imported", "External Notes", "Sub") {
+		t.Fatalf("second imported folder = %q", got)
 	}
 }
 
@@ -1653,15 +1751,15 @@ func TestSaveSpecificTabRunsWriteAsync(t *testing.T) {
 func TestFlushCurrentNoteStateWritesTabsAndSyncsOnce(t *testing.T) {
 	requireGTK(t)
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "client-secret-1")
 	settings.Init()
 
 	originalWrite := noteWriteFile
-	originalSync := noteSyncDriveData
+	originalStartSync := noteStartDriveSync
+	originalMarkDirty := noteMarkDriveDirty
 	defer func() {
 		noteWriteFile = originalWrite
-		noteSyncDriveData = originalSync
+		noteStartDriveSync = originalStartSync
+		noteMarkDriveDirty = originalMarkDirty
 	}()
 
 	var writes []string
@@ -1670,19 +1768,13 @@ func TestFlushCurrentNoteStateWritesTabsAndSyncsOnce(t *testing.T) {
 		return nil
 	}
 
-	syncCalls := 0
-	noteSyncDriveData = func() error {
-		syncCalls++
-		return nil
+	startSyncCalls := 0
+	noteStartDriveSync = func() {
+		startSyncCalls++
 	}
-
-	settings.Inst().GDrive.Enabled = true
-	settings.Inst().GDrive.FolderID = "folder-1"
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
+	markDirtyCalls := 0
+	noteMarkDriveDirty = func() {
+		markDirtyCalls++
 	}
 
 	note := GenerateUI()
@@ -1698,7 +1790,10 @@ func TestFlushCurrentNoteStateWritesTabsAndSyncsOnce(t *testing.T) {
 	if len(writes) != 2 {
 		t.Fatalf("write calls = %d, want 2", len(writes))
 	}
-	if syncCalls != 1 {
-		t.Fatalf("sync calls = %d, want 1", syncCalls)
+	if startSyncCalls != 0 {
+		t.Fatalf("start sync calls = %d, want 0", startSyncCalls)
+	}
+	if markDirtyCalls != 1 {
+		t.Fatalf("mark dirty calls = %d, want 1", markDirtyCalls)
 	}
 }

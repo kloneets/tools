@@ -28,11 +28,15 @@ import (
 
 type kokoTools struct {
 	*gtk.Application
-	appWindow     *gtk.ApplicationWindow
-	pagesFrame    *gtk.Frame
-	passwordFrame *gtk.Frame
-	notesFrame    *gtk.Frame
-	leftColumn    *gtk.Box
+	appWindow            *gtk.ApplicationWindow
+	pagesFrame           *gtk.Frame
+	passwordFrame        *gtk.Frame
+	notesFrame           *gtk.Frame
+	leftColumn           *gtk.Box
+	shutdownSyncBackdrop *gtk.Box
+	shutdownSyncPanel    *gtk.Box
+	shutdownCloseAllowed bool
+	shutdownSyncing      bool
 }
 
 //go:embed menu.ui
@@ -91,10 +95,20 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 	}
 	restoreAppWindowState(&tools.appWindow.Window, settings.Inst())
 	tools.appWindow.ConnectCloseRequest(func() bool {
+		if tools.shutdownCloseAllowed {
+			return false
+		}
+		if tools.shutdownSyncing {
+			return true
+		}
 		if err := notes.FlushCurrentNoteState(); err != nil {
 			log.Println("notes flush error:", err)
 		}
 		persistAppWindowState(&tools.appWindow.Window)
+		if settings.NeedsDriveSyncOnClose() {
+			tools.startShutdownDriveSync(ctx)
+			return true
+		}
 		return false
 	})
 	tools.appWindow.SetTitle("Koko tools")
@@ -135,6 +149,7 @@ func activate(ctx context.Context, app *gtk.Application) *kokoTools {
 			tools.applyWidgetVisibility(cfg)
 		})
 	})
+	settings.StartDriveRefresh()
 	startPeriodicDriveSync(ctx)
 
 	return &tools
@@ -236,6 +251,94 @@ func (t *kokoTools) applyWidgetVisibility(cfg *settings.UserSettings) {
 	if t.leftColumn != nil {
 		gtk.BaseWidget(t.leftColumn).SetVisible(cfg.UI.ShowPages || cfg.UI.ShowNotes)
 	}
+}
+
+func (t *kokoTools) startShutdownDriveSync(ctx context.Context) {
+	if t == nil || t.shutdownSyncing {
+		return
+	}
+	t.shutdownSyncing = true
+	t.showShutdownSyncOverlay()
+
+	go func() {
+		err := settings.SyncDriveDataOnShutdown(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Println("shutdown drive sync error:", err)
+		}
+		glib.IdleAdd(func() {
+			t.hideShutdownSyncOverlay()
+			t.shutdownSyncing = false
+			t.shutdownCloseAllowed = true
+			t.appWindow.Close()
+		})
+	}()
+}
+
+func (t *kokoTools) showShutdownSyncOverlay() {
+	if t == nil || t.appWindow == nil || t.shutdownSyncBackdrop != nil || t.shutdownSyncPanel != nil {
+		return
+	}
+
+	overlay := helpers.Globals().MainOverlay
+	if overlay == nil {
+		return
+	}
+
+	backdrop := gtk.NewBox(gtk.OrientationVertical, 0)
+	backdrop.SetHExpand(true)
+	backdrop.SetVExpand(true)
+	backdrop.SetHAlign(gtk.AlignFill)
+	backdrop.SetVAlign(gtk.AlignFill)
+	backdrop.AddCSSClass("view")
+
+	panel := gtk.NewBox(gtk.OrientationVertical, 12)
+	panel.SetHAlign(gtk.AlignCenter)
+	panel.SetVAlign(gtk.AlignCenter)
+	panel.SetMarginTop(ui.DefaultMasterPadding * 2)
+	panel.SetMarginBottom(ui.DefaultMasterPadding * 2)
+	panel.SetMarginStart(ui.DefaultMasterPadding * 2)
+	panel.SetMarginEnd(ui.DefaultMasterPadding * 2)
+	panel.AddCSSClass("card")
+
+	spinner := gtk.NewSpinner()
+	spinner.Start()
+
+	title := gtk.NewLabel("Syncing with Google Drive before closing...")
+	title.AddCSSClass("title-4")
+
+	message := gtk.NewLabel("Please wait until the final sync completes.")
+	message.SetWrap(true)
+
+	panel.Append(spinner)
+	panel.Append(title)
+	panel.Append(message)
+
+	overlay.AddOverlay(backdrop)
+	overlay.SetMeasureOverlay(backdrop, false)
+	overlay.AddOverlay(panel)
+	overlay.SetMeasureOverlay(panel, false)
+
+	t.shutdownSyncBackdrop = backdrop
+	t.shutdownSyncPanel = panel
+}
+
+func (t *kokoTools) hideShutdownSyncOverlay() {
+	if t == nil {
+		return
+	}
+
+	overlay := helpers.Globals().MainOverlay
+	if overlay != nil {
+		if t.shutdownSyncBackdrop != nil {
+			overlay.RemoveOverlay(t.shutdownSyncBackdrop)
+		}
+		if t.shutdownSyncPanel != nil {
+			overlay.RemoveOverlay(t.shutdownSyncPanel)
+		}
+	}
+
+	t.shutdownSyncBackdrop = nil
+	t.shutdownSyncPanel = nil
 }
 
 func makeConfigDirIfNotExists() {

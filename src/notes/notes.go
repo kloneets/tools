@@ -30,6 +30,8 @@ type Note struct {
 	sidebarDragToggle    *gtk.ToggleButton
 	sidebarNewNote       *gtk.Button
 	sidebarNewFolder     *gtk.Button
+	sidebarImportFile    *gtk.Button
+	sidebarImportFolder  *gtk.Button
 	sidebarDropHint      *gtk.Label
 	sidebarMenu          *gtk.Popover
 	sidebarMenuEntry     *gtk.Entry
@@ -77,13 +79,14 @@ type Note struct {
 var saveCounter atomic.Int64
 var currentNote *Note
 var noteWriteFile = os.WriteFile
-var noteSyncDriveData = settings.SyncDriveData
+var noteStartDriveSync = settings.StartDriveSync
+var noteMarkDriveDirty = settings.MarkDriveDirty
 
 func FlushCurrentNoteState() error {
 	if currentNote == nil {
 		return nil
 	}
-	return currentNote.flushAllTabs(true)
+	return currentNote.flushAllTabs(false)
 }
 
 func GenerateUI() *Note {
@@ -114,10 +117,10 @@ func noteScrolledWindow(child gtk.Widgetter) *gtk.ScrolledWindow {
 	scrollW.SetHExpand(true)
 	scrollW.SetVExpand(true)
 	scrollW.SetPolicy(gtk.PolicyAutomatic, gtk.PolicyAutomatic)
-	scrollW.SetPropagateNaturalHeight(true)
-	scrollW.SetPropagateNaturalWidth(true)
-	scrollW.SetMaxContentHeight(400)
-	scrollW.SetMinContentHeight(300)
+	scrollW.SetPropagateNaturalHeight(false)
+	scrollW.SetPropagateNaturalWidth(false)
+	scrollW.SetMinContentHeight(0)
+	scrollW.SetMinContentWidth(0)
 	scrollW.SetChild(child)
 	return scrollW
 }
@@ -1348,11 +1351,11 @@ func (n *Note) flushAllTabs(sync bool) error {
 		wroteAny = true
 	}
 
-	if sync && wroteAny && settings.Inst().GDrive.Ready() {
-		if err := noteSyncDriveData(); err != nil {
-			n.statusMessage("Notes saved locally, Drive sync failed")
-			return err
-		}
+	if wroteAny {
+		noteMarkDriveDirty()
+	}
+	if sync && wroteAny {
+		noteStartDriveSync()
 	}
 	return nil
 }
@@ -1363,16 +1366,9 @@ func (n *Note) persistTabSnapshot(tab *noteTab, file string, text string, sync b
 		return
 	}
 	count := saveCounter.Add(1)
-	if sync && settings.Inst().GDrive.Ready() {
-		if err := noteSyncDriveData(); err != nil {
-			log.Println("gdrive notes sync error:", err)
-			n.statusMessage("Notes saved locally, Drive sync failed")
-			tab.waitingToSave = false
-			if n.activeTab() == tab {
-				n.WaitingToSave = false
-			}
-			return
-		}
+	noteMarkDriveDirty()
+	if sync {
+		noteStartDriveSync()
 	}
 	n.statusMessage("Notes saved to: " + file + ", " + fmt.Sprint(count))
 	tab.waitingToSave = false

@@ -3,6 +3,7 @@ package gdrive
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -195,5 +196,23 @@ func TestIsVersionedDriveFileNameMatchesExpectedPattern(t *testing.T) {
 	}
 	if isVersionedDriveFileName("Plan.md", "Another (version 2).md") {
 		t.Fatal("unexpected base-name mismatch")
+	}
+}
+
+func TestRemoteNotesStateEntriesSortsByPathAfterCallerSort(t *testing.T) {
+	entries := []remoteStateEntry{
+		{Path: "notes/B.md", MimeType: "text/markdown", ModifiedTime: "2"},
+		{Path: "notes/A.md", MimeType: "text/markdown", ModifiedTime: "1"},
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Path != entries[j].Path {
+			return entries[i].Path < entries[j].Path
+		}
+		return entries[i].ModifiedTime < entries[j].ModifiedTime
+	})
+
+	if entries[0].Path != "notes/A.md" || entries[1].Path != "notes/B.md" {
+		t.Fatalf("sorted remoteStateEntry paths = %#v", entries)
 	}
 }

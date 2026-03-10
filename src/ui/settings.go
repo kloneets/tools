@@ -28,6 +28,7 @@ type Settings struct {
 	noteVimMode          *gtk.CheckButton
 	noteEditorMono       *gtk.CheckButton
 	noteEditorFontSize   *gtk.SpinButton
+	noteLineSpacing      *gtk.SpinButton
 	noteFontSelect       *gtk.FontButton
 	noteMonoFontSelect   *gtk.FontButton
 	noteThemeSelect      *gtk.ComboBoxText
@@ -36,6 +37,9 @@ type Settings struct {
 	connectButton        *gtk.Button
 	refreshFoldersButton *gtk.Button
 	syncNowButton        *gtk.Button
+	conflictLocalButton  *gtk.Button
+	conflictRemoteButton *gtk.Button
+	conflictLabel        *gtk.Label
 	newFolderButton      *gtk.Button
 	authLink             *gtk.LinkButton
 	statusLabel          *gtk.Label
@@ -215,6 +219,15 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 	s.syncNowButton.ConnectClicked(func() {
 		s.syncNow()
 	})
+	s.conflictLocalButton = gtk.NewButtonWithLabel("Keep local")
+	s.conflictLocalButton.ConnectClicked(func() {
+		s.resolveConflictUseLocal()
+	})
+	s.conflictRemoteButton = gtk.NewButtonWithLabel("Use Drive")
+	s.conflictRemoteButton.ConnectClicked(func() {
+		s.resolveConflictUseRemote()
+	})
+	s.conflictLabel = InfoLabel("Remote data changed since the last sync. Choose whether to keep local changes or reload from Drive.")
 
 	s.newFolderEntry = gtk.NewEntry()
 	s.newFolderEntry.SetPlaceholderText("New Drive folder name")
@@ -273,6 +286,11 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 	content.Append(searchRow)
 	content.Append(selectRow)
 	content.Append(newFolderRow)
+	conflictRow := FieldWrapper(SectionLabel("Conflict resolution"), DefaultBoxPadding)
+	conflictRow.Append(s.conflictLabel)
+	conflictRow.Append(s.conflictLocalButton)
+	conflictRow.Append(s.conflictRemoteButton)
+	content.Append(conflictRow)
 	content.Append(s.statusLabel)
 	content.Append(s.lastSyncLabel)
 
@@ -280,6 +298,7 @@ func (s *Settings) GDriveSettings(window *gtk.Window, placeholder *gtk.Box) {
 	gDriveFrame.SetChild(content)
 
 	placeholder.Append(gDriveFrame)
+	s.updateConflictControls(current)
 }
 
 func (s *Settings) NotesSettings(placeholder *gtk.Box) {
@@ -293,6 +312,9 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	s.noteEditorMono.SetActive(current.EditorMonospace)
 	s.noteEditorFontSize = gtk.NewSpinButtonWithRange(8, 40, 1)
 	s.noteEditorFontSize.SetValue(float64(effectiveEditorFontSize(current)))
+	s.noteLineSpacing = gtk.NewSpinButtonWithRange(0, 3, 0.05)
+	s.noteLineSpacing.SetDigits(2)
+	s.noteLineSpacing.SetValue(current.LineSpacing)
 	s.noteFontSelect = fontButtonSelect(current.BodyFont, "Choose notes font", false)
 	s.noteMonoFontSelect = fontButtonSelect(current.MonospaceFont, "Choose code font", true)
 	s.noteThemeSelect = choiceSelect([][2]string{
@@ -306,6 +328,8 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	tabRow.Append(s.noteTabSpaces)
 	editorSizeRow := FieldWrapper(SectionLabel("Editor font size"), DefaultBoxPadding)
 	editorSizeRow.Append(s.noteEditorFontSize)
+	lineSpacingRow := FieldWrapper(SectionLabel("Line spacing"), DefaultBoxPadding)
+	lineSpacingRow.Append(s.noteLineSpacing)
 	fontRow := FieldWrapper(SectionLabel("Notes font"), DefaultBoxPadding)
 	fontRow.Append(s.noteFontSelect)
 	monoFontRow := FieldWrapper(SectionLabel("Code font"), DefaultBoxPadding)
@@ -316,6 +340,7 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	content := MainArea()
 	content.Append(tabRow)
 	content.Append(editorSizeRow)
+	content.Append(lineSpacingRow)
 	content.Append(s.noteVimMode)
 	content.Append(s.noteEditorMono)
 	content.Append(fontRow)
@@ -571,6 +596,8 @@ func (s *Settings) updateStatusFromCurrentSettings(current *settings.GDriveSetti
 	switch {
 	case current == nil:
 		s.setStatus("Google Drive sync is not configured yet.")
+	case current.LastSyncStatus == "conflict" && current.LastSyncMessage != "":
+		s.setStatus("Drive sync conflict: " + current.LastSyncMessage)
 	case current.LastSyncStatus == "error" && current.LastSyncMessage != "":
 		s.setStatus("Last Drive sync failed: " + current.LastSyncMessage)
 	case current.Ready():
@@ -584,6 +611,19 @@ func (s *Settings) updateStatusFromCurrentSettings(current *settings.GDriveSetti
 
 func (s *Settings) updateLastSyncLabel(current *settings.GDriveSettings) {
 	s.lastSyncLabel.SetText(lastSyncSummary(current))
+}
+
+func (s *Settings) updateConflictControls(current *settings.GDriveSettings) {
+	visible := current != nil && current.LastSyncStatus == "conflict"
+	if s.conflictLabel != nil {
+		s.conflictLabel.SetVisible(visible)
+	}
+	if s.conflictLocalButton != nil {
+		s.conflictLocalButton.SetVisible(visible)
+	}
+	if s.conflictRemoteButton != nil {
+		s.conflictRemoteButton.SetVisible(visible)
+	}
 }
 
 func (s *Settings) applyFormToSettings() {
@@ -607,6 +647,9 @@ func (s *Settings) applyFormToSettings() {
 	}
 	if s.noteEditorFontSize != nil {
 		settings.Inst().NotesApp.EditorFontSize = s.noteEditorFontSize.ValueAsInt()
+	}
+	if s.noteLineSpacing != nil {
+		settings.Inst().NotesApp.LineSpacing = s.noteLineSpacing.Value()
 	}
 	if s.noteFontSelect != nil && s.noteFontSelect.Font() != "" {
 		settings.Inst().NotesApp.BodyFont = s.noteFontSelect.Font()
@@ -665,6 +708,7 @@ func (s *Settings) saveGDriveSettings() error {
 		s.setStatus("Google Drive sync is enabled. Connect Drive and choose a folder to start auto-syncing.")
 	}
 	s.updateLastSyncLabel(settings.Inst().GDrive)
+	s.updateConflictControls(settings.Inst().GDrive)
 	return nil
 }
 
@@ -677,10 +721,33 @@ func (s *Settings) syncNow() {
 	if err := settings.SyncDriveData(); err != nil {
 		s.setStatus("Drive sync failed: " + err.Error())
 		s.updateLastSyncLabel(settings.Inst().GDrive)
+		s.updateConflictControls(settings.Inst().GDrive)
 		return
 	}
 	s.setStatus(settings.Inst().GDrive.LastSyncMessage)
 	s.updateLastSyncLabel(settings.Inst().GDrive)
+	s.updateConflictControls(settings.Inst().GDrive)
+}
+
+func (s *Settings) resolveConflictUseLocal() {
+	if err := settings.ResolveDriveConflictUseLocal(); err != nil {
+		s.setStatus("Conflict resolution failed: " + err.Error())
+		return
+	}
+	s.setStatus(settings.Inst().GDrive.LastSyncMessage)
+	s.updateLastSyncLabel(settings.Inst().GDrive)
+	s.updateConflictControls(settings.Inst().GDrive)
+}
+
+func (s *Settings) resolveConflictUseRemote() {
+	backupDir, err := settings.ResolveDriveConflictUseRemote()
+	if err != nil {
+		s.setStatus("Conflict resolution failed: " + err.Error())
+		return
+	}
+	s.setStatus("Drive version restored. Local data was backed up to: " + backupDir)
+	s.updateLastSyncLabel(settings.Inst().GDrive)
+	s.updateConflictControls(settings.Inst().GDrive)
 }
 
 func (s *Settings) setStatus(message string) {
@@ -860,7 +927,7 @@ func lastSyncSummary(current *settings.GDriveSettings) string {
 	if current == nil || current.LastSyncAt == "" {
 		return "Last sync: not run yet"
 	}
-	if current.LastSyncStatus == "error" && current.LastSyncMessage != "" {
+	if (current.LastSyncStatus == "error" || current.LastSyncStatus == "conflict") && current.LastSyncMessage != "" {
 		return fmt.Sprintf("Last sync: %s (%s)\n%s", current.LastSyncAt, current.LastSyncStatus, current.LastSyncMessage)
 	}
 

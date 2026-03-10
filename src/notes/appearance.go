@@ -29,6 +29,7 @@ type notesAppearance struct {
 	previewSize   float64
 	monoFamily    string
 	monoSize      float64
+	lineSpacing   float64
 	palette       notesPalette
 }
 
@@ -77,8 +78,20 @@ func currentAppearance() notesAppearance {
 		previewSize:   bodySize,
 		monoFamily:    monoFamily,
 		monoSize:      monoSize,
+		lineSpacing:   noteSettings.LineSpacing,
 		palette:       notesThemePalette(noteSettings.PreviewTheme),
 	}
+}
+
+func applyLineSpacing(tag *gtk.TextTag, spacing float64) {
+	if tag == nil {
+		return
+	}
+	if spacing < 0 {
+		spacing = 1
+	}
+	tag.SetObjectProperty("line-height", float32(spacing))
+	tag.SetObjectProperty("line-height-set", true)
 }
 
 func parseFontSpec(spec string, fallback string) (string, float64) {
@@ -229,6 +242,7 @@ func markdownTagConfig(name string, appearance notesAppearance, preview bool) fu
 			}
 			tag.SetObjectProperty("family", family)
 			tag.SetObjectProperty("size-points", size)
+			applyLineSpacing(tag, appearance.lineSpacing)
 			if baseForeground != "" {
 				tag.SetObjectProperty("foreground", baseForeground)
 			}
@@ -276,6 +290,7 @@ func markdownTagConfig(name string, appearance notesAppearance, preview bool) fu
 			tag.SetObjectProperty("size-points", appearance.monoSize)
 			tag.SetObjectProperty("background", appearance.palette.codeBackground)
 			tag.SetObjectProperty("foreground", appearance.palette.codeForeground)
+			applyLineSpacing(tag, appearance.lineSpacing)
 		},
 		tagCodeBlock: func(tag *gtk.TextTag) {
 			tag.SetObjectProperty("family", appearance.monoFamily)
@@ -285,6 +300,7 @@ func markdownTagConfig(name string, appearance notesAppearance, preview bool) fu
 			tag.SetObjectProperty("pixels-above-lines", 6)
 			tag.SetObjectProperty("pixels-below-lines", 6)
 			tag.SetObjectProperty("paragraph-background", appearance.palette.codeBackground)
+			applyLineSpacing(tag, appearance.lineSpacing)
 		},
 		tagCodeKeyword: func(tag *gtk.TextTag) {
 			tag.SetObjectProperty("family", appearance.monoFamily)
@@ -327,9 +343,17 @@ func markdownTagConfig(name string, appearance notesAppearance, preview bool) fu
 	}
 
 	if config, ok := configs[name]; ok {
-		return config
+		if name == tagVisualSelection {
+			return config
+		}
+		return func(tag *gtk.TextTag) {
+			config(tag)
+			applyLineSpacing(tag, appearance.lineSpacing)
+		}
 	}
-	return func(*gtk.TextTag) {}
+	return func(tag *gtk.TextTag) {
+		applyLineSpacing(tag, appearance.lineSpacing)
+	}
 }
 
 func visualSelectionColor(appearance notesAppearance) string {
@@ -361,7 +385,8 @@ func installNotesCSS(appearance notesAppearance) {
 
 #notes-editor,
 #notes-editor text {
-  background-color: transparent;
+  background-color: @view_bg_color;
+  color: @view_fg_color;
 }
 `, appearance.palette.previewBackground, appearance.palette.previewForeground))
 	gtk.StyleContextAddProviderForDisplay(display, css, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)

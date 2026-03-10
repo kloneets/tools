@@ -173,3 +173,25 @@ func TestSystemPrefersDarkAppearanceSkipsNonDarwin(t *testing.T) {
 		t.Fatal("expected non-darwin appearance probe to return preferDark=false")
 	}
 }
+
+func TestShowShutdownSyncOverlayUsesMainOverlay(t *testing.T) {
+	requireGTK(t)
+	helpers.InitGlobals()
+
+	window := gtk.NewWindow()
+	overlay := gtk.NewOverlay()
+	window.SetChild(overlay)
+	helpers.SetMainOverlay(overlay)
+
+	tools := &kokoTools{appWindow: &gtk.ApplicationWindow{}}
+	tools.showShutdownSyncOverlay()
+
+	if tools.shutdownSyncBackdrop == nil || tools.shutdownSyncPanel == nil {
+		t.Fatal("expected shutdown sync overlay widgets to be created")
+	}
+
+	tools.hideShutdownSyncOverlay()
+	if tools.shutdownSyncBackdrop != nil || tools.shutdownSyncPanel != nil {
+		t.Fatal("expected shutdown sync overlay widgets to be cleared")
+	}
+}

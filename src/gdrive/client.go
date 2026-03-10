@@ -3,6 +3,7 @@ package gdrive
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,13 @@ type remoteDriveEntry struct {
 	ID       string
 	RelPath  string
 	ParentID string
+}
+
+type remoteStateEntry struct {
+	Path         string
+	MimeType     string
+	ModifiedTime string
+	Checksum     string
 }
 
 const (
@@ -226,6 +234,56 @@ func DownloadFile(folderID string, name string) ([]byte, bool, error) {
 	}
 
 	return downloadDriveFile(service, folderID, name)
+}
+
+func RemoteStateSignature(folderID string) (string, error) {
+	if folderID == "" {
+		return "", errors.New("drive folder id is required")
+	}
+
+	service, err := serviceFromCredentials()
+	if err != nil {
+		return "", err
+	}
+
+	entries := make([]remoteStateEntry, 0, 64)
+	if settingsEntry, err := remoteSettingsStateEntry(service, folderID); err != nil {
+		return "", err
+	} else if settingsEntry != nil {
+		entries = append(entries, *settingsEntry)
+	}
+
+	notesFolderID, found, err := findFolder(service, folderID, "notes")
+	if err != nil {
+		return "", err
+	}
+	if found {
+		noteEntries, err := remoteNotesStateEntries(service, notesFolderID, "")
+		if err != nil {
+			return "", err
+		}
+		entries = append(entries, noteEntries...)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Path != entries[j].Path {
+			return entries[i].Path < entries[j].Path
+		}
+		if entries[i].MimeType != entries[j].MimeType {
+			return entries[i].MimeType < entries[j].MimeType
+		}
+		if entries[i].ModifiedTime != entries[j].ModifiedTime {
+			return entries[i].ModifiedTime < entries[j].ModifiedTime
+		}
+		return entries[i].Checksum < entries[j].Checksum
+	})
+
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return "", fmt.Errorf("marshal drive state signature: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum[:]), nil
 }
 
 func RestoreNotesTree(folderID string) error {
@@ -699,7 +757,7 @@ func listDriveChildren(service *drive.Service, parentID string) ([]*drive.File, 
 	for {
 		call := service.Files.List().
 			Q(fmt.Sprintf("'%s' in parents and trashed=false", escapeQueryValue(parentID))).
-			Fields("nextPageToken,files(id,name,mimeType,parents)").
+			Fields("nextPageToken,files(id,name,mimeType,parents,modifiedTime,md5Checksum)").
 			OrderBy("folder,name").
 			PageSize(1000)
 		if pageToken != "" {
@@ -715,6 +773,60 @@ func listDriveChildren(service *drive.Service, parentID string) ([]*drive.File, 
 		}
 		pageToken = resp.NextPageToken
 	}
+}
+
+func remoteSettingsStateEntry(service *drive.Service, folderID string) (*remoteStateEntry, error) {
+	query := fmt.Sprintf(
+		"name='%s' and '%s' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
+		escapeQueryValue("settings.json"),
+		escapeQueryValue(folderID),
+	)
+	list, err := service.Files.List().
+		Q(query).
+		Fields("files(name,mimeType,modifiedTime,md5Checksum)").
+		PageSize(1).
+		Do()
+	if err != nil {
+		return nil, fmt.Errorf("query drive settings state: %w", err)
+	}
+	if len(list.Files) == 0 {
+		return nil, nil
+	}
+	file := list.Files[0]
+	return &remoteStateEntry{
+		Path:         "settings.json",
+		MimeType:     file.MimeType,
+		ModifiedTime: file.ModifiedTime,
+		Checksum:     file.Md5Checksum,
+	}, nil
+}
+
+func remoteNotesStateEntries(service *drive.Service, folderID string, relPath string) ([]remoteStateEntry, error) {
+	children, err := listDriveChildren(service, folderID)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]remoteStateEntry, 0, len(children))
+	for _, child := range children {
+		childRel := child.Name
+		if relPath != "" {
+			childRel = relPath + "/" + child.Name
+		}
+		entries = append(entries, remoteStateEntry{
+			Path:         "notes/" + childRel,
+			MimeType:     child.MimeType,
+			ModifiedTime: child.ModifiedTime,
+			Checksum:     child.Md5Checksum,
+		})
+		if child.MimeType == "application/vnd.google-apps.folder" {
+			nested, err := remoteNotesStateEntries(service, child.Id, childRel)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, nested...)
+		}
+	}
+	return entries, nil
 }
 
 func downloadDriveFile(service *drive.Service, folderID string, name string) ([]byte, bool, error) {

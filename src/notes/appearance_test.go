@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"math"
 	"testing"
 
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
@@ -137,5 +138,51 @@ func TestCurrentAppearanceUsesEditorFontSizeOverride(t *testing.T) {
 	}
 	if appearance.previewSize != 11 {
 		t.Fatalf("preview size = %v, want 11", appearance.previewSize)
+	}
+}
+
+func TestCurrentAppearanceIncludesLineSpacing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.LineSpacing = 0.8
+
+	appearance := currentAppearance()
+	if math.Abs(appearance.lineSpacing-0.8) > 0.0001 {
+		t.Fatalf("line spacing = %v, want 0.8", appearance.lineSpacing)
+	}
+}
+
+func TestApplyLineSpacingSetsTextTagLineHeight(t *testing.T) {
+	requireGTK(t)
+
+	tag := gtk.NewTextTag("body")
+	applyLineSpacing(tag, 0.75)
+
+	if got, ok := tag.ObjectProperty("line-height").(float32); !ok || got != float32(0.75) {
+		t.Fatalf("line-height = %#v, want 0.75", tag.ObjectProperty("line-height"))
+	}
+	if got, ok := tag.ObjectProperty("line-height-set").(bool); !ok || !got {
+		t.Fatalf("line-height-set = %#v, want true", tag.ObjectProperty("line-height-set"))
+	}
+}
+
+func TestConfigureMarkdownTagsAppliesLineSpacingToCodeTags(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.LineSpacing = 0.6
+
+	buffer := gtk.NewTextBuffer(nil)
+	configureMarkdownTags(buffer, currentAppearance(), true)
+
+	for _, tagName := range []string{tagCode, tagCodeBlock, tagCodeKeyword} {
+		tag := buffer.TagTable().Lookup(tagName)
+		if tag == nil {
+			t.Fatalf("missing tag %q", tagName)
+		}
+		got, ok := tag.ObjectProperty("line-height").(float32)
+		if !ok || math.Abs(float64(got)-0.6) > 0.0001 {
+			t.Fatalf("%s line-height = %#v, want 0.6", tagName, tag.ObjectProperty("line-height"))
+		}
 	}
 }

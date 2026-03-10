@@ -17,6 +17,7 @@
 - When implementing `Hide sidebar` for Notes, do not keep the action row inside the collapsible sidebar pane. Put the bottom buttons on a separate always-visible layer, and collapse the actual sidebar pane itself; otherwise the feature only hides content and leaves the sidebar width behind.
 - Notes code preview must keep token colors separate from block styling. Do not set a foreground color on the code-block/base tag, or bright per-token colors collapse into one dull shade.
 - When changing Notes appearance, verify the `Neon Burst` theme still shows visibly different colors for keywords, strings, comments, functions, properties, constants, types, and numbers.
+- In Notes split-view scrolling, do not share the same GTK vertical adjustment object between editor and preview. It can break editor scrolling and contribute to layout instability; keep the editor scroller independent and synchronize preview scrolling explicitly instead.
 
 ## Testing Strategy
 - Extract small pure helpers from GTK event handlers before writing tests.

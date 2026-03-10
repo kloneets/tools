@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -31,6 +32,9 @@ func TestDefaultSettings(t *testing.T) {
 	}
 	if got.NotesApp.EditorFontSize != 0 {
 		t.Fatalf("NotesApp.EditorFontSize = %d, want 0", got.NotesApp.EditorFontSize)
+	}
+	if got.NotesApp.LineSpacing != 1 {
+		t.Fatalf("NotesApp.LineSpacing = %v, want 1", got.NotesApp.LineSpacing)
 	}
 	if got.AppWindow.Width != 600 || got.AppWindow.Height != 300 {
 		t.Fatalf("AppWindow = %#v, want 600x300", got.AppWindow)
@@ -161,6 +165,9 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.NotesApp.EditorFontSize != 0 {
 		t.Fatalf("normalizeSettings() NotesApp.EditorFontSize = %d, want 0", config.NotesApp.EditorFontSize)
 	}
+	if config.NotesApp.LineSpacing != 1 {
+		t.Fatalf("normalizeSettings() NotesApp.LineSpacing = %v, want 1", config.NotesApp.LineSpacing)
+	}
 	if config.NotesApp.BodyFont != "Cantarell 11" {
 		t.Fatalf("normalizeSettings() NotesApp.BodyFont = %q", config.NotesApp.BodyFont)
 	}
@@ -244,6 +251,11 @@ func TestRecordSyncResult(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, settingsInstance.GDrive.LastSyncAt); err != nil {
 		t.Fatalf("LastSyncAt parse error = %v", err)
+	}
+
+	recordSyncResult(errDriveConflict)
+	if settingsInstance.GDrive.LastSyncStatus != "conflict" {
+		t.Fatalf("LastSyncStatus = %q, want conflict", settingsInstance.GDrive.LastSyncStatus)
 	}
 }
 
@@ -359,6 +371,7 @@ func TestNormalizeSettingsClearsNegativeEditorFontSize(t *testing.T) {
 	config := &UserSettings{
 		NotesApp: NotesAppSettings{
 			EditorFontSize: -4,
+			LineSpacing:    -3,
 		},
 		GDrive: &GDriveSettings{
 			SyncIntervalSec: -1,
@@ -370,8 +383,31 @@ func TestNormalizeSettingsClearsNegativeEditorFontSize(t *testing.T) {
 	if config.NotesApp.EditorFontSize != 0 {
 		t.Fatalf("normalizeSettings() EditorFontSize = %d, want 0", config.NotesApp.EditorFontSize)
 	}
+	if config.NotesApp.LineSpacing != 1 {
+		t.Fatalf("normalizeSettings() LineSpacing = %v, want 1", config.NotesApp.LineSpacing)
+	}
 	if config.GDrive.SyncIntervalSec != 10 {
 		t.Fatalf("normalizeSettings() SyncIntervalSec = %d, want 10", config.GDrive.SyncIntervalSec)
+	}
+}
+
+func TestNotesAppSettingsUnmarshalDefaultsMissingLineSpacingToOne(t *testing.T) {
+	var got NotesAppSettings
+	if err := json.Unmarshal([]byte(`{"tab_spaces":2}`), &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if got.LineSpacing != 1 {
+		t.Fatalf("LineSpacing = %v, want 1", got.LineSpacing)
+	}
+}
+
+func TestNotesAppSettingsUnmarshalKeepsExplicitZeroLineSpacing(t *testing.T) {
+	var got NotesAppSettings
+	if err := json.Unmarshal([]byte(`{"line_spacing":0}`), &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if got.LineSpacing != 0 {
+		t.Fatalf("LineSpacing = %v, want 0", got.LineSpacing)
 	}
 }
 
@@ -492,6 +528,202 @@ func TestRestoreDriveSourceOfTruthFallsBackOnInvalidRemoteSettings(t *testing.T)
 	}
 	if len(messages) != 1 || !strings.Contains(messages[0], "Drive settings are invalid") {
 		t.Fatalf("messages = %#v, want invalid drive settings message", messages)
+	}
+}
+
+func TestEnsureDriveSyncSafeToPushAllowsMatchingRemoteState(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+	settingsInstance.GDrive.LastRemoteState = "state-a"
+
+	originalSignature := driveStateSignature
+	defer func() { driveStateSignature = originalSignature }()
+	driveStateSignature = func(string) (string, error) {
+		return "state-a", nil
+	}
+
+	if err := ensureDriveSyncSafeToPush(); err != nil {
+		t.Fatalf("ensureDriveSyncSafeToPush() error = %v, want nil", err)
+	}
+}
+
+func TestEnsureDriveSyncSafeToPushRejectsRemoteConflict(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+	settingsInstance.GDrive.LastRemoteState = "state-a"
+
+	originalSignature := driveStateSignature
+	defer func() { driveStateSignature = originalSignature }()
+	driveStateSignature = func(string) (string, error) {
+		return "state-b", nil
+	}
+
+	err := ensureDriveSyncSafeToPush()
+	if err == nil {
+		t.Fatal("ensureDriveSyncSafeToPush() should reject conflicting remote changes")
+	}
+	if !strings.Contains(err.Error(), "changed remotely") {
+		t.Fatalf("ensureDriveSyncSafeToPush() error = %q", err.Error())
+	}
+}
+
+func TestStartDriveRefreshSkipsWhenLocalChangesArePending(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+
+	originalLoader := driveSettingsLoader
+	defer func() { driveSettingsLoader = originalLoader }()
+
+	called := make(chan struct{}, 1)
+	driveSettingsLoader = func(string) ([]byte, bool, error) {
+		called <- struct{}{}
+		return nil, false, nil
+	}
+
+	StartDriveRefresh()
+
+	select {
+	case <-called:
+		t.Fatal("StartDriveRefresh() should skip remote refresh while local changes are pending")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestResolveDriveConflictUseLocalQueuesSync(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+	settingsInstance.GDrive.LastSyncStatus = "conflict"
+	settingsInstance.GDrive.ConflictRemoteState = "remote-b"
+
+	originalDriveSyncFunc := driveSyncFunc
+	originalStatusUpdater := statusUpdater
+	defer func() {
+		driveSyncFunc = originalDriveSyncFunc
+		statusUpdater = originalStatusUpdater
+		driveSyncInFlight.Store(false)
+	}()
+	statusUpdater = func(string) {}
+	driveSyncInFlight.Store(false)
+
+	started := make(chan struct{}, 1)
+	driveSyncFunc = func() error {
+		started <- struct{}{}
+		return nil
+	}
+
+	if err := ResolveDriveConflictUseLocal(); err != nil {
+		t.Fatalf("ResolveDriveConflictUseLocal() error = %v", err)
+	}
+	if settingsInstance.GDrive.ConflictRemoteState != "" {
+		t.Fatal("expected conflict state to be cleared")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected sync to start after resolving in favor of local")
+	}
+}
+
+func TestResolveDriveConflictUseRemoteBacksUpLocalState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+	settingsInstance.GDrive.LastSyncStatus = "conflict"
+	settingsInstance.GDrive.ConflictRemoteState = "remote-b"
+
+	if err := os.MkdirAll(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(fileName(), []byte(`{"gdrive":{"enabled":true}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(settings) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes", "Plan.md"), []byte("local"), 0o644); err != nil {
+		t.Fatalf("WriteFile(note) error = %v", err)
+	}
+
+	originalLoader := driveSettingsLoader
+	originalRestorer := driveNotesRestorer
+	originalSignature := driveStateSignature
+	defer func() {
+		driveSettingsLoader = originalLoader
+		driveNotesRestorer = originalRestorer
+		driveStateSignature = originalSignature
+	}()
+	driveSettingsLoader = func(string) ([]byte, bool, error) {
+		return []byte(`{"notes_app":{"tab_spaces":2},"gdrive":{"enabled":true,"folder_id":"folder-1"}}`), true, nil
+	}
+	driveNotesRestorer = func(string) error { return nil }
+	driveStateSignature = func(string) (string, error) { return "remote-b", nil }
+
+	backupDir, err := ResolveDriveConflictUseRemote()
+	if err != nil {
+		t.Fatalf("ResolveDriveConflictUseRemote() error = %v", err)
+	}
+	if backupDir == "" {
+		t.Fatal("expected backup directory")
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, "settings.json")); err != nil {
+		t.Fatalf("expected backed up settings file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, "notes", "Plan.md")); err != nil {
+		t.Fatalf("expected backed up notes file: %v", err)
+	}
+	if settingsInstance.GDrive.PendingSync {
+		t.Fatal("expected pending sync to be cleared after using Drive version")
+	}
+}
+
+func TestNeedsDriveSyncOnCloseRequiresPendingReadyDriveSync(t *testing.T) {
+	settingsInstance = defaultSettings()
+	if NeedsDriveSyncOnClose() {
+		t.Fatal("expected close sync to be skipped when Drive sync is not configured")
+	}
+
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+	if !NeedsDriveSyncOnClose() {
+		t.Fatal("expected close sync to be required for pending configured Drive changes")
+	}
+}
+
+func TestSyncDriveDataOnShutdownPerformsPendingSync(t *testing.T) {
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.PendingSync = true
+
+	originalDriveSyncFunc := driveSyncFunc
+	defer func() {
+		driveSyncFunc = originalDriveSyncFunc
+		driveSyncInFlight.Store(false)
+	}()
+	driveSyncInFlight.Store(false)
+
+	called := false
+	driveSyncFunc = func() error {
+		called = true
+		settingsInstance.GDrive.PendingSync = false
+		recordSyncResult(nil)
+		return nil
+	}
+
+	if err := SyncDriveDataOnShutdown(context.Background()); err != nil {
+		t.Fatalf("SyncDriveDataOnShutdown() error = %v", err)
+	}
+	if !called {
+		t.Fatal("expected shutdown sync to call Drive sync")
 	}
 }
 
