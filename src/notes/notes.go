@@ -32,6 +32,7 @@ type Note struct {
 	sidebarNewFolder     *gtk.Button
 	sidebarImportFile    *gtk.Button
 	sidebarImportFolder  *gtk.Button
+	sidebarExportPDF     *gtk.Button
 	sidebarDropHint      *gtk.Label
 	sidebarMenu          *gtk.Popover
 	sidebarMenuEntry     *gtk.Entry
@@ -182,6 +183,7 @@ func (n *Note) updatePreview() {
 		}
 		n.previewBuffer.ApplyTagByName(span.Tag, n.previewBuffer.IterAtOffset(span.Start), n.previewBuffer.IterAtOffset(span.End))
 	}
+	n.renderPreviewImages(render.Images)
 }
 
 func (n *Note) refreshFromSettings() {
@@ -295,7 +297,7 @@ func (n *Note) insertTabSpaces() {
 func (n *Note) markdownKeyController() *gtk.EventControllerKey {
 	controller := gtk.NewEventControllerKey()
 	controller.ConnectKeyPressed(func(keyval, _ uint, state gdk.ModifierType) bool {
-		if settings.Inst().NotesApp.VimMode && hasControl(state) && (keyval == gdk.KEY_v || keyval == gdk.KEY_V) {
+		if settings.Inst().NotesApp.VimMode && state&gdk.ControlMask != 0 && (keyval == gdk.KEY_v || keyval == gdk.KEY_V) {
 			n.startVisualSelection(vimSelectionBlock)
 			return true
 		}
@@ -329,6 +331,11 @@ func (n *Note) handleMarkdownShortcut(keyval uint, state gdk.ModifierType) bool 
 		n.wrapSelection("*", "*", "italic")
 	case gdk.KEY_k, gdk.KEY_K:
 		n.insertLink()
+	case gdk.KEY_v, gdk.KEY_V:
+		if n.tryPasteImageFromClipboard() {
+			return true
+		}
+		return false
 	case gdk.KEY_1:
 		n.prefixLines("# ", "Heading")
 	case gdk.KEY_2:
@@ -1122,7 +1129,7 @@ func (n *Note) openLineAbove() {
 }
 
 func hasControl(state gdk.ModifierType) bool {
-	return state&gdk.ControlMask != 0
+	return state&gdk.ControlMask != 0 || state&gdk.MetaMask != 0 || state&gdk.SuperMask != 0
 }
 
 func hasShift(state gdk.ModifierType) bool {

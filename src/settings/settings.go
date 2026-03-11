@@ -49,6 +49,8 @@ type NotesAppSettings struct {
 	EditorWidth     int     `json:"editor_width,omitempty"`
 	EditorFontSize  int     `json:"editor_font_size,omitempty"`
 	LineSpacing     float64 `json:"line_spacing,omitempty"`
+	PDFBodyFontSize float64 `json:"pdf_body_font_size,omitempty"`
+	PDFCodeFontSize float64 `json:"pdf_code_font_size,omitempty"`
 	SidebarVisible  bool    `json:"sidebar_visible"`
 	BodyFont        string  `json:"body_font"`
 	MonospaceFont   string  `json:"monospace_font"`
@@ -56,6 +58,11 @@ type NotesAppSettings struct {
 	PreviewTheme    string  `json:"preview_theme"`
 	VimMode         bool    `json:"vim_mode"`
 }
+
+const (
+	DefaultNotesPDFBodyFontSize = 8.4
+	DefaultNotesPDFCodeFontSize = 8.0
+)
 
 func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
 	type notesAppAlias NotesAppSettings
@@ -180,12 +187,14 @@ func defaultSettings() *UserSettings {
 			Height: 300,
 		},
 		NotesApp: NotesAppSettings{
-			TabSpaces:      4,
-			SidebarVisible: true,
-			BodyFont:       "Cantarell 11",
-			MonospaceFont:  "Noto Sans Mono 11",
-			LineSpacing:    1,
-			PreviewTheme:   "ide-dark",
+			TabSpaces:       4,
+			SidebarVisible:  true,
+			BodyFont:        "Cantarell 11",
+			MonospaceFont:   "Noto Sans Mono 11",
+			LineSpacing:     1,
+			PDFBodyFontSize: DefaultNotesPDFBodyFontSize,
+			PDFCodeFontSize: DefaultNotesPDFCodeFontSize,
+			PreviewTheme:    "ide-dark",
 		},
 		UI:     defaultUISettings(),
 		GDrive: defaultGDriveSettings(),
@@ -236,6 +245,12 @@ func normalizeSettings(s *UserSettings) {
 	}
 	if s.NotesApp.LineSpacing < 0 {
 		s.NotesApp.LineSpacing = 1
+	}
+	if s.NotesApp.PDFBodyFontSize <= 0 {
+		s.NotesApp.PDFBodyFontSize = DefaultNotesPDFBodyFontSize
+	}
+	if s.NotesApp.PDFCodeFontSize <= 0 {
+		s.NotesApp.PDFCodeFontSize = DefaultNotesPDFCodeFontSize
 	}
 	if s.NotesApp.BodyFont == "" && s.NotesApp.MonospaceFont == "" && s.NotesApp.PreviewTheme == "" && !s.NotesApp.VimMode && !s.NotesApp.EditorMonospace && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true

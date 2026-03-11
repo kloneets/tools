@@ -89,6 +89,21 @@ func IconButton(iconName string, tooltip string) *gtk.Button {
 	return button
 }
 
+func IconTextButton(iconName string, label string, tooltip string) *gtk.Button {
+	button := gtk.NewButton()
+	button.SetTooltipText(tooltip)
+
+	content := gtk.NewBox(gtk.OrientationHorizontal, 6)
+	content.Append(iconImage(iconName))
+
+	text := gtk.NewLabel(label)
+	text.SetXAlign(0)
+	content.Append(text)
+
+	button.SetChild(content)
+	return button
+}
+
 func IconToggleButton(iconName string, tooltip string) *gtk.ToggleButton {
 	button := gtk.NewToggleButton()
 	button.SetTooltipText(tooltip)

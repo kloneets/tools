@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -62,11 +63,21 @@ type noteFile struct {
 	RelPath string
 }
 
+type sidebarFile struct {
+	Path    string
+	Folder  string
+	RelDir  string
+	RelPath string
+	Label   string
+	Kind    sidebarEntryKind
+}
+
 type sidebarEntryKind int
 
 const (
 	sidebarEntryFolder sidebarEntryKind = iota
 	sidebarEntryNote
+	sidebarEntryFile
 	sidebarEntryPlaceholder
 )
 
@@ -126,6 +137,7 @@ func (n *Note) buildWorkspace() {
 		n.handleSidebarSelectionChanged(row)
 	})
 	n.setupSidebarInteractions()
+	n.setupSidebarImageDrop()
 
 	n.sidebarScroll = gtk.NewScrolledWindow()
 	n.sidebarScroll.SetHExpand(false)
@@ -170,6 +182,12 @@ func (n *Note) buildWorkspace() {
 		n.showImportMarkdownFolderDialog()
 	})
 	n.sidebarActions.Append(n.sidebarImportFolder)
+
+	n.sidebarExportPDF = workspaceActionButton("text-x-generic-symbolic", "PDF", "Export current note as PDF")
+	n.sidebarExportPDF.ConnectClicked(func() {
+		n.showExportPDFDialog()
+	})
+	n.sidebarActions.Append(n.sidebarExportPDF)
 
 	n.sidebarContent = gtk.NewBox(gtk.OrientationVertical, ui.DefaultBoxPadding)
 	n.sidebarContent.SetVExpand(true)
@@ -233,6 +251,7 @@ func (n *Note) createTab(path string, text string) *noteTab {
 	tab.note.SetMarginTop(ui.DefaultBoxPadding)
 	tab.note.SetMarginBottom(ui.DefaultBoxPadding)
 	tab.note.AddController(n.markdownKeyController())
+	n.setupImageClipboardAndDrop(tab)
 
 	tab.previewBuffer = styledBuffer(true)
 	tab.preview = gtk.NewTextView()
@@ -585,6 +604,210 @@ func (n *Note) setupSidebarInteractions() {
 	n.sidebar.AddController(release)
 }
 
+func (n *Note) setupSidebarImageDrop() {
+	if n.sidebar == nil {
+		return
+	}
+	n.sidebar.AddController(n.sidebarImageDropTarget())
+	if n.sidebarScroll != nil {
+		n.sidebarScroll.AddController(n.sidebarImageDropTarget())
+	}
+}
+
+func (n *Note) sidebarImageDropTarget() *gtk.DropTargetAsync {
+	formatsBuilder := gdk.NewContentFormatsBuilder()
+	formatsBuilder.AddGType(gio.GTypeFile)
+	formatsBuilder.AddGType(gdk.GTypeTexture)
+	for _, mimeType := range importableImageLocationMIMETypes {
+		formatsBuilder.AddMIMEType(mimeType)
+	}
+	for _, mimeType := range importableImageMIMETypes {
+		formatsBuilder.AddMIMEType(mimeType)
+	}
+
+	target := gtk.NewDropTargetAsync(formatsBuilder.ToFormats(), gdk.ActionCopy)
+	target.ConnectAccept(func(drop gdk.Dropper) bool {
+		return dropHasImportableImage(drop)
+	})
+	target.ConnectDragEnter(func(drop gdk.Dropper, _ float64, y float64) gdk.DragAction {
+		if !dropHasImportableImage(drop) {
+			return 0
+		}
+		n.updateSidebarDropHint(sidebarDropTarget{Folder: n.sidebarFolderForDropY(int(y))})
+		return gdk.ActionCopy
+	})
+	target.ConnectDragMotion(func(drop gdk.Dropper, _ float64, y float64) gdk.DragAction {
+		if !dropHasImportableImage(drop) {
+			return 0
+		}
+		n.updateSidebarDropHint(sidebarDropTarget{Folder: n.sidebarFolderForDropY(int(y))})
+		return gdk.ActionCopy
+	})
+	target.ConnectDragLeave(func(gdk.Dropper) {
+		n.updateSidebarDropHint(sidebarDropTarget{})
+	})
+	target.ConnectDrop(func(drop gdk.Dropper, _ float64, y float64) bool {
+		return n.handleSidebarImageDrop(drop, int(y))
+	})
+	return target
+}
+
+func (n *Note) handleSidebarImageDrop(drop gdk.Dropper, y int) bool {
+	if drop == nil {
+		return false
+	}
+	targetFolder := n.sidebarFolderForDropY(y)
+	baseDrop := gdk.BaseDrop(drop)
+	formats := baseDrop.Formats()
+	if formats == nil {
+		return false
+	}
+
+	if formats.ContainGType(gio.GTypeFile) {
+		baseDrop.ReadValueAsync(context.Background(), gio.GTypeFile, 0, func(result gio.AsyncResulter) {
+			value, err := baseDrop.ReadValueFinish(result)
+			if err != nil || value == nil {
+				baseDrop.Finish(0)
+				return
+			}
+			sourcePath, ok := dropValueFilePath(value.GoValue())
+			if !ok {
+				baseDrop.Finish(0)
+				return
+			}
+			glib.IdleAdd(func() {
+				if _, err := importImageFileIntoFolderPath(targetFolder, sourcePath); err != nil {
+					baseDrop.Finish(0)
+					n.statusMessage("Image import failed: " + err.Error())
+					return
+				}
+				n.refreshSidebar()
+				baseDrop.Finish(gdk.ActionCopy)
+				n.statusMessage("Image imported.")
+			})
+		})
+		return true
+	}
+
+	if formats.ContainGType(gdk.GTypeTexture) {
+		baseDrop.ReadValueAsync(context.Background(), gdk.GTypeTexture, 0, func(result gio.AsyncResulter) {
+			value, err := baseDrop.ReadValueFinish(result)
+			if err != nil || value == nil {
+				baseDrop.Finish(0)
+				return
+			}
+			texture, ok := value.GoValue().(gdk.Texturer)
+			if !ok || texture == nil {
+				baseDrop.Finish(0)
+				return
+			}
+			glib.IdleAdd(func() {
+				if _, err := importTextureIntoFolder(targetFolder, texture, "dropped-image"); err != nil {
+					baseDrop.Finish(0)
+					n.statusMessage("Image import failed: " + err.Error())
+					return
+				}
+				n.refreshSidebar()
+				baseDrop.Finish(gdk.ActionCopy)
+				n.statusMessage("Image imported.")
+			})
+		})
+		return true
+	}
+
+	if mimeType := firstImportableImageLocationMIMEType(formats); mimeType != "" {
+		baseDrop.ReadAsync(context.Background(), []string{mimeType}, 0, func(result gio.AsyncResulter) {
+			_, stream, err := baseDrop.ReadFinish(result)
+			if err != nil || stream == nil {
+				baseDrop.Finish(0)
+				return
+			}
+			data, readErr := readInputStreamAll(stream)
+			if closeErr := gio.BaseInputStream(stream).Close(context.Background()); closeErr != nil && readErr == nil {
+				readErr = closeErr
+			}
+			if readErr != nil {
+				baseDrop.Finish(0)
+				return
+			}
+			paths := imagePathsFromDropPayload(string(data))
+			glib.IdleAdd(func() {
+				if len(paths) == 0 {
+					baseDrop.Finish(0)
+					return
+				}
+				imported := 0
+				for _, sourcePath := range paths {
+					if _, err := importImageFileIntoFolderPath(targetFolder, sourcePath); err == nil {
+						imported++
+					}
+				}
+				if imported == 0 {
+					baseDrop.Finish(0)
+					n.statusMessage("Image import failed.")
+					return
+				}
+				n.refreshSidebar()
+				baseDrop.Finish(gdk.ActionCopy)
+				n.statusMessage(fmt.Sprintf("Imported %d image file(s).", imported))
+			})
+		})
+		return true
+	}
+
+	mimeType := firstImportableImageMIMEType(formats)
+	if mimeType == "" {
+		return false
+	}
+	baseDrop.ReadAsync(context.Background(), []string{mimeType}, 0, func(result gio.AsyncResulter) {
+		usedMimeType, stream, err := baseDrop.ReadFinish(result)
+		if err != nil || stream == nil {
+			baseDrop.Finish(0)
+			return
+		}
+		data, readErr := readInputStreamAll(stream)
+		if closeErr := gio.BaseInputStream(stream).Close(context.Background()); closeErr != nil && readErr == nil {
+			readErr = closeErr
+		}
+		if readErr != nil {
+			baseDrop.Finish(0)
+			return
+		}
+		glib.IdleAdd(func() {
+			ext, ok := imageExtensionForMIMEType(usedMimeType)
+			if !ok {
+				baseDrop.Finish(0)
+				n.statusMessage("Image import failed: unsupported image format")
+				return
+			}
+			if _, err := writeImageAssetToFolder(targetFolder, data, ext, "dropped-image"); err != nil {
+				baseDrop.Finish(0)
+				n.statusMessage("Image import failed: " + err.Error())
+				return
+			}
+			n.refreshSidebar()
+			baseDrop.Finish(gdk.ActionCopy)
+			n.statusMessage("Image imported.")
+		})
+	})
+	return true
+}
+
+func (n *Note) sidebarFolderForDropY(y int) string {
+	if n.sidebar == nil {
+		return ""
+	}
+	row := n.sidebar.RowAtY(y)
+	if row == nil {
+		return ""
+	}
+	entry, ok := n.sidebarEntryForRow(row)
+	if !ok {
+		return ""
+	}
+	return sidebarTargetFolder(entry.Kind, entry.Path, entry.Folder)
+}
+
 func (n *Note) refreshSidebar() {
 	if n.sidebar == nil {
 		return
@@ -617,7 +840,7 @@ func (n *Note) refreshSidebar() {
 }
 
 func (n *Note) buildSidebarEntries() ([]sidebarEntry, error) {
-	files, err := listNoteFiles()
+	files, err := listSidebarFiles()
 	if err != nil {
 		return nil, err
 	}
@@ -638,7 +861,7 @@ func (n *Note) buildSidebarEntries() ([]sidebarEntry, error) {
 			return filepath.ToSlash(children[parent][i]) < filepath.ToSlash(children[parent][j])
 		})
 	}
-	filesByFolder := make(map[string][]noteFile)
+	filesByFolder := make(map[string][]sidebarFile)
 	for _, file := range files {
 		filesByFolder[file.Folder] = append(filesByFolder[file.Folder], file)
 	}
@@ -665,9 +888,9 @@ func (n *Note) buildSidebarEntries() ([]sidebarEntry, error) {
 		}
 		for _, file := range filesByFolder[parent] {
 			entries = append(entries, sidebarEntry{
-				Kind:   sidebarEntryNote,
+				Kind:   file.Kind,
 				Path:   file.Path,
-				Label:  file.Title,
+				Label:  file.Label,
 				Depth:  depth,
 				Folder: file.Folder,
 			})
@@ -871,12 +1094,18 @@ func pathSidebarKind(path string) sidebarEntryKind {
 	if filepath.Ext(path) == "" {
 		return sidebarEntryFolder
 	}
-	return sidebarEntryNote
+	if isMarkdownNotePath(path) {
+		return sidebarEntryNote
+	}
+	return sidebarEntryFile
 }
 
 func (n *Note) sidebarEntryIcon(entry sidebarEntry) string {
 	if entry.Kind == sidebarEntryFolder {
 		return "folder-symbolic"
+	}
+	if entry.Kind == sidebarEntryFile {
+		return "image-x-generic-symbolic"
 	}
 	return "text-x-generic-symbolic"
 }
@@ -891,6 +1120,9 @@ func (n *Note) sidebarEntryActionIcon(entry sidebarEntry) string {
 func (n *Note) sidebarEntryActionTooltip(entry sidebarEntry) string {
 	if entry.Kind == sidebarEntryFolder {
 		return "New note in folder"
+	}
+	if entry.Kind == sidebarEntryFile {
+		return "Open file actions"
 	}
 	return "Open note actions"
 }
@@ -1141,6 +1373,9 @@ func (n *Note) applySidebarContextRename() error {
 		n.selectedFolder = n.sidebarMenuFolder
 		return n.renameSelectedFolder(input)
 	}
+	if n.sidebarMenuKind == sidebarEntryFile {
+		return n.renameSidebarFilePath(n.sidebarMenuPath, input)
+	}
 	page := n.pageForPath(n.sidebarMenuPath)
 	if page < 0 {
 		n.openNotePath(n.sidebarMenuPath)
@@ -1156,6 +1391,14 @@ func (n *Note) applySidebarContextRename() error {
 func (n *Note) deleteSidebarContextItem() error {
 	if n.sidebarMenuKind == sidebarEntryFolder {
 		return n.deleteFolderPath(n.sidebarMenuPath)
+	}
+	if n.sidebarMenuKind == sidebarEntryFile {
+		if _, err := settings.MoveNoteToTrash(n.sidebarMenuPath); err != nil {
+			return err
+		}
+		n.refreshSidebar()
+		n.statusMessage("Moved file to trash: " + filepath.Base(n.sidebarMenuPath))
+		return nil
 	}
 	page := n.pageForPath(n.sidebarMenuPath)
 	if page < 0 {
@@ -1184,6 +1427,10 @@ func (n *Note) activateSidebarPath(row *gtk.ListBoxRow) {
 		}
 		return
 	}
+	if entry.Kind == sidebarEntryFile {
+		n.selectedFolder = entry.Folder
+		return
+	}
 	n.openNotePath(entry.Path)
 }
 
@@ -1205,6 +1452,10 @@ func (n *Note) handleSidebarSelectionChanged(row *gtk.ListBoxRow) {
 		return
 	}
 	if entry.Kind == sidebarEntryFolder {
+		n.selectedFolder = entry.Folder
+		return
+	}
+	if entry.Kind == sidebarEntryFile {
 		n.selectedFolder = entry.Folder
 		return
 	}
@@ -1269,7 +1520,7 @@ func (n *Note) createFolder(rawFolder string) error {
 }
 
 func (n *Note) showImportMarkdownFileDialog() {
-	dialog := n.newImportDialog("Import markdown file", gtk.FileChooserActionOpen, "Import")
+	dialog := n.newFileDialog("Import markdown file", gtk.FileChooserActionOpen, "Import")
 	if dialog == nil {
 		n.statusMessage("Import file dialog is unavailable")
 		return
@@ -1301,7 +1552,7 @@ func (n *Note) showImportMarkdownFileDialog() {
 }
 
 func (n *Note) showImportMarkdownFolderDialog() {
-	dialog := n.newImportDialog("Import markdown folder", gtk.FileChooserActionSelectFolder, "Import")
+	dialog := n.newFileDialog("Import markdown folder", gtk.FileChooserActionSelectFolder, "Import")
 	if dialog == nil {
 		n.statusMessage("Import folder dialog is unavailable")
 		return
@@ -1331,7 +1582,42 @@ func (n *Note) showImportMarkdownFolderDialog() {
 	dialog.Show()
 }
 
-func (n *Note) newImportDialog(title string, action gtk.FileChooserAction, acceptLabel string) *gtk.FileChooserNative {
+func (n *Note) showExportPDFDialog() {
+	tab := n.activeTab()
+	if tab == nil || tab.buffer == nil {
+		n.statusMessage("No note to export")
+		return
+	}
+
+	dialog := n.newFileDialog("Export note as PDF", gtk.FileChooserActionSave, "Export")
+	if dialog == nil {
+		n.statusMessage("Export dialog is unavailable")
+		return
+	}
+	dialog.SetFilter(pdfExportFilter())
+	dialog.SetCurrentName(defaultPDFExportName(tab.path))
+	dialog.ConnectResponse(func(responseID int) {
+		defer dialog.Destroy()
+		if gtk.ResponseType(responseID) != gtk.ResponseAccept {
+			return
+		}
+		file := dialog.File()
+		if file == nil {
+			return
+		}
+
+		outputPath := ensurePDFExtension(file.Path())
+		markdown := tab.buffer.Text(tab.buffer.StartIter(), tab.buffer.EndIter(), true)
+		if err := exportNotePDF(outputPath, tab.path, tab.title, markdown, currentAppearance(), settings.Inst().NotesApp.TabSpaces); err != nil {
+			n.statusMessage("PDF export failed: " + err.Error())
+			return
+		}
+		n.statusMessage("Exported PDF: " + filepath.Base(outputPath))
+	})
+	dialog.Show()
+}
+
+func (n *Note) newFileDialog(title string, action gtk.FileChooserAction, acceptLabel string) *gtk.FileChooserNative {
 	var parent *gtk.Window
 	if globals := helpers.CurrentGlobals(); globals != nil {
 		parent = globals.MainWindow
@@ -1351,6 +1637,13 @@ func markdownImportFilter() *gtk.FileFilter {
 	filter.SetName("Markdown files")
 	filter.AddPattern("*.md")
 	filter.AddPattern("*.markdown")
+	return filter
+}
+
+func pdfExportFilter() *gtk.FileFilter {
+	filter := gtk.NewFileFilter()
+	filter.SetName("PDF files")
+	filter.AddPattern("*.pdf")
 	return filter
 }
 
@@ -1517,6 +1810,28 @@ func (n *Note) renameFolderPath(sourcePath string, rawTarget string) error {
 	return err
 }
 
+func (n *Note) renameSidebarFilePath(sourcePath string, rawName string) error {
+	name := sanitizeSidebarFileName(rawName)
+	if name == "" {
+		return fmt.Errorf("empty file name")
+	}
+	ext := filepath.Ext(sourcePath)
+	if filepath.Ext(name) == "" && ext != "" {
+		name += ext
+	}
+	targetPath := uniqueFilePathInFolder(relativeNoteFolder(sourcePath), name, sourcePath)
+	if targetPath == sourcePath {
+		return nil
+	}
+	if err := os.Rename(sourcePath, targetPath); err != nil {
+		return err
+	}
+	n.refreshSidebar()
+	n.selectSidebarPath(targetPath)
+	n.statusMessage("Renamed file to: " + filepath.Base(targetPath))
+	return nil
+}
+
 func (n *Note) moveCurrentNoteToFolder(rawFolder string) error {
 	tab := n.activeTab()
 	if tab == nil {
@@ -1585,12 +1900,33 @@ func (n *Note) moveFolderPathToFolder(sourcePath string, rawFolder string) error
 	return n.renameFolderPath(sourcePath, targetRel)
 }
 
+func (n *Note) moveFilePathToFolder(sourcePath string, rawFolder string) error {
+	targetFolder := sanitizeFolderPath(rawFolder)
+	targetPath := uniqueFilePathInFolder(targetFolder, filepath.Base(sourcePath), sourcePath)
+	if targetPath == sourcePath {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(sourcePath, targetPath); err != nil {
+		return err
+	}
+	n.selectedFolder = relativeNoteFolder(targetPath)
+	n.refreshSidebar()
+	n.selectSidebarPath(targetPath)
+	n.statusMessage("Moved file to: " + filepath.ToSlash(n.selectedFolder))
+	return nil
+}
+
 func (n *Note) moveSidebarItem(kind sidebarEntryKind, sourcePath string, targetFolder string) error {
 	switch kind {
 	case sidebarEntryFolder:
 		return n.moveFolderPathToFolder(sourcePath, targetFolder)
 	case sidebarEntryNote:
 		return n.moveNotePathToFolder(sourcePath, targetFolder)
+	case sidebarEntryFile:
+		return n.moveFilePathToFolder(sourcePath, targetFolder)
 	default:
 		return fmt.Errorf("unsupported sidebar item")
 	}
@@ -1809,6 +2145,80 @@ func listNoteFiles() ([]noteFile, error) {
 	return files, nil
 }
 
+func listSidebarFiles() ([]sidebarFile, error) {
+	files := make([]sidebarFile, 0)
+	err := filepath.WalkDir(notesDir(), func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == notesDir() {
+			return nil
+		}
+		relPath, err := filepath.Rel(notesDir(), path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if settings.IsTrashRelativePath(relPath) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relDir := filepath.Dir(relPath)
+		if relDir == "." {
+			relDir = ""
+		}
+		if settings.IsTrashRelativePath(relPath) || settings.IsTrashRelativePath(relDir) {
+			return nil
+		}
+		if !isSidebarVisibleFilePath(path) {
+			return nil
+		}
+
+		entryKind := sidebarEntryFile
+		if isMarkdownNotePath(path) {
+			entryKind = sidebarEntryNote
+		}
+		files = append(files, sidebarFile{
+			Path:    path,
+			Folder:  relDir,
+			RelDir:  relDir,
+			RelPath: relPath,
+			Label:   filepath.Base(path),
+			Kind:    entryKind,
+		})
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return filepath.ToSlash(files[i].RelPath) < filepath.ToSlash(files[j].RelPath)
+	})
+	return files, nil
+}
+
+func isMarkdownNotePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSidebarVisibleFilePath(path string) bool {
+	if isMarkdownNotePath(path) {
+		return true
+	}
+	_, ok := normalizedImageExtension(path)
+	return ok
+}
+
 func nextNotePathInFolder(folder string) string {
 	dir := noteFolderPath(folder)
 	files, err := listNoteFiles()
@@ -1873,11 +2283,49 @@ func uniqueNotePathInFolder(folder string, title string, currentPath string) str
 	}
 }
 
+func uniqueFilePathInFolder(folder string, baseName string, currentPath string) string {
+	baseName = sanitizeSidebarFileName(baseName)
+	if baseName == "" {
+		baseName = "file"
+	}
+	base := filepath.Join(noteFolderPath(folder), baseName)
+	if base == currentPath {
+		return base
+	}
+	if _, err := os.Stat(base); os.IsNotExist(err) {
+		return base
+	}
+
+	ext := filepath.Ext(baseName)
+	name := strings.TrimSuffix(baseName, ext)
+	if name == "" {
+		name = "file"
+	}
+	for i := 2; ; i++ {
+		candidate := filepath.Join(noteFolderPath(folder), fmt.Sprintf("%s %d%s", name, i, ext))
+		if candidate == currentPath {
+			return candidate
+		}
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+	}
+}
+
 func noteTitleFromPath(path string) string {
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	if name == "" {
 		return "Untitled"
 	}
+	return name
+}
+
+func sanitizeSidebarFileName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.ReplaceAll(name, "/", "-")
+	name = strings.ReplaceAll(name, string(filepath.Separator), "-")
+	name = strings.ReplaceAll(name, "\\", "-")
+	name = strings.Join(strings.Fields(name), " ")
 	return name
 }
 
@@ -2069,6 +2517,10 @@ func (n *Note) autoSaveForTab(tab *noteTab) {
 
 func workspaceIconButton(iconName string, tooltip string) *gtk.Button {
 	return ui.IconButton(iconName, tooltip)
+}
+
+func workspaceActionButton(iconName string, label string, tooltip string) *gtk.Button {
+	return ui.IconTextButton(iconName, label, tooltip)
 }
 
 func workspaceToolbarButton(iconName string, glyph string, tooltip string) *gtk.Button {

@@ -3,6 +3,8 @@ package notes
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"github.com/diamondburned/gotk4/pkg/pango"
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
 )
@@ -146,6 +149,35 @@ func TestGenerateUICreatesWrapToggle(t *testing.T) {
 	}
 	if tab.wrapToggle == nil || !tab.wrapToggle.Active() {
 		t.Fatal("editor should create an enabled wrap toggle by default")
+	}
+	if note.sidebarExportPDF == nil {
+		t.Fatal("expected sidebar PDF export action")
+	}
+	exportContent, ok := gtk.BaseWidget(note.sidebarExportPDF.Child()).Cast().(*gtk.Box)
+	if !ok {
+		t.Fatal("expected PDF export action to use icon and text content")
+	}
+	if labelWidget := gtk.BaseWidget(exportContent.LastChild()); labelWidget == nil {
+		t.Fatal("expected PDF export action label")
+	} else if label, ok := labelWidget.Cast().(*gtk.Label); !ok || label.Text() != "PDF" {
+		t.Fatal("expected PDF export action label to be PDF")
+	}
+}
+
+func TestInsertTextIntoBufferAtUsesCapturedCursorOffset(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	note.buffer.SetText("hello world")
+	note.buffer.PlaceCursor(note.buffer.IterAtOffset(6))
+	note.insertTextIntoBufferAt("![img](images/a.png)", 6, 6)
+
+	got := note.buffer.Text(note.buffer.StartIter(), note.buffer.EndIter(), true)
+	want := "hello ![img](images/a.png)world"
+	if got != want {
+		t.Fatalf("buffer text = %q, want %q", got, want)
 	}
 }
 
@@ -487,8 +519,218 @@ func TestSidebarToggleHidesPanel(t *testing.T) {
 	if got := note.sidebarPane.Position(); got != 260 {
 		t.Fatalf("shown sidebar pane position = %d, want 260", got)
 	}
-	if !gtk.BaseWidget(note.sidebarDragToggle).Visible() || !gtk.BaseWidget(note.sidebarNewNote).Visible() || !gtk.BaseWidget(note.sidebarNewFolder).Visible() || !gtk.BaseWidget(note.sidebarImportFile).Visible() || !gtk.BaseWidget(note.sidebarImportFolder).Visible() {
+	if !gtk.BaseWidget(note.sidebarDragToggle).Visible() || !gtk.BaseWidget(note.sidebarNewNote).Visible() || !gtk.BaseWidget(note.sidebarNewFolder).Visible() || !gtk.BaseWidget(note.sidebarImportFile).Visible() || !gtk.BaseWidget(note.sidebarImportFolder).Visible() || !gtk.BaseWidget(note.sidebarExportPDF).Visible() {
 		t.Fatal("bottom controls should stay visible")
+	}
+}
+
+func TestDefaultPDFExportNameUsesNoteTitle(t *testing.T) {
+	if got := defaultPDFExportName("/tmp/Project Plan.md"); got != "Project Plan.pdf" {
+		t.Fatalf("defaultPDFExportName() = %q, want %q", got, "Project Plan.pdf")
+	}
+}
+
+func TestEnsurePDFExtensionAppendsWhenMissing(t *testing.T) {
+	if got := ensurePDFExtension("/tmp/export"); got != "/tmp/export.pdf" {
+		t.Fatalf("ensurePDFExtension() = %q, want %q", got, "/tmp/export.pdf")
+	}
+	if got := ensurePDFExtension("/tmp/export.PDF"); got != "/tmp/export.PDF" {
+		t.Fatalf("ensurePDFExtension() should keep existing extension, got %q", got)
+	}
+}
+
+func TestExportNotePDFWritesFile(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "note.pdf")
+	appearance := notesAppearance{
+		previewFamily: "Cantarell",
+		previewSize:   11,
+		lineSpacing:   1,
+	}
+
+	if err := exportNotePDF(output, filepath.Join(t.TempDir(), "Plan.md"), "Plan", "# Plan\n\n- item", appearance, 4); err != nil {
+		t.Fatalf("exportNotePDF() error = %v", err)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("expected exported PDF to be non-empty")
+	}
+}
+
+func TestDefaultPDFTextStyleUsesPrintFriendlyDefaults(t *testing.T) {
+	appearance := notesAppearance{
+		previewFamily: "Cantarell",
+		previewSize:   18,
+		palette: notesPalette{
+			previewForeground: "#c0caf5",
+		},
+	}
+
+	style := defaultPDFTextStyle(appearance)
+	if style.family != "Cantarell, Sans" {
+		t.Fatalf("defaultPDFTextStyle() family = %q, want %q", style.family, "Cantarell, Sans")
+	}
+	if style.foreground != pdfDefaultTextColor {
+		t.Fatalf("defaultPDFTextStyle() foreground = %q, want %q", style.foreground, pdfDefaultTextColor)
+	}
+	if style.size != settings.DefaultNotesPDFBodyFontSize {
+		t.Fatalf("defaultPDFTextStyle() size = %v, want %v", style.size, settings.DefaultNotesPDFBodyFontSize)
+	}
+}
+
+func TestPDFCodeAndLinkStylesIgnorePreviewThemeColors(t *testing.T) {
+	appearance := notesAppearance{
+		previewFamily: "Cantarell",
+		previewSize:   18,
+		monoFamily:    "Noto Sans Mono",
+		monoSize:      17,
+		palette: notesPalette{
+			link:           "#7aa2f7",
+			codeBackground: "#24283b",
+			codeForeground: "#c0caf5",
+			codeKeyword:    "#bb9af7",
+		},
+	}
+
+	lineStyle := pdfStyleForLine([]string{tagCodeBlock}, appearance)
+	if lineStyle.background != pdfCodeBackground {
+		t.Fatalf("pdfStyleForLine() code background = %q, want %q", lineStyle.background, pdfCodeBackground)
+	}
+	if lineStyle.text.foreground != pdfDefaultTextColor {
+		t.Fatalf("pdfStyleForLine() code foreground = %q, want %q", lineStyle.text.foreground, pdfDefaultTextColor)
+	}
+	if lineStyle.text.size != settings.DefaultNotesPDFCodeFontSize {
+		t.Fatalf("pdfStyleForLine() code size = %v, want %v", lineStyle.text.size, settings.DefaultNotesPDFCodeFontSize)
+	}
+
+	linkStyle := pdfStyleForSegment([]string{tagLink}, appearance, defaultPDFTextStyle(appearance))
+	if linkStyle.foreground != pdfDefaultLinkColor {
+		t.Fatalf("pdfStyleForSegment() link foreground = %q, want %q", linkStyle.foreground, pdfDefaultLinkColor)
+	}
+
+	codeStyle := pdfStyleForSegment([]string{tagCodeKeyword}, appearance, defaultPDFTextStyle(appearance))
+	if codeStyle.family != "Noto Sans Mono, Monospace" {
+		t.Fatalf("pdfStyleForSegment() code family = %q, want monospace fallback", codeStyle.family)
+	}
+	if codeStyle.size != settings.DefaultNotesPDFCodeFontSize {
+		t.Fatalf("pdfStyleForSegment() code size = %v, want %v", codeStyle.size, settings.DefaultNotesPDFCodeFontSize)
+	}
+	if codeStyle.foreground != appearance.palette.codeKeyword {
+		t.Fatalf("pdfStyleForSegment() keyword color = %q, want %q", codeStyle.foreground, appearance.palette.codeKeyword)
+	}
+}
+
+func TestPDFStylesUseConfiguredExportSizes(t *testing.T) {
+	appearance := notesAppearance{
+		previewFamily: "Cantarell",
+		monoFamily:    "Noto Sans Mono",
+		pdfBodySize:   7.6,
+		pdfCodeSize:   7.1,
+	}
+
+	body := defaultPDFTextStyle(appearance)
+	if body.size != 7.6 {
+		t.Fatalf("defaultPDFTextStyle() size = %v, want %v", body.size, 7.6)
+	}
+
+	code := pdfStyleForLine([]string{tagCodeBlock}, appearance)
+	if code.text.size != 7.1 {
+		t.Fatalf("pdfStyleForLine() code size = %v, want %v", code.text.size, 7.1)
+	}
+}
+
+func TestPDFLayoutMetricsUseLogicalExtents(t *testing.T) {
+	offsetY, height := pdfLayoutMetricsFromValues(-pango.UnitsFromDouble(2.5), pango.UnitsFromDouble(14), settings.DefaultNotesPDFBodyFontSize, 1)
+	if offsetY != 2.5 {
+		t.Fatalf("pdfLayoutMetrics() offsetY = %v, want %v", offsetY, 2.5)
+	}
+	if height != 14 {
+		t.Fatalf("pdfLayoutMetrics() height = %v, want %v", height, 14.0)
+	}
+}
+
+func TestImportImageFileIntoNoteCopiesIntoLocalImagesFolder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	notePath := filepath.Join(filepath.Dir(fileName()), "Work", "Plan.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "Diagram.PNG")
+	if err := os.WriteFile(sourcePath, []byte("pngdata"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	markdown, err := importImageFileIntoNote(notePath, sourcePath)
+	if err != nil {
+		t.Fatalf("importImageFileIntoNote() error = %v", err)
+	}
+	if markdown != "![Diagram](images/diagram.png)" {
+		t.Fatalf("importImageFileIntoNote() markdown = %q", markdown)
+	}
+	targetPath := filepath.Join(filepath.Dir(notePath), "images", "diagram.png")
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "pngdata" {
+		t.Fatalf("copied image data = %q, want pngdata", string(data))
+	}
+}
+
+func TestNormalizedImageExtensionRejectsUnsupportedFiles(t *testing.T) {
+	if ext, ok := normalizedImageExtension("photo.jpeg"); !ok || ext != ".jpeg" {
+		t.Fatalf("normalizedImageExtension() = %q,%v, want .jpeg,true", ext, ok)
+	}
+	if _, ok := normalizedImageExtension("vector.svg"); ok {
+		t.Fatal("normalizedImageExtension() should reject svg for managed note images")
+	}
+}
+
+func TestNormalizedImageExtensionAcceptsTIFF(t *testing.T) {
+	if ext, ok := normalizedImageExtension("scan.tiff"); !ok || ext != ".tiff" {
+		t.Fatalf("normalizedImageExtension() = %q,%v, want .tiff,true", ext, ok)
+	}
+}
+
+func TestResolveNoteImagePathHandlesDotSlashRelativePaths(t *testing.T) {
+	notePath := filepath.Join("/tmp", "notes", "Plan.md")
+	resolved, err := resolveNoteImagePath(notePath, "./assets/diagram.png")
+	if err != nil {
+		t.Fatalf("resolveNoteImagePath() error = %v", err)
+	}
+	want := filepath.Join("/tmp", "notes", "assets", "diagram.png")
+	if resolved != want {
+		t.Fatalf("resolveNoteImagePath() = %q, want %q", resolved, want)
+	}
+}
+
+func TestImagePathsFromDropPayloadFiltersToImportableFiles(t *testing.T) {
+	uriList := strings.Join([]string{
+		"file:///tmp/notes/diagram.png",
+		"file:///tmp/notes/readme.txt",
+		"#comment",
+		"file:///tmp/notes/scan.tiff",
+	}, "\n")
+
+	paths := imagePathsFromDropPayload(uriList)
+	want := []string{
+		filepath.Clean("/tmp/notes/diagram.png"),
+		filepath.Clean("/tmp/notes/scan.tiff"),
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("imagePathsFromDropPayload() = %#v, want %#v", paths, want)
+	}
+}
+
+func TestImagePathsFromDropPayloadAcceptsSingleFileURL(t *testing.T) {
+	paths := imagePathsFromDropPayload("file:///tmp/notes/diagram.png")
+	want := []string{filepath.Clean("/tmp/notes/diagram.png")}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("imagePathsFromDropPayload() = %#v, want %#v", paths, want)
 	}
 }
 
@@ -667,6 +909,59 @@ func TestListNoteFilesSkipsTrashTree(t *testing.T) {
 	}
 	if len(files) != 1 || filepath.Base(files[0].Path) != "Root.md" {
 		t.Fatalf("listNoteFiles() = %#v, want only Root.md", files)
+	}
+}
+
+func TestListSidebarFilesIncludesImagesAndFileExtensions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatalf("WriteFile() markdown error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("WriteFile() image error = %v", err)
+	}
+
+	files, err := listSidebarFiles()
+	if err != nil {
+		t.Fatalf("listSidebarFiles() error = %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("listSidebarFiles() len = %d, want 2", len(files))
+	}
+	if files[0].Label != "Plan.md" || files[0].Kind != sidebarEntryNote {
+		t.Fatalf("first sidebar file = %#v", files[0])
+	}
+	if files[1].Label != "diagram.png" || files[1].Kind != sidebarEntryFile {
+		t.Fatalf("second sidebar file = %#v", files[1])
+	}
+}
+
+func TestMoveFilePathToFolderMovesImageAsset(t *testing.T) {
+	requireGTK(t)
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+
+	note := GenerateUI()
+	sourcePath := filepath.Join(notesDir(), "diagram.png")
+	if err := os.WriteFile(sourcePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if err := note.moveFilePathToFolder(sourcePath, "Assets"); err != nil {
+		t.Fatalf("moveFilePathToFolder() error = %v", err)
+	}
+
+	targetPath := filepath.Join(notesDir(), "Assets", "diagram.png")
+	if _, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("moved image stat error = %v", err)
+	}
+	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
+		t.Fatalf("source image should be gone, stat err = %v", err)
 	}
 }
 

@@ -29,6 +29,8 @@ type Settings struct {
 	noteEditorMono       *gtk.CheckButton
 	noteEditorFontSize   *gtk.SpinButton
 	noteLineSpacing      *gtk.SpinButton
+	notePDFBodyFontSize  *gtk.SpinButton
+	notePDFCodeFontSize  *gtk.SpinButton
 	noteFontSelect       *gtk.FontButton
 	noteMonoFontSelect   *gtk.FontButton
 	noteThemeSelect      *gtk.ComboBoxText
@@ -315,6 +317,12 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	s.noteLineSpacing = gtk.NewSpinButtonWithRange(0, 3, 0.05)
 	s.noteLineSpacing.SetDigits(2)
 	s.noteLineSpacing.SetValue(current.LineSpacing)
+	s.notePDFBodyFontSize = gtk.NewSpinButtonWithRange(5, 24, 0.1)
+	s.notePDFBodyFontSize.SetDigits(1)
+	s.notePDFBodyFontSize.SetValue(current.PDFBodyFontSize)
+	s.notePDFCodeFontSize = gtk.NewSpinButtonWithRange(5, 24, 0.1)
+	s.notePDFCodeFontSize.SetDigits(1)
+	s.notePDFCodeFontSize.SetValue(current.PDFCodeFontSize)
 	s.noteFontSelect = fontButtonSelect(current.BodyFont, "Choose notes font", false)
 	s.noteMonoFontSelect = fontButtonSelect(current.MonospaceFont, "Choose code font", true)
 	s.noteThemeSelect = choiceSelect([][2]string{
@@ -330,6 +338,10 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	editorSizeRow.Append(s.noteEditorFontSize)
 	lineSpacingRow := FieldWrapper(SectionLabel("Line spacing"), DefaultBoxPadding)
 	lineSpacingRow.Append(s.noteLineSpacing)
+	pdfBodySizeRow := FieldWrapper(SectionLabel("PDF body font size"), DefaultBoxPadding)
+	pdfBodySizeRow.Append(s.notePDFBodyFontSize)
+	pdfCodeSizeRow := FieldWrapper(SectionLabel("PDF code font size"), DefaultBoxPadding)
+	pdfCodeSizeRow.Append(s.notePDFCodeFontSize)
 	fontRow := FieldWrapper(SectionLabel("Notes font"), DefaultBoxPadding)
 	fontRow.Append(s.noteFontSelect)
 	monoFontRow := FieldWrapper(SectionLabel("Code font"), DefaultBoxPadding)
@@ -341,6 +353,8 @@ func (s *Settings) NotesSettings(placeholder *gtk.Box) {
 	content.Append(tabRow)
 	content.Append(editorSizeRow)
 	content.Append(lineSpacingRow)
+	content.Append(pdfBodySizeRow)
+	content.Append(pdfCodeSizeRow)
 	content.Append(s.noteVimMode)
 	content.Append(s.noteEditorMono)
 	content.Append(fontRow)
@@ -650,6 +664,12 @@ func (s *Settings) applyFormToSettings() {
 	}
 	if s.noteLineSpacing != nil {
 		settings.Inst().NotesApp.LineSpacing = s.noteLineSpacing.Value()
+	}
+	if s.notePDFBodyFontSize != nil {
+		settings.Inst().NotesApp.PDFBodyFontSize = s.notePDFBodyFontSize.Value()
+	}
+	if s.notePDFCodeFontSize != nil {
+		settings.Inst().NotesApp.PDFCodeFontSize = s.notePDFCodeFontSize.Value()
 	}
 	if s.noteFontSelect != nil && s.noteFontSelect.Font() != "" {
 		settings.Inst().NotesApp.BodyFont = s.noteFontSelect.Font()

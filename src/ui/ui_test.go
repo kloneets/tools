@@ -247,6 +247,8 @@ func TestNotesSettingsCreatesLineSpacingControl(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	settings.Inst().NotesApp.LineSpacing = 0.65
+	settings.Inst().NotesApp.PDFBodyFontSize = 7.9
+	settings.Inst().NotesApp.PDFCodeFontSize = 7.4
 
 	s := &Settings{}
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
@@ -257,6 +259,12 @@ func TestNotesSettingsCreatesLineSpacingControl(t *testing.T) {
 	}
 	if got := s.noteLineSpacing.Value(); math.Abs(got-0.65) > 0.0001 {
 		t.Fatalf("noteLineSpacing = %v, want 0.65", got)
+	}
+	if s.notePDFBodyFontSize == nil || math.Abs(s.notePDFBodyFontSize.Value()-7.9) > 0.0001 {
+		t.Fatalf("notePDFBodyFontSize = %v, want 7.9", s.notePDFBodyFontSize.Value())
+	}
+	if s.notePDFCodeFontSize == nil || math.Abs(s.notePDFCodeFontSize.Value()-7.4) > 0.0001 {
+		t.Fatalf("notePDFCodeFontSize = %v, want 7.4", s.notePDFCodeFontSize.Value())
 	}
 }
 

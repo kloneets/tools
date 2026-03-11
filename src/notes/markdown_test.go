@@ -99,6 +99,23 @@ func TestMarkdownPreviewRendersCheckboxesAndLinks(t *testing.T) {
 	}
 }
 
+func TestMarkdownPreviewTracksImages(t *testing.T) {
+	render := markdownPreview("Before ![Diagram](images/diagram.png) after", 4)
+
+	if render.Text != "Before "+markdownImagePlaceholder+" after" {
+		t.Fatalf("markdownPreview() text = %q", render.Text)
+	}
+	if len(render.Images) != 1 {
+		t.Fatalf("markdownPreview() images = %#v", render.Images)
+	}
+	if render.Images[0].Offset != 7 {
+		t.Fatalf("image offset = %d, want 7", render.Images[0].Offset)
+	}
+	if render.Images[0].Alt != "Diagram" || render.Images[0].Path != "images/diagram.png" {
+		t.Fatalf("markdownPreview() image = %#v", render.Images[0])
+	}
+}
+
 func TestMarkdownPreviewAppliesHeadingToCurrentLine(t *testing.T) {
 	render := markdownPreview("## Heading\nnext", 4)
 

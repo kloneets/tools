@@ -29,6 +29,8 @@ type notesAppearance struct {
 	previewSize   float64
 	monoFamily    string
 	monoSize      float64
+	pdfBodySize   float64
+	pdfCodeSize   float64
 	lineSpacing   float64
 	palette       notesPalette
 }
@@ -78,6 +80,8 @@ func currentAppearance() notesAppearance {
 		previewSize:   bodySize,
 		monoFamily:    monoFamily,
 		monoSize:      monoSize,
+		pdfBodySize:   noteSettings.PDFBodyFontSize,
+		pdfCodeSize:   noteSettings.PDFCodeFontSize,
 		lineSpacing:   noteSettings.LineSpacing,
 		palette:       notesThemePalette(noteSettings.PreviewTheme),
 	}

@@ -126,6 +126,21 @@ func TestCurrentAppearanceUsesMonospaceEditorWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestCurrentAppearanceIncludesPDFFontSizes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.PDFBodyFontSize = 7.8
+	settings.Inst().NotesApp.PDFCodeFontSize = 7.2
+
+	appearance := currentAppearance()
+	if appearance.pdfBodySize != 7.8 {
+		t.Fatalf("currentAppearance() pdfBodySize = %v, want 7.8", appearance.pdfBodySize)
+	}
+	if appearance.pdfCodeSize != 7.2 {
+		t.Fatalf("currentAppearance() pdfCodeSize = %v, want 7.2", appearance.pdfCodeSize)
+	}
+}
+
 func TestCurrentAppearanceUsesEditorFontSizeOverride(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()

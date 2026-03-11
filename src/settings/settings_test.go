@@ -36,6 +36,12 @@ func TestDefaultSettings(t *testing.T) {
 	if got.NotesApp.LineSpacing != 1 {
 		t.Fatalf("NotesApp.LineSpacing = %v, want 1", got.NotesApp.LineSpacing)
 	}
+	if got.NotesApp.PDFBodyFontSize != DefaultNotesPDFBodyFontSize {
+		t.Fatalf("NotesApp.PDFBodyFontSize = %v, want %v", got.NotesApp.PDFBodyFontSize, DefaultNotesPDFBodyFontSize)
+	}
+	if got.NotesApp.PDFCodeFontSize != DefaultNotesPDFCodeFontSize {
+		t.Fatalf("NotesApp.PDFCodeFontSize = %v, want %v", got.NotesApp.PDFCodeFontSize, DefaultNotesPDFCodeFontSize)
+	}
 	if got.AppWindow.Width != 600 || got.AppWindow.Height != 300 {
 		t.Fatalf("AppWindow = %#v, want 600x300", got.AppWindow)
 	}
@@ -168,6 +174,12 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	if config.NotesApp.LineSpacing != 1 {
 		t.Fatalf("normalizeSettings() NotesApp.LineSpacing = %v, want 1", config.NotesApp.LineSpacing)
 	}
+	if config.NotesApp.PDFBodyFontSize != DefaultNotesPDFBodyFontSize {
+		t.Fatalf("normalizeSettings() NotesApp.PDFBodyFontSize = %v", config.NotesApp.PDFBodyFontSize)
+	}
+	if config.NotesApp.PDFCodeFontSize != DefaultNotesPDFCodeFontSize {
+		t.Fatalf("normalizeSettings() NotesApp.PDFCodeFontSize = %v", config.NotesApp.PDFCodeFontSize)
+	}
 	if config.NotesApp.BodyFont != "Cantarell 11" {
 		t.Fatalf("normalizeSettings() NotesApp.BodyFont = %q", config.NotesApp.BodyFont)
 	}
@@ -191,6 +203,24 @@ func TestNormalizeSettingsInitializesGDrive(t *testing.T) {
 	normalizeSettings(config)
 	if config.NotesApp.PreviewTheme != "neon-burst" {
 		t.Fatalf("normalizeSettings() should keep neon-burst, got %q", config.NotesApp.PreviewTheme)
+	}
+}
+
+func TestNormalizeSettingsDefaultsInvalidPDFFontSizes(t *testing.T) {
+	config := &UserSettings{
+		NotesApp: NotesAppSettings{
+			PDFBodyFontSize: 0,
+			PDFCodeFontSize: -1,
+		},
+	}
+
+	normalizeSettings(config)
+
+	if config.NotesApp.PDFBodyFontSize != DefaultNotesPDFBodyFontSize {
+		t.Fatalf("normalizeSettings() PDFBodyFontSize = %v, want %v", config.NotesApp.PDFBodyFontSize, DefaultNotesPDFBodyFontSize)
+	}
+	if config.NotesApp.PDFCodeFontSize != DefaultNotesPDFCodeFontSize {
+		t.Fatalf("normalizeSettings() PDFCodeFontSize = %v, want %v", config.NotesApp.PDFCodeFontSize, DefaultNotesPDFCodeFontSize)
 	}
 }
 

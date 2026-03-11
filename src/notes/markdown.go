@@ -7,26 +7,27 @@ import (
 )
 
 const (
-	tagHeading1     = "md-heading-1"
-	tagHeading2     = "md-heading-2"
-	tagHeading3     = "md-heading-3"
-	tagList         = "md-list"
-	tagOrdered      = "md-ordered"
-	tagChecklist    = "md-checklist"
-	tagQuote        = "md-quote"
-	tagBold         = "md-bold"
-	tagItalic       = "md-italic"
-	tagCode         = "md-code"
-	tagCodeBlock    = "md-code-block"
-	tagCodeKeyword  = "md-code-keyword"
-	tagCodeString   = "md-code-string"
-	tagCodeComment  = "md-code-comment"
-	tagCodeNumber   = "md-code-number"
-	tagCodeType     = "md-code-type"
-	tagCodeFunction = "md-code-function"
-	tagCodeProperty = "md-code-property"
-	tagCodeConstant = "md-code-constant"
-	tagLink         = "md-link"
+	tagHeading1              = "md-heading-1"
+	tagHeading2              = "md-heading-2"
+	tagHeading3              = "md-heading-3"
+	tagList                  = "md-list"
+	tagOrdered               = "md-ordered"
+	tagChecklist             = "md-checklist"
+	tagQuote                 = "md-quote"
+	tagBold                  = "md-bold"
+	tagItalic                = "md-italic"
+	tagCode                  = "md-code"
+	tagCodeBlock             = "md-code-block"
+	tagCodeKeyword           = "md-code-keyword"
+	tagCodeString            = "md-code-string"
+	tagCodeComment           = "md-code-comment"
+	tagCodeNumber            = "md-code-number"
+	tagCodeType              = "md-code-type"
+	tagCodeFunction          = "md-code-function"
+	tagCodeProperty          = "md-code-property"
+	tagCodeConstant          = "md-code-constant"
+	tagLink                  = "md-link"
+	markdownImagePlaceholder = "\uFFFC"
 )
 
 type markdownSpan struct {
@@ -36,15 +37,22 @@ type markdownSpan struct {
 }
 
 type markdownRender struct {
-	Text  string
-	Spans []markdownSpan
-	Links []markdownLink
+	Text   string
+	Spans  []markdownSpan
+	Links  []markdownLink
+	Images []markdownImage
 }
 
 type markdownLink struct {
 	Start int
 	End   int
 	URL   string
+}
+
+type markdownImage struct {
+	Offset int
+	Alt    string
+	Path   string
 }
 
 func markdownSpans(text string) []markdownSpan {
@@ -59,6 +67,7 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 	rendered := make([]string, 0, len(lines))
 	spans := make([]markdownSpan, 0)
 	links := make([]markdownLink, 0)
+	images := make([]markdownImage, 0)
 	offset := 0
 	inCodeBlock := false
 	codeLanguage := ""
@@ -90,13 +99,14 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 			continue
 		}
 
-		renderedLine, lineSpans, lineLinks, renderedLen, emitLine := renderMarkdownLine(line, offset)
+		renderedLine, lineSpans, lineLinks, lineImages, renderedLen, emitLine := renderMarkdownLine(line, offset)
 		if !emitLine {
 			continue
 		}
 		rendered = append(rendered, renderedLine)
 		spans = append(spans, lineSpans...)
 		links = append(links, lineLinks...)
+		images = append(images, lineImages...)
 		offset += renderedLen + 1
 	}
 	if inCodeBlock {
@@ -106,9 +116,10 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 	}
 
 	return markdownRender{
-		Text:  strings.Join(rendered, "\n"),
-		Spans: spans,
-		Links: links,
+		Text:   strings.Join(rendered, "\n"),
+		Spans:  spans,
+		Links:  links,
+		Images: images,
 	}
 }
 
@@ -160,7 +171,7 @@ func markdownRenderFromText(text string) markdownRender {
 	return markdownRender{Text: text, Spans: spans}
 }
 
-func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []markdownLink, int, bool) {
+func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []markdownLink, []markdownImage, int, bool) {
 	trimmed := strings.TrimLeft(line, " \t")
 	prefixText := line[:len(line)-len(trimmed)]
 	lineTag := ""
@@ -190,11 +201,11 @@ func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []mark
 		lineTag = tagQuote
 	}
 
-	plain, spans, links, plainLen := renderInlineMarkdown(line, offset)
+	plain, spans, links, images, plainLen := renderInlineMarkdown(line, offset)
 	if lineTag != "" {
 		spans = append([]markdownSpan{{Tag: lineTag, Start: offset, End: offset + plainLen}}, spans...)
 	}
-	return plain, spans, links, plainLen, true
+	return plain, spans, links, images, plainLen, true
 }
 
 func expandTabs(text string, tabSpaces int) string {
@@ -429,18 +440,40 @@ func nextNonSpaceByte(line string, index int) byte {
 }
 
 func inlineMarkdownSpans(line string, offset int) []markdownSpan {
-	_, spans, _, _ := renderInlineMarkdown(line, offset)
+	_, spans, _, _, _ := renderInlineMarkdown(line, offset)
 	return spans
 }
 
-func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []markdownLink, int) {
+func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []markdownLink, []markdownImage, int) {
 	var out strings.Builder
 	out.Grow(len(line))
 	spans := make([]markdownSpan, 0)
 	links := make([]markdownLink, 0)
+	images := make([]markdownImage, 0)
 	outChars := 0
 
 	for i := 0; i < len(line); {
+		if strings.HasPrefix(line[i:], "![") {
+			if endLabel := strings.IndexByte(line[i+2:], ']'); endLabel >= 0 {
+				labelEnd := i + 2 + endLabel
+				if labelEnd+1 < len(line) && line[labelEnd+1] == '(' {
+					if endURL := strings.IndexByte(line[labelEnd+2:], ')'); endURL >= 0 {
+						start := outChars
+						alt := line[i+2 : labelEnd]
+						path := line[labelEnd+2 : labelEnd+2+endURL]
+						out.WriteString(markdownImagePlaceholder)
+						outChars++
+						images = append(images, markdownImage{
+							Offset: offset + start,
+							Alt:    alt,
+							Path:   path,
+						})
+						i = labelEnd + 2 + endURL + 1
+						continue
+					}
+				}
+			}
+		}
 		if strings.HasPrefix(line[i:], "**") || strings.HasPrefix(line[i:], "__") {
 			delim := line[i : i+2]
 			if closeIdx := strings.Index(line[i+2:], delim); closeIdx >= 0 {
@@ -479,7 +512,7 @@ func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []ma
 						end := outChars
 						spans = append(spans, markdownSpan{Tag: tagLink, Start: offset + start, End: offset + end})
 						links = append(links, markdownLink{Start: offset + start, End: offset + end, URL: url})
-						i = labelEnd + 2 + endURL + 2
+						i = labelEnd + 2 + endURL + 1
 						continue
 					}
 				}
@@ -505,7 +538,7 @@ func renderInlineMarkdown(line string, offset int) (string, []markdownSpan, []ma
 		i += size
 	}
 
-	return out.String(), spans, links, outChars
+	return out.String(), spans, links, images, outChars
 }
 
 func runeLen(text string) int {
