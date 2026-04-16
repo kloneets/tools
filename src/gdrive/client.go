@@ -58,9 +58,18 @@ type remoteStateEntry struct {
 	Checksum     string
 }
 
+type SnapshotMeta struct {
+	ID        string
+	Name      string
+	CreatedAt string
+}
+
 const (
 	defaultOAuthClientID     = "863485242223-ghqf2jt00v710rkt27oieivkg7h613nr.apps.googleusercontent.com"
 	defaultOAuthClientSecret = "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"
+	driveRequestTimeout      = 15 * time.Second
+	oauthExchangeTimeout     = 30 * time.Second
+	serverShutdownTimeout    = 5 * time.Second
 )
 
 func TokenPath() string {
@@ -148,7 +157,9 @@ func StartLocalAuthorization() (string, *AuthorizationSession, error) {
 			return
 		}
 
-		token, err := config.Exchange(context.Background(), authCode)
+		exchangeCtx, cancel := context.WithTimeout(context.Background(), oauthExchangeTimeout)
+		defer cancel()
+		token, err := config.Exchange(exchangeCtx, authCode)
 		if err != nil {
 			http.Error(w, "Authorization failed.", http.StatusBadRequest)
 			select {
@@ -171,7 +182,11 @@ func StartLocalAuthorization() (string, *AuthorizationSession, error) {
 		case session.result <- nil:
 		default:
 		}
-		go server.Shutdown(context.Background())
+		go func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+		}()
 	})
 
 	go func() {
@@ -195,7 +210,9 @@ func (s *AuthorizationSession) Close() error {
 	if s == nil || s.server == nil {
 		return nil
 	}
-	return s.server.Shutdown(context.Background())
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancel()
+	return s.server.Shutdown(shutdownCtx)
 }
 
 func ListFolders() ([]Folder, error) {
@@ -360,6 +377,112 @@ func SyncAppData(folderID string, settingsData []byte) error {
 	}
 
 	return syncNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes"))
+}
+
+func UploadAppSnapshot(folderID string, settingsData []byte, retain int) (SnapshotMeta, error) {
+	if folderID == "" {
+		return SnapshotMeta{}, errors.New("drive folder id is required")
+	}
+	service, err := serviceFromCredentials()
+	if err != nil {
+		return SnapshotMeta{}, err
+	}
+	snapshotsRootID, err := ensureFolder(service, folderID, "snapshots")
+	if err != nil {
+		return SnapshotMeta{}, err
+	}
+	name := time.Now().UTC().Format("2006-01-02T15-04-05Z07-00")
+	snapshotFolder := &drive.File{
+		Name:     name,
+		MimeType: "application/vnd.google-apps.folder",
+		Parents:  []string{snapshotsRootID},
+	}
+	created, err := service.Files.Create(snapshotFolder).Fields("id,name,modifiedTime").Do()
+	if err != nil {
+		return SnapshotMeta{}, fmt.Errorf("create drive snapshot folder: %w", err)
+	}
+	if len(settingsData) > 0 {
+		if err := syncBytes(service, created.Id, "settings.json", settingsData, "application/json"); err != nil {
+			return SnapshotMeta{}, err
+		}
+	}
+	notesFolderID, err := ensureFolder(service, created.Id, "notes")
+	if err != nil {
+		return SnapshotMeta{}, err
+	}
+	if err := syncNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes")); err != nil {
+		return SnapshotMeta{}, err
+	}
+	if retain > 0 {
+		if err := pruneOldSnapshots(service, snapshotsRootID, retain); err != nil {
+			return SnapshotMeta{}, err
+		}
+	}
+	return SnapshotMeta{ID: created.Id, Name: created.Name, CreatedAt: created.ModifiedTime}, nil
+}
+
+func ListAppSnapshots(folderID string) ([]SnapshotMeta, error) {
+	if folderID == "" {
+		return nil, errors.New("drive folder id is required")
+	}
+	service, err := serviceFromCredentials()
+	if err != nil {
+		return nil, err
+	}
+	snapshotsRootID, found, err := findFolder(service, folderID, "snapshots")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	children, err := listDriveChildren(service, snapshotsRootID)
+	if err != nil {
+		return nil, err
+	}
+	snapshots := make([]SnapshotMeta, 0, len(children))
+	for _, child := range children {
+		if child.MimeType != "application/vnd.google-apps.folder" {
+			continue
+		}
+		snapshots = append(snapshots, SnapshotMeta{
+			ID:        child.Id,
+			Name:      child.Name,
+			CreatedAt: child.ModifiedTime,
+		})
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].CreatedAt > snapshots[j].CreatedAt
+	})
+	return snapshots, nil
+}
+
+func RestoreAppSnapshot(snapshotID string) ([]byte, error) {
+	if strings.TrimSpace(snapshotID) == "" {
+		return nil, errors.New("snapshot id is required")
+	}
+	service, err := serviceFromCredentials()
+	if err != nil {
+		return nil, err
+	}
+	settingsData, found, err := downloadDriveFile(service, snapshotID, "settings.json")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errors.New("snapshot settings.json not found")
+	}
+	notesFolderID, found, err := findFolder(service, snapshotID, "notes")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errors.New("snapshot notes folder not found")
+	}
+	if err := restoreNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes")); err != nil {
+		return nil, err
+	}
+	return settingsData, nil
 }
 
 func SyncFile(folderID string, localPath string) error {
@@ -1010,6 +1133,28 @@ func nextAvailableDriveEntryName(service *drive.Service, parentID string, name s
 	}
 }
 
+func pruneOldSnapshots(service *drive.Service, snapshotsRootID string, retain int) error {
+	children, err := listDriveChildren(service, snapshotsRootID)
+	if err != nil {
+		return err
+	}
+	folders := make([]*drive.File, 0, len(children))
+	for _, child := range children {
+		if child.MimeType == "application/vnd.google-apps.folder" {
+			folders = append(folders, child)
+		}
+	}
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].ModifiedTime > folders[j].ModifiedTime
+	})
+	for i := retain; i < len(folders); i++ {
+		if err := service.Files.Delete(folders[i].Id).Do(); err != nil {
+			return fmt.Errorf("delete old snapshot %q: %w", folders[i].Name, err)
+		}
+	}
+	return nil
+}
+
 func findDriveEntry(service *drive.Service, parentID string, name string, isDir bool) (string, bool, error) {
 	if isDir {
 		return findFolder(service, parentID, name)
@@ -1113,6 +1258,16 @@ func oauthConfig() (*oauth2.Config, error) {
 	}, nil
 }
 
+func timedOAuthClient(ctx context.Context, config *oauth2.Config, token *oauth2.Token) *http.Client {
+	client := config.Client(ctx, token)
+	client.Timeout = driveRequestTimeout
+	return client
+}
+
+func driveServiceContext() context.Context {
+	return context.Background()
+}
+
 func serviceFromCredentials() (*drive.Service, error) {
 	config, err := oauthConfig()
 	if err != nil {
@@ -1124,8 +1279,9 @@ func serviceFromCredentials() (*drive.Service, error) {
 		return nil, fmt.Errorf("load token: %w", err)
 	}
 
-	client := config.Client(context.Background(), token)
-	service, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
+	ctx := driveServiceContext()
+	client := timedOAuthClient(ctx, config, token)
+	service, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		return nil, fmt.Errorf("create drive service: %w", err)
 	}

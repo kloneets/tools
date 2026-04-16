@@ -2,15 +2,21 @@ package notes
 
 import (
 	"fmt"
+	"net/url"
+	"regexp"
+	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 type vimCommandKind string
 
 const (
-	vimCommandSave    vimCommandKind = "save"
-	vimCommandSearch  vimCommandKind = "search"
-	vimCommandReplace vimCommandKind = "replace"
+	vimCommandSave      vimCommandKind = "save"
+	vimCommandSearch    vimCommandKind = "search"
+	vimCommandReplace   vimCommandKind = "replace"
+	vimCommandRename    vimCommandKind = "rename"
+	vimCommandOpenLinks vimCommandKind = "open-links"
 )
 
 type vimCommand struct {
@@ -19,6 +25,7 @@ type vimCommand struct {
 	Replacement string
 	Global      bool
 	CurrentLine bool
+	Name        string
 }
 
 func parseVimCommand(raw string) (vimCommand, error) {
@@ -38,6 +45,8 @@ func parseVimCommand(raw string) (vimCommand, error) {
 	switch cmd {
 	case "w", "write", "save":
 		return vimCommand{Kind: vimCommandSave}, nil
+	case "ol":
+		return vimCommand{Kind: vimCommandOpenLinks}, nil
 	}
 
 	if strings.HasPrefix(cmd, "search ") {
@@ -73,6 +82,14 @@ func parseVimCommand(raw string) (vimCommand, error) {
 			Replacement: strings.Join(fields[2:], " "),
 			Global:      true,
 		}, nil
+	}
+
+	if strings.HasPrefix(cmd, "rename ") {
+		name := strings.TrimSpace(strings.TrimPrefix(cmd, "rename "))
+		if name == "" {
+			return vimCommand{}, fmt.Errorf("rename requires a note name")
+		}
+		return vimCommand{Kind: vimCommandRename, Name: name}, nil
 	}
 
 	return vimCommand{}, fmt.Errorf("unknown command: %s", cmd)
@@ -183,4 +200,63 @@ func replaceTextInRange(text string, oldValue string, newValue string, global bo
 		return text, 0
 	}
 	return string(runes[:start]) + updatedRange + string(runes[end:]), count
+}
+
+var bareExternalLinkPattern = regexp.MustCompile(`(?i)(?:https?|ftp|file)://[^\s<>"']+`)
+
+func collectSupportedLinks(text string) []string {
+	type occurrence struct {
+		start int
+		uri   string
+	}
+	occurrences := make([]occurrence, 0, 8)
+	render := markdownPreview(text, 4)
+	for _, link := range render.Links {
+		occurrences = append(occurrences, occurrence{start: link.Start, uri: link.URL})
+	}
+	for _, idx := range bareExternalLinkPattern.FindAllStringIndex(text, -1) {
+		occurrences = append(occurrences, occurrence{
+			start: utf8.RuneCountInString(text[:idx[0]]),
+			uri:   text[idx[0]:idx[1]],
+		})
+	}
+	sort.SliceStable(occurrences, func(i, j int) bool {
+		return occurrences[i].start < occurrences[j].start
+	})
+
+	seen := make(map[string]struct{})
+	links := make([]string, 0, 8)
+	add := func(uri string) {
+		uri = trimTrailingExternalPunctuation(strings.TrimSpace(uri))
+		if !isSupportedExternalURI(uri) {
+			return
+		}
+		if _, ok := seen[uri]; ok {
+			return
+		}
+		seen[uri] = struct{}{}
+		links = append(links, uri)
+	}
+
+	for _, item := range occurrences {
+		add(item.uri)
+	}
+	return links
+}
+
+func isSupportedExternalURI(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "ftp", "file":
+		return true
+	default:
+		return false
+	}
+}
+
+func trimTrailingExternalPunctuation(raw string) string {
+	return strings.TrimRight(raw, ".,;:!?)]}\"'>")
 }

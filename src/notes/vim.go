@@ -109,6 +109,16 @@ func vimDeleteChar(text string, offset int) (string, int) {
 	return string(append(runes[:offset], runes[offset+1:]...)), offset
 }
 
+func vimReplaceChar(text string, offset int, replacement rune) (string, int) {
+	runes := []rune(text)
+	offset = vimClampOffset(text, offset)
+	if offset >= len(runes) || runes[offset] == '\n' {
+		return text, offset
+	}
+	runes[offset] = replacement
+	return string(runes), offset
+}
+
 func vimDeleteLine(text string, offset int) (string, int) {
 	runes := []rune(text)
 	lines := vimLineInfos(text)

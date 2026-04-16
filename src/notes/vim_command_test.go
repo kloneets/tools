@@ -1,6 +1,9 @@
 package notes
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseVimCommandSave(t *testing.T) {
 	cmd, err := parseVimCommand("w")
@@ -39,6 +42,41 @@ func TestParseVimCommandCurrentLineReplace(t *testing.T) {
 	}
 	if cmd.Kind != vimCommandReplace || !cmd.CurrentLine || !cmd.Global {
 		t.Fatalf("cmd = %#v, want current-line global replace", cmd)
+	}
+}
+
+func TestParseVimCommandOpenLinks(t *testing.T) {
+	cmd, err := parseVimCommand("ol")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandOpenLinks {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandOpenLinks)
+	}
+}
+
+func TestCollectSupportedLinksDedupesAndFilters(t *testing.T) {
+	text := strings.Join([]string{
+		"[docs](https://example.com/docs)",
+		"https://example.com/docs",
+		"ftp://example.com/pub/file.txt",
+		"file:///tmp/example.txt",
+		"[relative](assets/file.png)",
+		"mailto:test@example.com",
+	}, "\n")
+	got := collectSupportedLinks(text)
+	want := []string{
+		"https://example.com/docs",
+		"ftp://example.com/pub/file.txt",
+		"file:///tmp/example.txt",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("collectSupportedLinks() len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("collectSupportedLinks()[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

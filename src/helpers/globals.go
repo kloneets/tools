@@ -1,15 +1,9 @@
 package helpers
 
-import (
-	"log"
-
-	"github.com/diamondburned/gotk4/pkg/gtk/v4"
-)
+import "log"
 
 type GlobalOptions struct {
-	Debug       bool
-	MainWindow  *gtk.Window
-	MainOverlay *gtk.Overlay
+	Debug bool
 }
 
 var goInstance *GlobalOptions
@@ -22,24 +16,14 @@ func Globals() *GlobalOptions {
 	if goInstance == nil {
 		log.Fatal("We have no global options!")
 	}
-
 	return goInstance
 }
 
 func InitGlobals() *GlobalOptions {
-	goInstance = &GlobalOptions{
-		Debug:       false,
-		MainWindow:  nil,
-		MainOverlay: nil,
-	}
-
+	goInstance = &GlobalOptions{Debug: false}
 	return goInstance
 }
 
-func SetMainWindow(window *gtk.Window) {
-	Globals().MainWindow = window
-}
+func SetMainWindow(any) {}
 
-func SetMainOverlay(overlay *gtk.Overlay) {
-	Globals().MainOverlay = overlay
-}
+func SetMainOverlay(any) {}

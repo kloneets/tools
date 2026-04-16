@@ -2,13 +2,12 @@ package helpers
 
 import (
 	"log"
-
-	"github.com/diamondburned/gotk4/pkg/gtk/v4"
+	"sync"
 )
 
 type StatusBar struct {
-	B         *gtk.Statusbar
-	contextID uint
+	mu   sync.RWMutex
+	text string
 }
 
 var statusBarInstance *StatusBar
@@ -21,18 +20,27 @@ func StatusBarInst() *StatusBar {
 	if statusBarInstance == nil {
 		log.Fatal("We have no status bar instance!")
 	}
-
 	return statusBarInstance
 }
 
 func InitStatusBar() {
-	statusBarInstance = &StatusBar{
-		B: gtk.NewStatusbar(),
-	}
-	statusBarInstance.contextID = statusBarInstance.B.ContextID("kt")
+	statusBarInstance = &StatusBar{}
 }
 
 func (s *StatusBar) UpdateStatusBar(text string) {
-	s.B.Pop(s.contextID)
-	s.B.Push(s.contextID, text)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.text = text
+}
+
+func (s *StatusBar) Text() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.text
 }

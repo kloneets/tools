@@ -32,3 +32,49 @@ func TestCalculateResult(t *testing.T) {
 		t.Fatalf("calculateResult() = (%d, %d), want (80, 25)", gotPages, gotPercent)
 	}
 }
+
+func TestCursorVisibleWhenEditing(t *testing.T) {
+	m := &Model{
+		FirstBookInput:  "120",
+		ReadInput:       "40",
+		SecondBookInput: "300",
+		Focus:           1,
+		Editing:         true,
+	}
+	row, col, ok := m.Cursor()
+	if !ok {
+		t.Fatal("Cursor() ok = false, want true while editing")
+	}
+	if row != 3 {
+		t.Fatalf("Cursor() row = %d, want 3", row)
+	}
+	if col <= len([]rune("> read pages:  ")) {
+		t.Fatalf("Cursor() col = %d, want cursor after field contents", col)
+	}
+}
+
+func TestModelEditing(t *testing.T) {
+	m := &Model{FirstBookInput: "10", ReadInput: "2", SecondBookInput: "20"}
+	m.StartEditing()
+	if !m.IsEditing() {
+		t.Fatal("IsEditing() = false, want true")
+	}
+	if !m.HandleEditKey("", '5') {
+		t.Fatal("HandleEditKey() = false, want digit accepted")
+	}
+	if m.FirstBookInput != "105" {
+		t.Fatalf("FirstBookInput = %q, want %q", m.FirstBookInput, "105")
+	}
+	if !m.HandleEditKey("backspace", 0) {
+		t.Fatal("HandleEditKey(backspace) = false, want true")
+	}
+	if m.FirstBookInput != "10" {
+		t.Fatalf("FirstBookInput = %q, want %q", m.FirstBookInput, "10")
+	}
+	if !m.HandleEditKey("esc", 0) {
+		t.Fatal("HandleEditKey(esc) = false, want true")
+	}
+	if m.IsEditing() {
+		t.Fatal("IsEditing() = true, want false after esc")
+	}
+}

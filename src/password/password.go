@@ -1,132 +1,92 @@
 package password
 
 import (
-	"fmt"
 	"math/rand"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/kloneets/tools/src/settings"
-	"github.com/kloneets/tools/src/ui"
 )
 
-const (
-	defaultPasswordLength = 16
-)
+const defaultPasswordLength = 16
 
-type PasswordGenerator struct {
-	F              *gtk.Frame
-	generate       *gtk.Button
-	letters        *gtk.CheckButton
-	numbers        *gtk.CheckButton
-	specialSymbols *gtk.CheckButton
-	password       *gtk.Entry
-	symbolCount    *gtk.Entry
+type Model struct {
+	Letters        bool
+	Numbers        bool
+	SpecialSymbols bool
+	SymbolCount    int
+	Password       string
+	Dirty          bool
 }
 
-func GenerateUI() *PasswordGenerator {
-	appSettings := settings.Inst()
-	p := PasswordGenerator{}
-
-	p.generate = gtk.NewButton()
-	p.generate.SetLabel("Generate")
-	p.generate.ConnectClicked(p.genPassword)
-	p.generate.SetMarginStart(ui.DefaultBoxPadding)
-	p.generate.SetMarginEnd(ui.DefaultBoxPadding)
-	p.letters = gtk.NewCheckButtonWithLabel("letters")
-	p.letters.SetActive(appSettings.PasswordApp.Letters)
-	p.letters.ConnectToggled(p.saveSettings)
-	p.numbers = gtk.NewCheckButtonWithLabel("numbers")
-	p.numbers.SetActive(appSettings.PasswordApp.Numbers)
-	p.numbers.ConnectToggled(p.saveSettings)
-	p.specialSymbols = gtk.NewCheckButtonWithLabel("special symbols")
-	p.specialSymbols.SetActive(appSettings.PasswordApp.SpecialSymbols)
-	p.specialSymbols.ConnectToggled(p.saveSettings)
-	p.password = gtk.NewEntry()
-	p.password.SetMarginStart(ui.DefaultBoxPadding)
-	p.password.SetMarginEnd(ui.DefaultBoxPadding)
-	p.symbolCount = gtk.NewEntry()
-	p.symbolCount.SetText(fmt.Sprint(appSettings.PasswordApp.SymbolCount))
-
-	countContainer := ui.FieldWrapper(gtk.NewLabel("Symbol count:"), ui.DefaultBoxPadding)
-	countContainer.Append(p.symbolCount)
-
-	mainArea := ui.MainArea()
-	mainArea.Append(countContainer)
-	mainArea.Append(p.letters)
-	mainArea.Append(p.numbers)
-	mainArea.Append(p.specialSymbols)
-	mainArea.Append(p.generate)
-	mainArea.Append(p.password)
-
-	p.F = ui.Frame("Generate password:")
-	p.F.SetChild(mainArea)
-
-	return &p
-}
-
-func (p *PasswordGenerator) genPassword() {
-	sCount, err := strconv.Atoi(p.symbolCount.Text())
-	if err != nil {
-		sCount = defaultPasswordLength
+func NewModel() *Model {
+	cfg := settings.Inst().PasswordApp
+	if cfg.SymbolCount <= 0 {
+		cfg.SymbolCount = defaultPasswordLength
 	}
+	return &Model{
+		Letters:        cfg.Letters,
+		Numbers:        cfg.Numbers,
+		SpecialSymbols: cfg.SpecialSymbols,
+		SymbolCount:    cfg.SymbolCount,
+	}
+}
 
-	charPool := buildCharPool(p.letters.Active(), p.numbers.Active(), p.specialSymbols.Active())
+func (m *Model) Generate() {
+	charPool := buildCharPool(m.Letters, m.Numbers, m.SpecialSymbols)
 	if len(charPool) == 0 {
-		p.password.SetText("")
+		m.Password = ""
+		m.save()
 		return
 	}
-
 	source := rand.NewSource(time.Now().UnixNano())
-	p.password.SetText(generatePassword(charPool, sCount, rand.New(source)))
-	p.saveSettings()
+	m.Password = generatePassword(charPool, m.SymbolCount, rand.New(source))
+	m.save()
 }
 
-func (p *PasswordGenerator) saveSettings() {
+func (m *Model) save() {
 	s := settings.Inst()
-	s.PasswordApp.Letters = p.letters.Active()
-	s.PasswordApp.Numbers = p.numbers.Active()
-	s.PasswordApp.SpecialSymbols = p.specialSymbols.Active()
-	sc, err := strconv.Atoi(p.symbolCount.Text())
-	if err != nil {
-		sc = defaultPasswordLength
+	s.PasswordApp.Letters = m.Letters
+	s.PasswordApp.Numbers = m.Numbers
+	s.PasswordApp.SpecialSymbols = m.SpecialSymbols
+	if m.SymbolCount <= 0 {
+		m.SymbolCount = defaultPasswordLength
 	}
-	s.PasswordApp.SymbolCount = sc
+	s.PasswordApp.SymbolCount = m.SymbolCount
+	m.Dirty = true
+}
 
-	settings.SaveSettings()
+func (m *Model) Save() {
+	if m == nil {
+		return
+	}
+	m.save()
+	settings.SaveSettingsLocal()
+	m.Dirty = false
 }
 
 func buildCharPool(includeLetters bool, includeNumbers bool, includeSpecial bool) string {
 	charPool := ""
-
 	if includeLetters {
 		for ch := 'a'; ch <= 'z'; ch++ {
-			charPool += fmt.Sprintf("%c", ch)
+			charPool += string(ch)
 		}
-
 		charPool += strings.ToUpper(charPool)
 	}
-
 	if includeSpecial {
 		charPool += "`~!@#$%^&*()_+\\|/{}[]'\";:><.,"
 	}
-
 	if includeNumbers {
 		charPool += "0123456789"
 	}
-
 	return charPool
 }
 
 func generatePassword(charPool string, symbolCount int, random *rand.Rand) string {
 	var builder strings.Builder
 	builder.Grow(symbolCount)
-
 	for i := 0; i < symbolCount; i++ {
 		builder.WriteByte(charPool[random.Intn(len(charPool))])
 	}
-
 	return builder.String()
 }

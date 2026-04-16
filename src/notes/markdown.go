@@ -10,6 +10,10 @@ const (
 	tagHeading1              = "md-heading-1"
 	tagHeading2              = "md-heading-2"
 	tagHeading3              = "md-heading-3"
+	tagHeading4              = "md-heading-4"
+	tagHeading5              = "md-heading-5"
+	tagHeading6              = "md-heading-6"
+	tagHorizontalRule        = "md-horizontal-rule"
 	tagList                  = "md-list"
 	tagOrdered               = "md-ordered"
 	tagChecklist             = "md-checklist"
@@ -27,6 +31,7 @@ const (
 	tagCodeProperty          = "md-code-property"
 	tagCodeConstant          = "md-code-constant"
 	tagLink                  = "md-link"
+	tagVisualSelection       = "md-visual-selection"
 	markdownImagePlaceholder = "\uFFFC"
 )
 
@@ -84,6 +89,8 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 				if len(blockText) > 0 {
 					offset++
 				}
+				rendered = append(rendered, "")
+				offset++
 				codeBlockLines = codeBlockLines[:0]
 				inCodeBlock = false
 				codeLanguage = ""
@@ -92,6 +99,8 @@ func markdownPreview(text string, tabSpaces int) markdownRender {
 			inCodeBlock = true
 			codeLanguage = strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
 			codeBlockLines = codeBlockLines[:0]
+			rendered = append(rendered, "")
+			offset++
 			continue
 		}
 		if inCodeBlock {
@@ -154,6 +163,14 @@ func markdownRenderFromText(text string) markdownRender {
 			spans = append(spans, markdownSpan{Tag: tagHeading2, Start: offset + indent, End: lineEnd})
 		case strings.HasPrefix(trimmed, "### "):
 			spans = append(spans, markdownSpan{Tag: tagHeading3, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "#### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading4, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "##### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading5, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "###### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading6, Start: offset + indent, End: lineEnd})
+		case isHorizontalRule(trimmed):
+			spans = append(spans, markdownSpan{Tag: tagHorizontalRule, Start: offset + indent, End: lineEnd})
 		case strings.HasPrefix(trimmed, "- [ ] "), strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
 			spans = append(spans, markdownSpan{Tag: tagChecklist, Start: offset + indent, End: lineEnd})
 		case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
@@ -185,6 +202,18 @@ func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []mark
 	case strings.HasPrefix(trimmed, "### "):
 		line = prefixText + trimmed[4:]
 		lineTag = tagHeading3
+	case strings.HasPrefix(trimmed, "#### "):
+		line = prefixText + trimmed[5:]
+		lineTag = tagHeading4
+	case strings.HasPrefix(trimmed, "##### "):
+		line = prefixText + trimmed[6:]
+		lineTag = tagHeading5
+	case strings.HasPrefix(trimmed, "###### "):
+		line = prefixText + trimmed[7:]
+		lineTag = tagHeading6
+	case isHorizontalRule(trimmed):
+		line = prefixText + "-"
+		lineTag = tagHorizontalRule
 	case strings.HasPrefix(trimmed, "- [ ] "):
 		line = prefixText + "☐ " + trimmed[6:]
 		lineTag = tagChecklist
@@ -206,6 +235,11 @@ func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []mark
 		spans = append([]markdownSpan{{Tag: lineTag, Start: offset, End: offset + plainLen}}, spans...)
 	}
 	return plain, spans, links, images, plainLen, true
+}
+
+func isHorizontalRule(trimmed string) bool {
+	trimmed = strings.TrimSpace(trimmed)
+	return trimmed == "---"
 }
 
 func expandTabs(text string, tabSpaces int) string {

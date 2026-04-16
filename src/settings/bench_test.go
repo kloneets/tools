@@ -28,7 +28,6 @@ func BenchmarkInit(b *testing.B) {
 	}
 
 	cfg := defaultSettings()
-	cfg.NotesApp.BodyFont = "Cantarell 11"
 	cfg.GDrive.LastSyncMessage = strings.Repeat("ok", 40)
 	data, err := json.Marshal(cfg)
 	if err != nil {

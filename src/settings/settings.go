@@ -8,10 +8,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/diamondburned/gotk4/pkg/core/glib"
 	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
 )
@@ -45,30 +45,16 @@ type PasswordAppSettings struct {
 }
 
 type NotesAppSettings struct {
-	TabSpaces       int     `json:"tab_spaces"`
-	EditorWidth     int     `json:"editor_width,omitempty"`
-	EditorFontSize  int     `json:"editor_font_size,omitempty"`
-	LineSpacing     float64 `json:"line_spacing,omitempty"`
-	PDFBodyFontSize float64 `json:"pdf_body_font_size,omitempty"`
-	PDFCodeFontSize float64 `json:"pdf_code_font_size,omitempty"`
-	SidebarVisible  bool    `json:"sidebar_visible"`
-	BodyFont        string  `json:"body_font"`
-	MonospaceFont   string  `json:"monospace_font"`
-	EditorMonospace bool    `json:"editor_monospace"`
-	PreviewTheme    string  `json:"preview_theme"`
-	VimMode         bool    `json:"vim_mode"`
+	TabSpaces      int  `json:"tab_spaces"`
+	EditorWidth    int  `json:"editor_width,omitempty"`
+	SidebarVisible bool `json:"sidebar_visible"`
+	VimMode        bool `json:"vim_mode"`
 }
-
-const (
-	DefaultNotesPDFBodyFontSize = 8.4
-	DefaultNotesPDFCodeFontSize = 8.0
-)
 
 func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
 	type notesAppAlias NotesAppSettings
 	aux := struct {
-		SidebarVisible *bool    `json:"sidebar_visible"`
-		LineSpacing    *float64 `json:"line_spacing"`
+		SidebarVisible *bool `json:"sidebar_visible"`
 		*notesAppAlias
 	}{
 		notesAppAlias: (*notesAppAlias)(n),
@@ -78,9 +64,6 @@ func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
 	}
 	if aux.SidebarVisible == nil {
 		n.SidebarVisible = true
-	}
-	if aux.LineSpacing == nil {
-		n.LineSpacing = 1
 	}
 	return nil
 }
@@ -92,39 +75,42 @@ type UISettings struct {
 }
 
 type GDriveSettings struct {
-	Enabled             bool   `json:"enabled"`
-	SyncIntervalSec     int    `json:"sync_interval_sec"`
-	FolderID            string `json:"folder_id"`
-	FolderName          string `json:"folder_name"`
-	PendingSync         bool   `json:"pending_sync,omitempty"`
-	LastRemoteState     string `json:"last_remote_state,omitempty"`
-	ConflictRemoteState string `json:"conflict_remote_state,omitempty"`
-	LastSyncAt          string `json:"last_sync_at"`
-	LastSyncStatus      string `json:"last_sync_status"`
-	LastSyncMessage     string `json:"last_sync_message"`
+	Enabled             bool                `json:"enabled"`
+	SyncIntervalSec     int                 `json:"sync_interval_sec"`
+	FolderID            string              `json:"folder_id"`
+	FolderName          string              `json:"folder_name"`
+	PendingSync         bool                `json:"pending_sync,omitempty"`
+	LastRemoteState     string              `json:"last_remote_state,omitempty"`
+	ConflictRemoteState string              `json:"conflict_remote_state,omitempty"`
+	LastSyncAt          string              `json:"last_sync_at"`
+	LastSyncStatus      string              `json:"last_sync_status"`
+	LastSyncMessage     string              `json:"last_sync_message"`
+	LastLocalSaveAt     string              `json:"last_local_save_at"`
+	LastDriveSaveAt     string              `json:"last_drive_save_at"`
+	LastDriveRefreshAt  string              `json:"last_drive_refresh_at"`
+	SelectedSnapshotID  string              `json:"selected_snapshot_id,omitempty"`
+	Snapshots           []DriveSnapshotMeta `json:"snapshots,omitempty"`
+}
+
+type DriveSnapshotMeta struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
 }
 
 var settingsInstance *UserSettings
 var saveHooks []func(*UserSettings)
 var driveSyncInFlight atomic.Bool
 var driveRefreshInFlight atomic.Bool
+var shuttingDown atomic.Bool
 var driveSyncFunc func() error
-var driveSettingsLoader func(string) ([]byte, bool, error)
-var driveNotesRestorer func(string) error
-var driveStateSignature func(string) (string, error)
+var driveUploadSnapshotFunc func(folderID string, settingsData []byte, retain int) (gdrive.SnapshotMeta, error)
+var driveListSnapshotsFunc func(folderID string) ([]gdrive.SnapshotMeta, error)
+var driveRestoreSnapshotFunc func(snapshotID string) ([]byte, error)
 var statusUpdater = func(text string) {
-	glib.IdleAdd(func() {
+	if helpers.HasStatusBar() {
 		helpers.StatusBarInst().UpdateStatusBar(text)
-	})
-}
-
-func init() {
-	driveSyncFunc = syncDriveDataCore
-	driveSettingsLoader = func(folderID string) ([]byte, bool, error) {
-		return gdrive.DownloadFile(folderID, "settings.json")
 	}
-	driveNotesRestorer = gdrive.RestoreNotesTree
-	driveStateSignature = gdrive.RemoteStateSignature
 }
 
 func Inst() *UserSettings {
@@ -136,6 +122,7 @@ func Inst() *UserSettings {
 }
 
 func Init() *[]string {
+	shuttingDown.Store(false)
 	var messages []string
 	fn := fileName()
 	c, err := os.ReadFile(fn)
@@ -187,14 +174,9 @@ func defaultSettings() *UserSettings {
 			Height: 300,
 		},
 		NotesApp: NotesAppSettings{
-			TabSpaces:       4,
-			SidebarVisible:  true,
-			BodyFont:        "Cantarell 11",
-			MonospaceFont:   "Noto Sans Mono 11",
-			LineSpacing:     1,
-			PDFBodyFontSize: DefaultNotesPDFBodyFontSize,
-			PDFCodeFontSize: DefaultNotesPDFCodeFontSize,
-			PreviewTheme:    "ide-dark",
+			TabSpaces:      4,
+			SidebarVisible: true,
+			VimMode:        true,
 		},
 		UI:     defaultUISettings(),
 		GDrive: defaultGDriveSettings(),
@@ -234,37 +216,11 @@ func normalizeSettings(s *UserSettings) {
 	if s.AppWindow.Height <= 0 {
 		s.AppWindow.Height = 300
 	}
-	if s.NotesApp.LineSpacing == 0 && s.NotesApp.TabSpaces == 0 && s.NotesApp.BodyFont == "" && s.NotesApp.MonospaceFont == "" && s.NotesApp.PreviewTheme == "" && !s.NotesApp.VimMode && !s.NotesApp.EditorMonospace && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
-		s.NotesApp.LineSpacing = 1
-	}
 	if s.NotesApp.TabSpaces <= 0 {
 		s.NotesApp.TabSpaces = 4
 	}
-	if s.NotesApp.EditorFontSize < 0 {
-		s.NotesApp.EditorFontSize = 0
-	}
-	if s.NotesApp.LineSpacing < 0 {
-		s.NotesApp.LineSpacing = 1
-	}
-	if s.NotesApp.PDFBodyFontSize <= 0 {
-		s.NotesApp.PDFBodyFontSize = DefaultNotesPDFBodyFontSize
-	}
-	if s.NotesApp.PDFCodeFontSize <= 0 {
-		s.NotesApp.PDFCodeFontSize = DefaultNotesPDFCodeFontSize
-	}
-	if s.NotesApp.BodyFont == "" && s.NotesApp.MonospaceFont == "" && s.NotesApp.PreviewTheme == "" && !s.NotesApp.VimMode && !s.NotesApp.EditorMonospace && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
+	if s.NotesApp.TabSpaces == 4 && !s.NotesApp.VimMode && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
-	}
-	if s.NotesApp.BodyFont == "" {
-		s.NotesApp.BodyFont = "Cantarell 11"
-	}
-	if s.NotesApp.MonospaceFont == "" {
-		s.NotesApp.MonospaceFont = "Noto Sans Mono 11"
-	}
-	switch s.NotesApp.PreviewTheme {
-	case "ide-dark", "neon-burst", "paper-light", "mono":
-	default:
-		s.NotesApp.PreviewTheme = "ide-dark"
 	}
 }
 
@@ -303,102 +259,43 @@ func (g *GDriveSettings) Ready() bool {
 }
 
 func SaveSettings() {
+	SaveSettingsLocal()
+}
+
+func SaveSettingsLocal() {
 	MarkDriveDirty()
-	writeSettingsToDisk(true)
-	startDriveSyncAsync()
+	if settingsInstance != nil && settingsInstance.GDrive != nil {
+		settingsInstance.GDrive.LastLocalSaveAt = time.Now().Format(time.RFC3339)
+	}
+	writeSettingsToDisk(false)
+}
+
+func saveSettings(sync bool, notifyHooks bool) {
+	if sync {
+		MarkDriveDirty()
+		if settingsInstance != nil && settingsInstance.GDrive != nil {
+			settingsInstance.GDrive.LastLocalSaveAt = time.Now().Format(time.RFC3339)
+		}
+	}
+	writeSettingsToDisk(notifyHooks)
 }
 
 func StartDriveSync() {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() || !settingsInstance.GDrive.PendingSync {
-		return
-	}
-	startDriveSyncAsync()
-}
-
-func NeedsDriveSyncOnClose() bool {
-	return settingsInstance != nil && settingsInstance.GDrive != nil && settingsInstance.GDrive.Ready() && settingsInstance.GDrive.PendingSync
-}
-
-func SyncDriveDataOnShutdown(ctx context.Context) error {
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !NeedsDriveSyncOnClose() {
-			return lastDriveSyncError()
-		}
-		if driveSyncInFlight.CompareAndSwap(false, true) {
-			err := syncDriveDataOnce()
-			driveSyncInFlight.Store(false)
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
 }
 
 func StartDriveRefresh() {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() || settingsInstance.GDrive.PendingSync {
-		return
-	}
-	if !driveRefreshInFlight.CompareAndSwap(false, true) {
-		return
-	}
-	go func() {
-		defer driveRefreshInFlight.Store(false)
-		messages := restoreDriveSourceOfTruth()
-		if len(messages) == 0 {
-			return
-		}
-		writeSettingsToDisk(true)
-		statusUpdater(messages[len(messages)-1])
-	}()
 }
 
-func ResolveDriveConflictUseLocal() error {
-	if settingsInstance == nil || settingsInstance.GDrive == nil {
-		return errors.New("settings are not initialized")
-	}
-	if settingsInstance.GDrive.ConflictRemoteState == "" {
-		return errors.New("no Drive conflict to resolve")
-	}
-
-	settingsInstance.GDrive.LastRemoteState = settingsInstance.GDrive.ConflictRemoteState
-	settingsInstance.GDrive.ConflictRemoteState = ""
-	settingsInstance.GDrive.PendingSync = true
-	settingsInstance.GDrive.LastSyncStatus = "pending"
-	settingsInstance.GDrive.LastSyncMessage = "Conflict resolved in favor of local data. Drive sync queued."
-	writeSettingsToDisk(true)
-	startDriveSyncAsync()
-	return nil
+func SyncDriveDataOnShutdown(ctx context.Context) error {
+	return ctx.Err()
 }
 
-func ResolveDriveConflictUseRemote() (string, error) {
-	if settingsInstance == nil || settingsInstance.GDrive == nil {
-		return "", errors.New("settings are not initialized")
-	}
-	if settingsInstance.GDrive.ConflictRemoteState == "" {
-		return "", errors.New("no Drive conflict to resolve")
-	}
+func BeginShutdown() {
+	shuttingDown.Store(true)
+}
 
-	backupDir, err := backupLocalStateSnapshot()
-	if err != nil {
-		return "", err
-	}
-	settingsInstance.GDrive.PendingSync = false
-	settingsInstance.GDrive.ConflictRemoteState = ""
-	messages := restoreDriveSourceOfTruthForced()
-	if len(messages) == 0 {
-		settingsInstance.GDrive.LastSyncStatus = "ok"
-		settingsInstance.GDrive.LastSyncMessage = "Drive data restored successfully"
-	} else {
-		settingsInstance.GDrive.LastSyncMessage = messages[len(messages)-1]
-	}
-	writeSettingsToDisk(true)
-	return backupDir, nil
+func IsShuttingDown() bool {
+	return shuttingDown.Load()
 }
 
 func DriveSyncInterval() time.Duration {
@@ -416,8 +313,6 @@ func SaveNotesEditorWidth(width int) {
 		return
 	}
 	settingsInstance.NotesApp.EditorWidth = width
-	MarkDriveDirty()
-	writeSettingsToDisk(false)
 }
 
 func SaveAppWindowState(width int, height int, maximized bool) {
@@ -431,8 +326,6 @@ func SaveAppWindowState(width int, height int, maximized bool) {
 		settingsInstance.AppWindow.Height = height
 	}
 	settingsInstance.AppWindow.Maximized = maximized
-	MarkDriveDirty()
-	writeSettingsToDisk(false)
 }
 
 func PersistedNotesEditorWidth() int {
@@ -481,63 +374,14 @@ func writeSettingsToDisk(notifyHooks bool) {
 	statusUpdater("Settings saved!")
 }
 
-func saveSettings(sync bool, notifyHooks bool) {
-	if sync {
-		MarkDriveDirty()
-	}
-	writeSettingsToDisk(notifyHooks)
-	if sync {
-		startDriveSyncAsync()
-	}
-}
-
-func startDriveSyncAsync() {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() || !settingsInstance.GDrive.PendingSync {
-		return
-	}
-	if !driveSyncInFlight.CompareAndSwap(false, true) {
-		statusUpdater("Settings saved locally. Drive sync is already in progress.")
-		return
-	}
-
-	statusUpdater("Settings saved locally. Syncing with Google Drive...")
-	go func() {
-		defer driveSyncInFlight.Store(false)
-
-		if err := syncDriveDataOnce(); err != nil {
-			log.Println("gdrive settings sync error:", err)
-			statusUpdater("Settings saved locally, Drive sync failed")
-			return
-		}
-
-		statusUpdater("Settings saved and synced to Drive!")
-	}()
-}
-
 func SyncDriveData() error {
+	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() {
+		return errors.New("Google Drive is not ready")
+	}
 	if !driveSyncInFlight.CompareAndSwap(false, true) {
 		return nil
 	}
 	defer driveSyncInFlight.Store(false)
-	return syncDriveDataOnce()
-}
-
-func syncDriveDataOnce() error {
-	if driveSyncFunc != nil {
-		return driveSyncFunc()
-	}
-	return syncDriveDataCore()
-}
-
-func syncDriveDataCore() error {
-	if settingsInstance == nil || !settingsInstance.GDrive.Ready() || !settingsInstance.GDrive.PendingSync {
-		return nil
-	}
-	if err := ensureDriveSyncSafeToPush(); err != nil {
-		recordSyncResult(err)
-		writeSettingsToDisk(false)
-		return err
-	}
 
 	settingsData, dataErr := driveSyncSettingsJSON()
 	if dataErr != nil {
@@ -546,14 +390,28 @@ func syncDriveDataCore() error {
 		return dataErr
 	}
 
-	err := gdrive.SyncAppData(settingsInstance.GDrive.FolderID, settingsData)
+	if driveSyncFunc != nil {
+		err := driveSyncFunc()
+		recordSyncResult(err)
+		writeSettingsToDisk(false)
+		return err
+	}
+
+	uploadSnapshot := driveUploadSnapshotFunc
+	if uploadSnapshot == nil {
+		uploadSnapshot = gdrive.UploadAppSnapshot
+	}
+	snapshot, err := uploadSnapshot(settingsInstance.GDrive.FolderID, settingsData, 5)
 	recordSyncResult(err)
 	if err == nil {
 		settingsInstance.GDrive.PendingSync = false
-		updateLastRemoteState()
+		settingsInstance.GDrive.LastDriveSaveAt = snapshot.CreatedAt
+		settingsInstance.GDrive.SelectedSnapshotID = snapshot.ID
+		if err := RefreshDriveSnapshots(); err != nil {
+			log.Println("drive snapshot refresh error:", err)
+		}
 	}
 	writeSettingsToDisk(false)
-
 	return err
 }
 
@@ -572,10 +430,6 @@ func driveSyncSettingsJSON() ([]byte, error) {
 		clone.GDrive = &gDriveCopy
 	}
 
-	clone.NotesApp.BodyFont = ""
-	clone.NotesApp.MonospaceFont = ""
-	clone.NotesApp.EditorFontSize = 0
-	clone.NotesApp.EditorMonospace = false
 	if clone.GDrive != nil {
 		clone.GDrive.PendingSync = false
 	}
@@ -583,66 +437,78 @@ func driveSyncSettingsJSON() ([]byte, error) {
 	return json.Marshal(&clone)
 }
 
-type localFontSettings struct {
-	BodyFont        string
-	MonospaceFont   string
-	EditorFontSize  int
-	EditorMonospace bool
-}
-
-func restoreDriveSourceOfTruth() []string {
-	if settingsInstance != nil && settingsInstance.GDrive != nil && settingsInstance.GDrive.PendingSync {
+func RefreshDriveSnapshots() error {
+	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() {
+		return errors.New("Google Drive is not ready")
+	}
+	if !driveRefreshInFlight.CompareAndSwap(false, true) {
 		return nil
 	}
-	return restoreDriveSourceOfTruthForced()
-}
-
-func restoreDriveSourceOfTruthForced() []string {
-	if settingsInstance == nil || !settingsInstance.GDrive.Ready() {
-		return nil
+	defer driveRefreshInFlight.Store(false)
+	listSnapshots := driveListSnapshotsFunc
+	if listSnapshots == nil {
+		listSnapshots = gdrive.ListAppSnapshots
 	}
-
-	data, found, err := driveSettingsLoader(settingsInstance.GDrive.FolderID)
+	snapshots, err := listSnapshots(settingsInstance.GDrive.FolderID)
 	if err != nil {
-		msg := "Drive settings fetch failed, using local settings: " + err.Error()
-		log.Println(msg)
-		return []string{msg}
+		recordSyncResult(err)
+		writeSettingsToDisk(false)
+		return err
 	}
-	if !found || len(data) == 0 {
-		return nil
+	settingsInstance.GDrive.Snapshots = make([]DriveSnapshotMeta, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		settingsInstance.GDrive.Snapshots = append(settingsInstance.GDrive.Snapshots, DriveSnapshotMeta{
+			ID:        snapshot.ID,
+			Name:      snapshot.Name,
+			CreatedAt: snapshot.CreatedAt,
+		})
 	}
+	settingsInstance.GDrive.LastDriveRefreshAt = time.Now().Format(time.RFC3339)
+	settingsInstance.GDrive.LastSyncStatus = "ok"
+	settingsInstance.GDrive.LastSyncMessage = "Drive snapshot list refreshed"
+	writeSettingsToDisk(false)
+	return nil
+}
 
-	localFonts := localFontSettings{
-		BodyFont:        settingsInstance.NotesApp.BodyFont,
-		MonospaceFont:   settingsInstance.NotesApp.MonospaceFont,
-		EditorFontSize:  settingsInstance.NotesApp.EditorFontSize,
-		EditorMonospace: settingsInstance.NotesApp.EditorMonospace,
+func RestoreDriveSnapshot(snapshotID string) error {
+	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() {
+		return errors.New("Google Drive is not ready")
 	}
-
+	if strings.TrimSpace(snapshotID) == "" {
+		return errors.New("no Drive snapshot selected")
+	}
+	restoreSnapshot := driveRestoreSnapshotFunc
+	if restoreSnapshot == nil {
+		restoreSnapshot = gdrive.RestoreAppSnapshot
+	}
+	data, err := restoreSnapshot(snapshotID)
+	if err != nil {
+		recordSyncResult(err)
+		writeSettingsToDisk(false)
+		return err
+	}
 	var remote UserSettings
 	if err := json.Unmarshal(data, &remote); err != nil {
-		msg := "Drive settings are invalid, using local settings: " + err.Error()
-		log.Println(msg)
-		return []string{msg}
+		return fmt.Errorf("restore snapshot settings decode: %w", err)
 	}
-
 	normalizeSettings(&remote)
-	remote.NotesApp.BodyFont = localFonts.BodyFont
-	remote.NotesApp.MonospaceFont = localFonts.MonospaceFont
-	remote.NotesApp.EditorFontSize = localFonts.EditorFontSize
-	remote.NotesApp.EditorMonospace = localFonts.EditorMonospace
-	remote.GDrive.PendingSync = false
-	remote.GDrive.ConflictRemoteState = ""
-	settingsInstance = &remote
-
-	if err := driveNotesRestorer(settingsInstance.GDrive.FolderID); err != nil {
-		msg := "Drive notes restore failed, using local notes: " + err.Error()
-		log.Println(msg)
-		return []string{msg}
+	if remote.GDrive == nil {
+		remote.GDrive = defaultGDriveSettings()
 	}
-	updateLastRemoteState()
-
-	return []string{"Drive data restored"}
+	remote.GDrive.Enabled = settingsInstance.GDrive.Enabled
+	remote.GDrive.FolderID = settingsInstance.GDrive.FolderID
+	remote.GDrive.FolderName = settingsInstance.GDrive.FolderName
+	remote.GDrive.LastDriveSaveAt = settingsInstance.GDrive.LastDriveSaveAt
+	remote.GDrive.LastDriveRefreshAt = settingsInstance.GDrive.LastDriveRefreshAt
+	remote.GDrive.LastLocalSaveAt = time.Now().Format(time.RFC3339)
+	remote.GDrive.LastSyncStatus = "ok"
+	remote.GDrive.LastSyncMessage = "Drive snapshot restored"
+	remote.GDrive.PendingSync = false
+	remote.GDrive.SelectedSnapshotID = snapshotID
+	remote.GDrive.Snapshots = settingsInstance.GDrive.Snapshots
+	settingsInstance = &remote
+	writeSettingsToDisk(true)
+	return nil
 }
 
 func recordSyncResult(err error) {
@@ -652,18 +518,13 @@ func recordSyncResult(err error) {
 
 	settingsInstance.GDrive.LastSyncAt = time.Now().Format(time.RFC3339)
 	if err != nil {
-		if errors.Is(err, errDriveConflict) {
-			settingsInstance.GDrive.LastSyncStatus = "conflict"
-		} else {
-			settingsInstance.GDrive.LastSyncStatus = "error"
-		}
+		settingsInstance.GDrive.LastSyncStatus = "error"
 		settingsInstance.GDrive.LastSyncMessage = err.Error()
 		return
 	}
 
 	settingsInstance.GDrive.LastSyncStatus = "ok"
-	settingsInstance.GDrive.LastSyncMessage = "Drive sync completed successfully"
-	settingsInstance.GDrive.ConflictRemoteState = ""
+	settingsInstance.GDrive.LastSyncMessage = "Drive operation completed successfully"
 }
 
 func lastDriveSyncError() error {
@@ -687,41 +548,6 @@ func MarkDriveDirty() {
 	}
 	settingsInstance.GDrive.PendingSync = true
 }
-
-func ensureDriveSyncSafeToPush() error {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || settingsInstance.GDrive.FolderID == "" {
-		return nil
-	}
-	if settingsInstance.GDrive.LastRemoteState == "" {
-		return nil
-	}
-	if driveStateSignature == nil {
-		return nil
-	}
-	currentState, err := driveStateSignature(settingsInstance.GDrive.FolderID)
-	if err != nil {
-		return err
-	}
-	if currentState == settingsInstance.GDrive.LastRemoteState {
-		return nil
-	}
-	settingsInstance.GDrive.ConflictRemoteState = currentState
-	return fmt.Errorf("%w: Drive data changed remotely since the last sync; local changes were kept and not uploaded", errDriveConflict)
-}
-
-func updateLastRemoteState() {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || settingsInstance.GDrive.FolderID == "" || driveStateSignature == nil {
-		return
-	}
-	state, err := driveStateSignature(settingsInstance.GDrive.FolderID)
-	if err != nil {
-		log.Println("drive state signature error:", err)
-		return
-	}
-	settingsInstance.GDrive.LastRemoteState = state
-}
-
-var errDriveConflict = errors.New("drive conflict")
 
 func backupLocalStateSnapshot() (string, error) {
 	stamp := time.Now().Format("2006-01-02_15-04-05")

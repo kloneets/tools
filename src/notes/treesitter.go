@@ -218,7 +218,7 @@ func markdownFenceSpans(text string, offset int) []markdownSpan {
 
 func markdownCodeTag(tag string) (string, bool) {
 	switch tag {
-	case tagHeading1, tagHeading2, tagHeading3, tagList, tagOrdered, tagChecklist:
+	case tagHeading1, tagHeading2, tagHeading3, tagHeading4, tagHeading5, tagHeading6, tagList, tagOrdered, tagChecklist:
 		return tagCodeKeyword, true
 	case tagQuote:
 		return tagCodeComment, true

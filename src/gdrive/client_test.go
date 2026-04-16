@@ -1,6 +1,7 @@
 package gdrive
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +71,25 @@ func TestHasCredentialsUsesBuiltInSecret(t *testing.T) {
 
 	if !HasCredentials() {
 		t.Fatal("HasCredentials() should be true when built-in client secret is available")
+	}
+}
+
+func TestTimedOAuthClientUsesDriveTimeout(t *testing.T) {
+	config := &oauth2.Config{}
+	token := &oauth2.Token{AccessToken: "token", TokenType: "Bearer"}
+
+	client := timedOAuthClient(context.Background(), config, token)
+	if client.Timeout != driveRequestTimeout {
+		t.Fatalf("client timeout = %v, want %v", client.Timeout, driveRequestTimeout)
+	}
+}
+
+func TestDriveServiceContextIsNotCanceled(t *testing.T) {
+	ctx := driveServiceContext()
+	select {
+	case <-ctx.Done():
+		t.Fatalf("driveServiceContext() is already canceled: %v", ctx.Err())
+	default:
 	}
 }
 

@@ -1,0 +1,1162 @@
+package notes
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kloneets/tools/src/helpers"
+	"github.com/kloneets/tools/src/settings"
+)
+
+func TestNormalizeSidebarWidth(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{0, 28},
+		{-1, 28},
+		{28, 28},
+		{396, 28},
+		{80, 80},
+	}
+	for _, tc := range cases {
+		if got := normalizeSidebarWidth(tc.in); got != tc.want {
+			t.Fatalf("normalizeSidebarWidth(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveEditorWidth(t *testing.T) {
+	if got := resolveEditorWidth(0, 100); got != 49 {
+		t.Fatalf("resolveEditorWidth(0, 100) = %d, want 49", got)
+	}
+	if got := resolveEditorWidth(396, 100); got != 49 {
+		t.Fatalf("resolveEditorWidth(396, 100) = %d, want 49", got)
+	}
+	if got := resolveEditorWidth(12, 100); got != 12 {
+		t.Fatalf("resolveEditorWidth(12, 100) = %d, want 12", got)
+	}
+}
+
+func TestRenderUsesASCIITreeMarkers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tree: []TreeEntry{
+			{Kind: treeFolder, Label: "Work", Folder: "Work"},
+			{Kind: treeNote, Label: "Plan", Path: "/tmp/Plan.md", Folder: "Work", Depth: 1},
+		},
+		Selection:    0,
+		SidebarWidth: 28,
+		Tabs: []*Editor{{
+			Title: "Plan",
+			Text:  "",
+			Mode:  ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	got := w.Render(80, 10)
+	for _, bad := range []string{"▾", "▸", "•", "│", "─", "…"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("Render() contains non-ASCII marker %q in %q", bad, got)
+		}
+	}
+}
+
+func TestRenderPreviewIncludesANSIStylingForCode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Title: "Plan",
+			Text:  "```go\nfunc main() { return }\n```",
+			Mode:  ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	got := strings.Join(renderPreviewPane(w.Tabs[0], 80, 5), "\n")
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("renderPreviewPane() = %q, want ANSI styling", got)
+	}
+}
+
+func TestRenderEditorIncludesANSIStylingForUnclosedCodeFence(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Title: "Plan",
+		Text:  "```go\nfunc main() {\n\treturn\n}",
+		Mode:  ModeNormal,
+	}
+	got := strings.Join(renderEditorPane(ed, 80, 6), "\n")
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("renderEditorPane() = %q, want ANSI styling for editor code block", got)
+	}
+}
+
+func TestHelpTextIncludesNavigation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{}
+	got := w.HelpText()
+	if !strings.Contains(got, "ctrl+e") {
+		t.Fatalf("HelpText() = %q, want sidebar navigation help", got)
+	}
+}
+
+func TestCommandLineTextReflectsCommandAndSearch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Title:      "Plan",
+			Text:       "alpha beta alpha",
+			Mode:       ModeCommand,
+			Command:    "/alpha",
+			LastSearch: "alpha",
+		}},
+		CurrentTab: 0,
+	}
+	if got := w.CommandLineText(80); got != "/alpha" {
+		t.Fatalf("CommandLineText() = %q, want command contents", got)
+	}
+	w.Tabs[0].Mode = ModeNormal
+	if got := w.CommandLineText(80); got != "/alpha" {
+		t.Fatalf("CommandLineText() = %q, want last search query", got)
+	}
+}
+
+func TestStyleForMarkdownTagUsesDistinctHeadingColors(t *testing.T) {
+	h1 := styleForMarkdownTag(tagHeading1, "one")
+	h2 := styleForMarkdownTag(tagHeading2, "two")
+	h3 := styleForMarkdownTag(tagHeading3, "three")
+	h4 := styleForMarkdownTag(tagHeading4, "four")
+	h5 := styleForMarkdownTag(tagHeading5, "five")
+	h6 := styleForMarkdownTag(tagHeading6, "six")
+	if h1 == h2 || h2 == h3 || h1 == h3 || h3 == h4 || h4 == h5 || h5 == h6 || h4 == h6 {
+		t.Fatalf("heading styles should differ: h1=%q h2=%q h3=%q h4=%q h5=%q h6=%q", h1, h2, h3, h4, h5, h6)
+	}
+	list := styleForMarkdownTag(tagList, "item")
+	for _, heading := range []string{h1, h2, h3, h4, h5, h6} {
+		if list == heading {
+			t.Fatalf("list style should differ from headings: list=%q heading=%q", list, heading)
+		}
+	}
+}
+
+func TestApplyANSIMarkdownPrefersTokenColorsOverCodeBlockSpan(t *testing.T) {
+	line := "func main()"
+	spans := []markdownSpan{
+		{Tag: tagCodeBlock, Start: 0, End: len([]rune(line))},
+		{Tag: tagCodeKeyword, Start: 0, End: 4},
+		{Tag: tagCodeFunction, Start: 5, End: 9},
+	}
+	got := applyANSIMarkdown(line, spans)
+	if !strings.Contains(got, helpers.ANSIFgPurple) && !strings.Contains(got, helpers.ANSIFgBlue) {
+		t.Fatalf("applyANSIMarkdown() = %q, want token styling inside code block", got)
+	}
+}
+
+func TestCursorPositionForEditorFocus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		SidebarWidth: 28,
+		Tabs: []*Editor{{
+			Text:   "abc\ndef",
+			Cursor: 5,
+			Mode:   ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	row, col, ok := w.CursorPosition(120)
+	if !ok {
+		t.Fatal("CursorPosition() ok = false, want true")
+	}
+	if row != 4 {
+		t.Fatalf("CursorPosition() row = %d, want 4", row)
+	}
+	if col <= 30 {
+		t.Fatalf("CursorPosition() col = %d, want editor column beyond sidebar", col)
+	}
+}
+
+func TestEnsureEditorVisibleTracksScrollTop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		LastHeight: 5,
+		Tabs: []*Editor{{
+			Text: strings.Join([]string{
+				"one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+			}, "\n"),
+			Cursor: len([]rune("one\ntwo\nthree\nfour\nfive\nsix\nseven")),
+			Mode:   ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	w.ensureEditorVisible()
+	if w.ActiveEditor().ScrollTop == 0 {
+		t.Fatal("ScrollTop = 0, want scrolled viewport")
+	}
+}
+
+func TestEnsureEditorVisibleUsesViewportBoundaries(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorHeight: 4,
+		Tabs: []*Editor{{
+			Text:      "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+			ScrollTop: 2,
+			Cursor:    len([]rune("one\ntwo\nthree\nfour\nfive")),
+			Mode:      ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	w.ensureEditorVisible()
+	if got := w.ActiveEditor().ScrollTop; got != 2 {
+		t.Fatalf("ScrollTop = %d, want 2 when cursor is still on last visible line", got)
+	}
+	w.ActiveEditor().Cursor = len([]rune("one\ntwo\nthree\nfour\nfive\nsix\nseven"))
+	w.ensureEditorVisible()
+	if got := w.ActiveEditor().ScrollTop; got != 3 {
+		t.Fatalf("ScrollTop = %d, want 3 after moving below viewport", got)
+	}
+	w.ActiveEditor().ScrollTop = 2
+	w.ActiveEditor().Cursor = len([]rune("one\ntwo\nthree"))
+	w.ensureEditorVisible()
+	if got := w.ActiveEditor().ScrollTop; got != 2 {
+		t.Fatalf("ScrollTop = %d, want 2 when cursor is still on first visible line", got)
+	}
+	w.ActiveEditor().Cursor = len([]rune("one\ntwo"))
+	w.ensureEditorVisible()
+	if got := w.ActiveEditor().ScrollTop; got != 1 {
+		t.Fatalf("ScrollTop = %d, want 1 after moving above viewport", got)
+	}
+}
+
+func TestRenderEditorPaneUsesScrollTop(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:      "one\ntwo\nthree\nfour",
+		ScrollTop: 2,
+		Mode:      ModeInsert,
+	}
+	got := renderEditorPane(ed, 20, 2)
+	if !strings.Contains(got[0], "three") || !strings.Contains(got[1], "four") {
+		t.Fatalf("renderEditorPane() = %#v, want lines starting from scroll top", got)
+	}
+	if !strings.Contains(helpers.StripANSI(got[0]), "3 ") {
+		t.Fatalf("renderEditorPane() = %#v, want line number prefix", got)
+	}
+}
+
+func TestRenderEditorPaneWrapsLongLines(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text: "alpha beta gamma delta",
+		Mode: ModeInsert,
+	}
+	got := renderEditorPane(ed, 12, 3)
+	if len(got) < 2 {
+		t.Fatalf("renderEditorPane() = %#v, want wrapped visual rows", got)
+	}
+	if !strings.Contains(helpers.StripANSI(got[0]), "1 ") {
+		t.Fatalf("first wrapped row = %q, want line number gutter", got[0])
+	}
+	if strings.Contains(helpers.StripANSI(got[1]), "1 ") {
+		t.Fatalf("continuation row = %q, should not repeat line number", got[1])
+	}
+	if !strings.Contains(got[0]+got[1], "alpha") {
+		t.Fatalf("wrapped rows = %#v, want source text preserved", got)
+	}
+}
+
+func TestRenderPreviewPaneWrapsLongLines(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text: "This is a very long preview line that should wrap cleanly",
+		Mode: ModeNormal,
+	}
+	got := renderPreviewPane(ed, 12, 3)
+	if got[1] == "" {
+		t.Fatalf("renderPreviewPane() = %#v, want wrapped continuation row", got)
+	}
+}
+
+func TestEditorCursorUsesWrappedRows(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 12,
+		Tabs: []*Editor{{
+			Text:   "alpha beta gamma",
+			Cursor: len([]rune("alpha beta ")),
+			Mode:   ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	row, _, ok := w.EditorCursor()
+	if !ok {
+		t.Fatal("EditorCursor() ok = false, want true")
+	}
+	if row == 0 {
+		t.Fatalf("EditorCursor() row = %d, want wrapped row below first line", row)
+	}
+}
+
+func TestEnsureEditorVisibleUsesActualRenderWidthForWrappedRows(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 12,
+		EditorHeight:      2,
+		Tabs: []*Editor{{
+			Text:   "alpha beta gamma delta",
+			Cursor: len([]rune("alpha beta gamma ")),
+			Mode:   ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	w.ensureEditorVisible()
+	if got := w.ActiveEditor().ScrollTop; got == 0 {
+		t.Fatalf("ScrollTop = %d, want wrapped-row scrolling based on render width", got)
+	}
+}
+
+func TestRenderEditorPaneHighlightsAllSearchOccurrences(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:       "alpha beta alpha",
+		LastSearch: "alpha",
+		Mode:       ModeNormal,
+	}
+	got := renderEditorPane(ed, 40, 1)[0]
+	if strings.Count(got, helpers.ANSIReverse) != 2 {
+		t.Fatalf("renderEditorPane() = %q, want both search matches highlighted", got)
+	}
+}
+
+func TestListManagedFilesSkipsNotesAndIncludesAssets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := listManagedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFolder := false
+	foundAsset := false
+	for _, entry := range entries {
+		if entry.Kind == fileEntryScope && entry.Scope == filepath.Join("Work", "Plan.md") {
+			foundFolder = true
+		}
+		if entry.Kind == fileEntryAsset && filepath.ToSlash(entry.RelPath) == "Work/Plan.assets/diagram.png" {
+			foundAsset = true
+		}
+		if entry.Kind == fileEntryAsset && strings.HasSuffix(entry.RelPath, "Plan.md") {
+			t.Fatalf("listManagedFiles() should skip notes, got %#v", entry)
+		}
+	}
+	if !foundFolder || !foundAsset {
+		t.Fatalf("listManagedFiles() missing folder or asset: %#v", entries)
+	}
+}
+
+func TestInsertSelectedFileReferenceUsesSmartMarkdown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteTitle := ws.ActiveEditor().Title
+	if err := os.MkdirAll(filepath.Join(notesDir(), noteTitle+"."+managedAssetsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), noteTitle+"."+managedAssetsDir, "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws.refreshFiles()
+	for i, entry := range ws.FileTree {
+		if entry.Kind == fileEntryAsset && entry.Label == "diagram.png" {
+			ws.FileSelection = i
+			break
+		}
+	}
+	if err := ws.InsertSelectedFileReference(); err != nil {
+		t.Fatal(err)
+	}
+	wantRef := fmt.Sprintf("![diagram](%s.assets/diagram.png)", noteTitle)
+	if got := ws.ActiveEditor().Text; !strings.Contains(got, wantRef) {
+		t.Fatalf("InsertSelectedFileReference() text = %q", got)
+	}
+}
+
+func TestMoveSelectedAssetFolder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "Images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "Images", "diagram.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.refreshFiles()
+	for i, entry := range ws.FileTree {
+		if entry.Kind == fileEntryFolder && filepath.ToSlash(entry.RelPath) == "Work/Plan.assets/Images" {
+			ws.FileSelection = i
+			break
+		}
+	}
+	if err := ws.MoveSelectedFileEntry("Archive"); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "Archive", "Images")
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Fatalf("real moved folder should not exist before save, stat err = %v", err)
+	}
+	if !ws.FilesDirty {
+		t.Fatal("FilesDirty = false, want true after staged move")
+	}
+	if _, err := ws.SavePendingFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("moved folder missing at %q after save: %v", want, err)
+	}
+}
+
+func TestFileCommandLineTextShowsImportScopePrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.FileCommandMode = true
+	ws.FileCommand = "import "
+	got := ws.FileCommandLineText(120)
+	if !strings.Contains(got, "Import into scope Note 1") {
+		t.Fatalf("FileCommandLineText() = %q, want import scope prompt", got)
+	}
+}
+
+func TestFileRowsShowStagedMarker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.FilesDirty = true
+	rows := ws.FileRows(3)
+	if !strings.Contains(rows[0], "[STAGED]") {
+		t.Fatalf("FileRows()[0] = %q, want staged marker", rows[0])
+	}
+	if got := ws.FileCommandLineText(120); !strings.Contains(got, "D discard staged changes") {
+		t.Fatalf("FileCommandLineText() = %q, want staged discard hint", got)
+	}
+}
+
+func TestHandleFilesKeyScopeFolderShortcut(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.HandleFilesKey(Key{Name: "F", Rune: 'F'}) {
+		t.Fatal("HandleFilesKey(F) = false, want true")
+	}
+	if !ws.FileCommandMode || !ws.FileScopeOnly || ws.FileCommand != "mkdir " {
+		t.Fatalf("scope folder prompt state = mode:%t scopeOnly:%t cmd:%q", ws.FileCommandMode, ws.FileScopeOnly, ws.FileCommand)
+	}
+}
+
+func TestMigrateLooseManagedFilesMovesOldFilesIntoAssets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(notesDir(), "Work", "diagram.png")
+	if err := os.WriteFile(oldPath, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := migrateLooseManagedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 1 {
+		t.Fatalf("migrateLooseManagedFiles() moved = %d, want 1", moved)
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("old loose file should remain until save, err = %v", err)
+	}
+	newPath := filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "diagram.png")
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("migrated file should not exist before save, stat err = %v", err)
+	}
+	ws.FilesDirty = true
+	if _, err := ws.SavePendingFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old loose file still exists after save, err = %v", err)
+	}
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("migrated file missing at %q after save: %v", newPath, err)
+	}
+}
+
+func TestCountLooseManagedFiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := countLooseManagedFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("countLooseManagedFiles() = %d, want 1", got)
+	}
+}
+
+func TestHandleFilesKeyStartsFilterMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.HandleFilesKey(Key{Name: "/"}) {
+		t.Fatal("HandleFilesKey(/) = false, want true")
+	}
+	if !ws.FileFilterMode {
+		t.Fatal("FileFilterMode = false, want true")
+	}
+}
+
+func TestRefreshFilesWithFilter(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "notes.pdf"), []byte("pdf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.FileFilter = "diagram"
+	ws.refreshFiles()
+	foundDiagram := false
+	foundPDF := false
+	for _, entry := range ws.FileTree {
+		if entry.Kind == fileEntryAsset && entry.Label == "diagram.png" {
+			foundDiagram = true
+		}
+		if entry.Kind == fileEntryAsset && entry.Label == "notes.pdf" {
+			foundPDF = true
+		}
+	}
+	if !foundDiagram || foundPDF {
+		t.Fatalf("filtered tree unexpected: %#v", ws.FileTree)
+	}
+}
+
+func TestManagedReferenceCandidates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := managedReferenceCandidates(notePath, "Plan.assets/i")
+	if len(got) == 0 || got[0] != "Plan.assets/img/" {
+		t.Fatalf("managedReferenceCandidates() = %#v, want Plan.assets/img/ candidate", got)
+	}
+}
+
+func TestCompleteEditorPathReference(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Open(notePath); err != nil {
+		t.Fatal(err)
+	}
+	ed := ws.ActiveEditor()
+	ed.Mode = ModeInsert
+	ed.Text = "![alt](Plan.assets/i)"
+	ed.Cursor = len([]rune(ed.Text)) - 1
+	if !completeEditorPathReference(ws, ed) {
+		t.Fatal("completeEditorPathReference() = false, want true")
+	}
+	if !strings.Contains(ed.Text, "Plan.assets/img/") {
+		t.Fatalf("editor text = %q, want completed assets path", ed.Text)
+	}
+}
+
+func TestAutoCompleteStatusLineShowsSuggestions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ed := &Editor{
+		Path:   notePath,
+		Mode:   ModeInsert,
+		Text:   "![alt](Plan.assets/i)",
+		Cursor: len([]rune("![alt](Plan.assets/i")),
+	}
+	got := autoCompleteStatusLine(ed, 120)
+	if !strings.Contains(got, "path suggestions:") || !strings.Contains(got, "Plan.assets/img/") {
+		t.Fatalf("autoCompleteStatusLine() = %q, want suggestion list", got)
+	}
+}
+
+func TestSplitImportPaths(t *testing.T) {
+	got := splitImportPaths(" /tmp/a.png | /tmp/b.pdf |  /tmp/c ")
+	want := []string{"/tmp/a.png", "/tmp/b.pdf", "/tmp/c"}
+	if len(got) != len(want) {
+		t.Fatalf("splitImportPaths() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("splitImportPaths() = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestPathToFileURI(t *testing.T) {
+	got := pathToFileURI("/tmp/example file.txt")
+	if got != "file:///tmp/example%20file.txt" {
+		t.Fatalf("pathToFileURI() = %q", got)
+	}
+}
+
+func TestManagedScopesUseNoteFoldersOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "LooseOnlyFolder"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", managedAssetsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scopes, err := managedScopes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) != 1 || scopes[0].RelPath != filepath.Join("Work", "Plan.md") || scopes[0].Title != "Plan" {
+		t.Fatalf("managedScopes() = %#v, want only Work/Plan.md scope", scopes)
+	}
+}
+
+func TestShiftTabCompletesBackward(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "aaa.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Open(notePath); err != nil {
+		t.Fatal(err)
+	}
+	ed := ws.ActiveEditor()
+	ed.Mode = ModeInsert
+	ed.Text = "![alt](Plan.assets/)"
+	ed.Cursor = len([]rune(ed.Text)) - 1
+	if !completeEditorPathReferenceBackward(ws, ed) {
+		t.Fatal("completeEditorPathReferenceBackward() = false, want true")
+	}
+	if !strings.Contains(ed.Text, "Plan.assets/img/") {
+		t.Fatalf("editor text = %q, want backward completion candidate", ed.Text)
+	}
+}
+
+func TestReferenceForFileOverrides(t *testing.T) {
+	entry := &FileEntry{
+		Path:  "/tmp/diagram.png",
+		Label: "diagram.png",
+		Image: true,
+	}
+	ws := &Workspace{}
+	if got := ws.referenceForFile(entry, markdownInsertLink); got != "[diagram.png](diagram.png)" {
+		t.Fatalf("referenceForFile(link) = %q", got)
+	}
+	if got := ws.referenceForFile(entry, markdownInsertImage); got != "![diagram](diagram.png)" {
+		t.Fatalf("referenceForFile(image) = %q", got)
+	}
+}
+
+func TestSaveAllDirtyWritesEveryDirtyTab(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	root := t.TempDir()
+	first := filepath.Join(root, "one.md")
+	second := filepath.Join(root, "two.md")
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Path: first, Text: "first", Dirty: true},
+			{Path: second, Text: "second", Dirty: true},
+		},
+		CurrentTab: 0,
+	}
+	wrote, err := w.SaveAllDirty()
+	if err != nil {
+		t.Fatalf("SaveAllDirty() error = %v", err)
+	}
+	if !wrote {
+		t.Fatal("SaveAllDirty() wrote = false, want true")
+	}
+	for _, path := range []string{first, second} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) error = %v", path, err)
+		}
+		if string(data) == "" {
+			t.Fatalf("ReadFile(%q) = empty, want saved content", path)
+		}
+	}
+}
+
+func TestHandleNormalModePMultilineCharRegisterPastesBelowCurrentLine(t *testing.T) {
+	ed := &Editor{
+		Text:   "one\ntwo",
+		Cursor: 1,
+		Mode:   ModeNormal,
+		Register: vimRegister{
+			Kind: vimRegisterChar,
+			Text: "alpha\nbeta",
+		},
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "p", Rune: 'p'}) {
+		t.Fatal("handleNormalMode(p) = false, want true")
+	}
+	if ed.Text != "one\nalpha\nbeta\ntwo" {
+		t.Fatalf("editor text = %q, want multiline paste on next line", ed.Text)
+	}
+}
+
+func TestHandleNormalModePSingleLineCharRegisterPastesInline(t *testing.T) {
+	ed := &Editor{
+		Text:   "one",
+		Cursor: 1,
+		Mode:   ModeNormal,
+		Register: vimRegister{
+			Kind: vimRegisterChar,
+			Text: "ZZ",
+		},
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "p", Rune: 'p'}) {
+		t.Fatal("handleNormalMode(p) = false, want true")
+	}
+	if ed.Text != "oZZne" {
+		t.Fatalf("editor text = %q, want inline paste", ed.Text)
+	}
+}
+
+func TestSaveAllDirtyLocalDoesNotStartDriveSync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().GDrive.Enabled = true
+	settings.Inst().GDrive.FolderID = "folder-1"
+	settings.Inst().GDrive.PendingSync = true
+
+	root := t.TempDir()
+	first := filepath.Join(root, "one.md")
+	w := &Workspace{
+		Tabs:       []*Editor{{Path: first, Text: "first", Dirty: true}},
+		CurrentTab: 0,
+	}
+	wrote, err := w.SaveAllDirtyLocal()
+	if err != nil {
+		t.Fatalf("SaveAllDirtyLocal() error = %v", err)
+	}
+	if !wrote {
+		t.Fatal("SaveAllDirtyLocal() wrote = false, want true")
+	}
+	if !settings.Inst().GDrive.PendingSync {
+		t.Fatal("PendingSync = false, want true after local-only save")
+	}
+}
+
+func TestWorkspaceTabNavigationAndCurrentNoteActions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := w.ActiveEditor().Path
+	if !w.NewNote() {
+		t.Fatal("NewNote() = false, want true")
+	}
+	if len(w.Tabs) != 2 {
+		t.Fatalf("tab count = %d, want 2", len(w.Tabs))
+	}
+	secondPath := w.ActiveEditor().Path
+	if secondPath == firstPath {
+		t.Fatal("expected a different newly created note path")
+	}
+	if !w.PrevTab() || w.ActiveEditor().Path != firstPath {
+		t.Fatal("PrevTab() should move back to first note")
+	}
+	if !w.NextTab() || w.ActiveEditor().Path != secondPath {
+		t.Fatal("NextTab() should move forward to second note")
+	}
+	if !w.DeleteCurrentNote() {
+		t.Fatal("DeleteCurrentNote() = false, want true")
+	}
+	if len(w.Tabs) == 0 {
+		t.Fatal("DeleteCurrentNote() should keep at least one note open")
+	}
+	if _, err := os.Stat(secondPath); !os.IsNotExist(err) {
+		t.Fatalf("deleted note should be gone, stat err = %v", err)
+	}
+}
+
+func TestRenameCurrentNote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath := w.ActiveEditor().Path
+	oldAssets := noteAssetsPath(oldPath)
+	if err := os.MkdirAll(oldAssets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldAssets, "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.RenameCurrentNote("Renamed Note"); err != nil {
+		t.Fatalf("RenameCurrentNote() error = %v", err)
+	}
+	if w.ActiveEditor().Path == oldPath {
+		t.Fatal("expected active note path to change after rename")
+	}
+	if w.ActiveEditor().Title != "Renamed Note" {
+		t.Fatalf("title = %q, want %q", w.ActiveEditor().Title, "Renamed Note")
+	}
+	if _, err := os.Stat(w.ActiveEditor().Path); err != nil {
+		t.Fatalf("renamed file missing: %v", err)
+	}
+	newAssets := noteAssetsPath(w.ActiveEditor().Path)
+	if _, err := os.Stat(filepath.Join(newAssets, "diagram.png")); err != nil {
+		t.Fatalf("renamed assets missing: %v", err)
+	}
+	if _, err := os.Stat(oldAssets); !os.IsNotExist(err) {
+		t.Fatalf("old assets dir still exists, err = %v", err)
+	}
+}
+
+func TestSidebarRenameLeavesSidebarFocusAndEntersCommandMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	if !w.HandleKey(Key{Name: "R", Rune: 'R', Shift: true}) {
+		t.Fatal("HandleKey(R) = false, want true")
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want false so rename input receives keys")
+	}
+	ed := w.ActiveEditor()
+	if ed.Mode != ModeCommand {
+		t.Fatalf("Mode = %q, want %q", ed.Mode, ModeCommand)
+	}
+	if got := ed.Command; got != "rename "+ed.Title {
+		t.Fatalf("Command = %q, want prefilled rename command", got)
+	}
+	if !w.HandleKey(Key{Name: "X", Rune: 'X', Shift: true}) {
+		t.Fatal("HandleKey(X) = false, want true in command mode")
+	}
+	if !strings.HasSuffix(ed.Command, "X") {
+		t.Fatalf("Command = %q, want typed input appended", ed.Command)
+	}
+}
+
+func TestExecuteVimCommandOpenLinksQueuesPendingRequest(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Title: "Plan",
+			Text:  "See https://example.com and ftp://example.com/pub",
+			Mode:  ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandOpenLinks})
+	got := w.TakePendingOpenLinks()
+	if len(got) != 2 {
+		t.Fatalf("TakePendingOpenLinks() len = %d, want 2 (%v)", len(got), got)
+	}
+	if got[0] != "https://example.com" || got[1] != "ftp://example.com/pub" {
+		t.Fatalf("TakePendingOpenLinks() = %v", got)
+	}
+	if again := w.TakePendingOpenLinks(); len(again) != 0 {
+		t.Fatalf("TakePendingOpenLinks() should clear request, got %v", again)
+	}
+}
+
+func TestCanDeleteFocusedNoteDistinguishesSidebarFolders(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	for i, entry := range w.Tree {
+		if entry.Kind == treeFolder && entry.Label == "Projects" {
+			w.Selection = i
+			w.FocusSidebar = true
+			break
+		}
+	}
+	if w.CanDeleteFocusedNote() {
+		t.Fatal("CanDeleteFocusedNote() = true, want false for folder selection")
+	}
+}
+
+func TestHandleNormalModeRReplacesCharacter(t *testing.T) {
+	ed := &Editor{Text: "abcd", Cursor: 1, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "r", Rune: 'r'}) {
+		t.Fatal("handleNormalMode(r) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "Z", Rune: 'Z', Shift: true}) {
+		t.Fatal("handleNormalMode(replacement) = false, want true")
+	}
+	if got := ed.Text; got != "aZcd" {
+		t.Fatalf("text = %q, want %q", got, "aZcd")
+	}
+	if ed.PendingOp != "" {
+		t.Fatalf("PendingOp = %q, want cleared", ed.PendingOp)
+	}
+}
+
+func TestHandleNormalModeXDeletesCharacter(t *testing.T) {
+	ed := &Editor{Text: "abcd", Cursor: 1, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("handleNormalMode(x) = false, want true")
+	}
+	if got := ed.Text; got != "acd" {
+		t.Fatalf("text = %q, want %q", got, "acd")
+	}
+}
+
+func TestHandleNormalModeXWDeletesNextWord(t *testing.T) {
+	ed := &Editor{Text: "alpha beta gamma", Cursor: 0, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("handleNormalMode(x) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "w", Rune: 'w'}) {
+		t.Fatal("handleNormalMode(w after x) = false, want true")
+	}
+	if got := ed.Text; got != "beta gamma" {
+		t.Fatalf("text = %q, want %q", got, "beta gamma")
+	}
+}
+
+func TestHandleNormalModeDWDeletesWord(t *testing.T) {
+	ed := &Editor{Text: "alpha beta gamma", Cursor: 0, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "w", Rune: 'w'}) {
+		t.Fatal("handleNormalMode(w) = false, want true after d")
+	}
+	if got := ed.Text; got != "beta gamma" {
+		t.Fatalf("text = %q, want %q", got, "beta gamma")
+	}
+	if ed.PendingOp != "" {
+		t.Fatalf("PendingOp = %q, want cleared", ed.PendingOp)
+	}
+}
+
+func TestHandleNormalModeXDollarDeletesToEndOfLine(t *testing.T) {
+	ed := &Editor{Text: "alpha beta\ngamma", Cursor: 6, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("handleNormalMode(x) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "$", Rune: '$', Shift: true}) {
+		t.Fatal("handleNormalMode($ after x) = false, want true")
+	}
+	if got := ed.Text; got != "alpha \ngamma" {
+		t.Fatalf("text = %q, want %q", got, "alpha \ngamma")
+	}
+}
+
+func TestVisualLineYankAndDelete(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree", Cursor: 0, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "V", Rune: 'V', Shift: true}) {
+		t.Fatal("V should enter visual line mode")
+	}
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	if !handleVisualMode(ed, Key{Name: "y", Rune: 'y'}) {
+		t.Fatal("y in visual line mode should succeed")
+	}
+	if ed.Register.Kind != vimRegisterLine || ed.Register.Text != "one\ntwo\n" {
+		t.Fatalf("line register = %#v", ed.Register)
+	}
+
+	ed2 := &Editor{Text: "one\ntwo\nthree", Cursor: 0, Mode: ModeNormal}
+	startVisualSelection(ed2, vimSelectionLine)
+	ed2.Cursor = vimVerticalMoveOffset(ed2.Text, ed2.Cursor, 1)
+	refreshVisualSelection(ed2)
+	if !handleVisualMode(ed2, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("d in visual line mode should succeed")
+	}
+	if got := ed2.Text; got != "three" {
+		t.Fatalf("text = %q, want %q", got, "three")
+	}
+}
+
+func TestVisualBlockYankAndDelete(t *testing.T) {
+	ed := &Editor{Text: "abcd\nwxyz", Cursor: 1, Mode: ModeNormal}
+	if !handleEditorKeyForTest(ed, Key{Name: "v", Ctrl: true}) {
+		t.Fatal("ctrl+v should enter visual block mode")
+	}
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
+	refreshVisualSelection(ed)
+	if !handleVisualMode(ed, Key{Name: "y", Rune: 'y'}) {
+		t.Fatal("y in visual block mode should succeed")
+	}
+	if ed.Register.Kind != vimRegisterBlock || len(ed.Register.Lines) != 2 || ed.Register.Lines[0] != "bc" || ed.Register.Lines[1] != "xy" {
+		t.Fatalf("block register = %#v", ed.Register)
+	}
+
+	ed2 := &Editor{Text: "abcd\nwxyz", Cursor: 1, Mode: ModeNormal}
+	startVisualSelection(ed2, vimSelectionBlock)
+	ed2.Cursor = vimVerticalMoveOffset(ed2.Text, ed2.Cursor, 1)
+	ed2.Cursor = vimClampOffset(ed2.Text, ed2.Cursor+1)
+	refreshVisualSelection(ed2)
+	if !handleVisualMode(ed2, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("d in visual block mode should succeed")
+	}
+	if got := ed2.Text; got != "ad\nwz" {
+		t.Fatalf("text = %q, want %q", got, "ad\nwz")
+	}
+}
+
+func TestRenderEditorPaneHighlightsVisualSelection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:            "alpha\nbeta",
+		Cursor:          0,
+		Mode:            ModeVisual,
+		SelectionMode:   vimSelectionLine,
+		SelectionMark:   0,
+		SelectionCursor: 6,
+	}
+	got := strings.Join(renderEditorPane(ed, 40, 3), "\n")
+	if !strings.Contains(got, helpers.ANSIReverse) {
+		t.Fatalf("renderEditorPane() = %q, want visual selection highlight", got)
+	}
+}
+
+func handleEditorKeyForTest(ed *Editor, key Key) bool {
+	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
+	return w.handleEditorKey(key)
+}

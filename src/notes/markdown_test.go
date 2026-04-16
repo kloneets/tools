@@ -125,6 +125,16 @@ func TestMarkdownPreviewAppliesHeadingToCurrentLine(t *testing.T) {
 	assertHasSpan(t, render.Spans, tagHeading2, 0, 7)
 }
 
+func TestMarkdownPreviewAppliesHeadingLevelsFourToSix(t *testing.T) {
+	render := markdownPreview("#### Deep\n##### Deeper\n###### Deepest", 4)
+	if render.Text != "Deep\nDeeper\nDeepest" {
+		t.Fatalf("markdownPreview() text = %q", render.Text)
+	}
+	assertHasSpan(t, render.Spans, tagHeading4, 0, 4)
+	assertHasSpan(t, render.Spans, tagHeading5, 5, 11)
+	assertHasSpan(t, render.Spans, tagHeading6, 12, 19)
+}
+
 func TestMarkdownPreviewUsesCharacterOffsetsForUnicodeOutput(t *testing.T) {
 	render := markdownPreview("- [ ] task\n## Heading", 4)
 
@@ -135,32 +145,40 @@ func TestMarkdownPreviewUsesCharacterOffsetsForUnicodeOutput(t *testing.T) {
 func TestMarkdownPreviewRendersCodeBlocksWithoutFences(t *testing.T) {
 	render := markdownPreview("```\n\tfmt.Println(\"hi\")\n```\n", 2)
 
-	if render.Text != "  fmt.Println(\"hi\")\n" {
+	if render.Text != "\n  fmt.Println(\"hi\")\n\n" {
 		t.Fatalf("markdownPreview() code block text = %q", render.Text)
 	}
-	assertHasSpan(t, render.Spans, tagCodeBlock, 0, 19)
+	assertHasSpan(t, render.Spans, tagCodeBlock, 1, 20)
+}
+
+func TestMarkdownPreviewRecognizesHorizontalRule(t *testing.T) {
+	render := markdownPreview("---", 4)
+	if render.Text != "-" {
+		t.Fatalf("markdownPreview() text = %q, want placeholder rendered line for rule token", render.Text)
+	}
+	assertHasSpan(t, render.Spans, tagHorizontalRule, 0, 1)
 }
 
 func TestMarkdownPreviewHighlightsGoCodeBlocks(t *testing.T) {
 	render := markdownPreview("```go\nfunc main() {\n\tfmt.Println(\"hi\") // wave\n}\n```", 2)
 
-	if render.Text != "func main() {\n  fmt.Println(\"hi\") // wave\n}" {
+	if render.Text != "\nfunc main() {\n  fmt.Println(\"hi\") // wave\n}\n" {
 		t.Fatalf("markdownPreview() go text = %q", render.Text)
 	}
-	assertHasSpan(t, render.Spans, tagCodeKeyword, 0, 4)
-	assertHasSpan(t, render.Spans, tagCodeFunction, 5, 9)
-	assertHasSpan(t, render.Spans, tagCodeProperty, 20, 27)
-	assertHasSpan(t, render.Spans, tagCodeString, 28, 32)
-	assertHasSpan(t, render.Spans, tagCodeComment, 34, 41)
+	assertHasSpan(t, render.Spans, tagCodeKeyword, 1, 5)
+	assertHasSpan(t, render.Spans, tagCodeFunction, 6, 10)
+	assertHasSpan(t, render.Spans, tagCodeProperty, 21, 28)
+	assertHasSpan(t, render.Spans, tagCodeString, 29, 33)
+	assertHasSpan(t, render.Spans, tagCodeComment, 35, 42)
 }
 
 func TestMarkdownPreviewHighlightsPythonCodeBlocks(t *testing.T) {
 	render := markdownPreview("```python\ndef hello(name):\n    return \"hi\"\n```", 4)
 
-	assertHasSpan(t, render.Spans, tagCodeKeyword, 0, 3)
-	assertHasSpan(t, render.Spans, tagCodeFunction, 4, 9)
-	assertHasSpan(t, render.Spans, tagCodeKeyword, 21, 27)
-	assertHasSpan(t, render.Spans, tagCodeString, 28, 32)
+	assertHasSpan(t, render.Spans, tagCodeKeyword, 1, 4)
+	assertHasSpan(t, render.Spans, tagCodeFunction, 5, 10)
+	assertHasSpan(t, render.Spans, tagCodeKeyword, 22, 28)
+	assertHasSpan(t, render.Spans, tagCodeString, 29, 33)
 }
 
 func TestTreeSitterCaptureTagMapsRichCategories(t *testing.T) {
