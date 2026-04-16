@@ -41,47 +41,51 @@ const (
 const manualSyncTimeout = 20 * time.Second
 
 type terminalApp struct {
-	view              view
-	ctx               context.Context
-	notes             *notes.Workspace
-	pages             *pages.Model
-	password          *password.Model
-	status            string
-	width             int
-	height            int
-	settingIndex      int
-	syncIndex         int
-	tui               *tview.Application
-	header            *tview.TextView
-	help              *tview.TextView
-	statusBar         *tview.TextView
-	body              *tview.Flex
-	pagesRoot         *tview.Pages
-	sidebar           *tview.TextView
-	editor            *tview.TextView
-	preview           *tview.TextView
-	commandBar        *tview.TextView
-	single            *tview.TextView
-	helpOverlay       *tview.TextView
-	quitModal         *tview.Modal
-	discardFilesModal *tview.Modal
-	deleteNoteModal   *tview.Modal
-	openLinksModal    *tview.Modal
-	root              *tview.Flex
-	lastStatus        string
-	tabSelect         bool
-	showHelp          bool
-	helpSearchMode    bool
-	helpSearchQuery   string
-	helpSearchIndex   int
-	shuttingDown      bool
-	settingsDirty     bool
-	syncInProgress    bool
-	syncProgressLabel string
-	syncOpID          atomic.Int64
-	syncSpinnerTick   atomic.Int64
-	syncTimeout       time.Duration
-	openLinks         []string
+	view               view
+	ctx                context.Context
+	notes              *notes.Workspace
+	pages              *pages.Model
+	password           *password.Model
+	status             string
+	width              int
+	height             int
+	settingIndex       int
+	syncIndex          int
+	tui                *tview.Application
+	header             *tview.TextView
+	help               *tview.TextView
+	statusBar          *tview.TextView
+	body               *tview.Flex
+	pagesRoot          *tview.Pages
+	sidebar            *tview.TextView
+	editor             *tview.TextView
+	preview            *tview.TextView
+	commandBar         *tview.TextView
+	single             *tview.TextView
+	helpOverlay        *tview.TextView
+	quitModal          *tview.Modal
+	discardFilesModal  *tview.Modal
+	deleteNoteModal    *tview.Modal
+	openLinksModal     *tview.Modal
+	root               *tview.Flex
+	lastStatus         string
+	tabSelect          bool
+	showHelp           bool
+	helpSearchMode     bool
+	helpSearchQuery    string
+	helpSearchIndex    int
+	shuttingDown       bool
+	settingsDirty      bool
+	settingsEditMode   bool
+	settingsEditBuffer string
+	syncInProgress     bool
+	syncProgressLabel  string
+	syncOpID           atomic.Int64
+	syncSpinnerTick    atomic.Int64
+	syncTimeout        time.Duration
+	openLinks          []string
+	deleteNotePath     string
+	deleteNoteLabel    string
 }
 
 func InitApp() {
@@ -209,13 +213,18 @@ func (a *terminalApp) initWidgets() {
 		AddButtons([]string{"Delete", "Cancel"})
 	a.deleteNoteModal.SetDoneFunc(func(_ int, label string) {
 		if label == "Delete" && a.notes != nil {
-			target := a.notes.FocusedNoteDeleteLabel()
-			if a.notes.DeleteFocusedNote() {
+			target := a.deleteNoteLabel
+			if target == "" {
+				target = a.notes.FocusedNoteDeleteLabel()
+			}
+			if err := a.notes.DeleteNoteByPath(a.deleteNotePath); err == nil {
 				helpers.StatusBarInst().UpdateStatusBar("Deleted note: " + target)
 			} else {
 				helpers.StatusBarInst().UpdateStatusBar("Delete note failed")
 			}
 		}
+		a.deleteNotePath = ""
+		a.deleteNoteLabel = ""
 		if a.pagesRoot != nil {
 			a.pagesRoot.HidePage("delete-note")
 		}
@@ -475,16 +484,6 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 	if a.shuttingDown {
 		return true
 	}
-	if a.view == viewNotes && a.notes != nil {
-		if key.Ctrl && key.Name == "d" && a.notes.CanDeleteFocusedNote() {
-			a.showDeleteNoteModal()
-			return true
-		}
-		if !key.Ctrl && key.Name == "d" && a.notes.FocusSidebar && a.notes.CanDeleteFocusedNote() {
-			a.showDeleteNoteModal()
-			return true
-		}
-	}
 	if key.Ctrl && key.Name == "s" {
 		if err := a.saveLocalState(); err != nil {
 			helpers.StatusBarInst().UpdateStatusBar("Save failed: " + err.Error())
@@ -597,6 +596,12 @@ func (a *terminalApp) consumePendingNoteActions() {
 	if a == nil || a.notes == nil {
 		return
 	}
+	if path, label, ok := a.notes.TakePendingDeleteNote(); ok {
+		a.deleteNotePath = path
+		a.deleteNoteLabel = label
+		a.showDeleteNoteModal()
+		return
+	}
 	links := a.notes.TakePendingOpenLinks()
 	if len(links) == 0 {
 		return
@@ -669,6 +674,8 @@ func (a *terminalApp) wantsQuitOnQ() bool {
 		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
+	case viewSettings:
+		return !a.settingsEditMode
 	default:
 		return true
 	}
@@ -685,6 +692,8 @@ func (a *terminalApp) wantsHelpToggle() bool {
 		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
+	case viewSettings:
+		return !a.settingsEditMode
 	default:
 		return true
 	}
@@ -718,32 +727,48 @@ func (a *terminalApp) handlePagesKey(key notes.Key) bool {
 func (a *terminalApp) handlePasswordKey(key notes.Key) bool {
 	switch key.Name {
 	case "g":
-		a.password.Generate()
+		a.generatePasswordAndNotify()
 		return true
 	case "l":
 		a.password.Letters = !a.password.Letters
-		a.password.Generate()
+		a.generatePasswordAndNotify()
 		return true
 	case "n":
 		a.password.Numbers = !a.password.Numbers
-		a.password.Generate()
+		a.generatePasswordAndNotify()
 		return true
 	case "s":
 		a.password.SpecialSymbols = !a.password.SpecialSymbols
-		a.password.Generate()
+		a.generatePasswordAndNotify()
 		return true
 	case "+":
 		a.password.SymbolCount++
-		a.password.Generate()
+		a.generatePasswordAndNotify()
 		return true
 	case "-":
 		if a.password.SymbolCount > 1 {
 			a.password.SymbolCount--
 		}
-		a.password.Generate()
+		a.generatePasswordAndNotify()
 		return true
 	}
 	return false
+}
+
+func (a *terminalApp) generatePasswordAndNotify() {
+	if a == nil || a.password == nil {
+		return
+	}
+	a.password.Generate()
+	if strings.TrimSpace(a.password.Password) == "" {
+		helpers.StatusBarInst().UpdateStatusBar("Password was not generated")
+		return
+	}
+	if err := helpers.CopyToClipboard(a.password.Password); err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Password generated, but clipboard copy failed: " + err.Error())
+		return
+	}
+	helpers.StatusBarInst().UpdateStatusBar("Password generated and copied to clipboard")
 }
 
 func (a *terminalApp) handleSyncKey(key notes.Key) bool {
@@ -857,6 +882,40 @@ func (a *terminalApp) syncSpinnerFrame() string {
 }
 
 func (a *terminalApp) handleSettingsKey(key notes.Key) bool {
+	if a.settingsEditMode {
+		switch key.Name {
+		case "esc":
+			a.settingsEditMode = false
+			a.settingsEditBuffer = ""
+			helpers.StatusBarInst().UpdateStatusBar("Undo levels edit canceled")
+			return true
+		case "backspace":
+			if len(a.settingsEditBuffer) > 0 {
+				_, size := utf8.DecodeLastRuneInString(a.settingsEditBuffer)
+				a.settingsEditBuffer = a.settingsEditBuffer[:len(a.settingsEditBuffer)-size]
+			}
+			return true
+		case "enter":
+			value, err := strconv.Atoi(strings.TrimSpace(a.settingsEditBuffer))
+			if err != nil || value <= 0 {
+				helpers.StatusBarInst().UpdateStatusBar("Undo levels must be a positive integer")
+				a.settingsEditMode = false
+				a.settingsEditBuffer = ""
+				return true
+			}
+			settings.Inst().NotesApp.UndoLevels = value
+			a.settingsDirty = true
+			a.settingsEditMode = false
+			a.settingsEditBuffer = ""
+			helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Undo levels set to %d", value))
+			return true
+		}
+		if key.Rune >= '0' && key.Rune <= '9' {
+			a.settingsEditBuffer += string(key.Rune)
+			return true
+		}
+		return true
+	}
 	items := a.settingsItems()
 	switch key.Name {
 	case "down", "j":
@@ -912,10 +971,12 @@ func (a *terminalApp) showDeleteNoteModal() {
 	if a == nil || a.notes == nil || !a.notes.CanDeleteFocusedNote() {
 		return
 	}
+	a.deleteNotePath = a.notes.FocusedNoteDeletePath()
 	label := a.notes.FocusedNoteDeleteLabel()
 	if strings.TrimSpace(label) == "" {
 		label = "current note"
 	}
+	a.deleteNoteLabel = label
 	if a.deleteNoteModal != nil {
 		a.deleteNoteModal.SetText(fmt.Sprintf("Delete note %q?", label))
 	}
@@ -1027,6 +1088,10 @@ func (a *terminalApp) settingsItems() []actionItem {
 				cfg.NotesApp.TabSpaces = 2
 			}
 			a.settingsDirty = true
+		}},
+		{Label: a.settingsUndoLevelsLabel(cfg.NotesApp.UndoLevels), Apply: func() {
+			a.settingsEditMode = true
+			a.settingsEditBuffer = strconv.Itoa(cfg.NotesApp.UndoLevels)
 		}},
 	}
 }
@@ -1259,12 +1324,14 @@ func (a *terminalApp) refreshNotesBody() {
 	a.commandBar.SetText(joinTViewLines([]string{a.notes.CommandLineText(maxInt(10, a.width-6))}))
 
 	content := tview.NewFlex().SetDirection(tview.FlexColumn)
-	sidebarWidth, editorOuter, _ := a.notesPaneSizes()
+	sidebarWidth, editorOuter, previewOuter := a.notesPaneSizes()
 	if settings.Inst().NotesApp.SidebarVisible && sidebarWidth > 0 {
 		content.AddItem(a.sidebar, sidebarWidth, 0, false)
 	}
 	content.AddItem(a.editor, editorOuter, 0, false)
-	content.AddItem(a.preview, 0, 1, false)
+	if previewOuter > 0 {
+		content.AddItem(a.preview, 0, 1, false)
+	}
 
 	a.body.SetDirection(tview.FlexRow)
 	a.body.AddItem(content, 0, 1, false)
@@ -1337,7 +1404,10 @@ func (a *terminalApp) notesPaneSizes() (int, int, int) {
 		sidebarOuter = sidebarInner + 2
 	}
 	editorOuter := editorInner + 2
-	previewOuter := previewInner + 2
+	previewOuter := 0
+	if previewInner > 0 {
+		previewOuter = previewInner + 2
+	}
 	return sidebarOuter, editorOuter, previewOuter
 }
 
@@ -1573,7 +1643,11 @@ func (a *terminalApp) renderSync(height int) string {
 
 func (a *terminalApp) renderSettings(height int) string {
 	items := a.settingsItems()
-	lines := []string{"Settings", "enter changes selected option"}
+	header := "Settings"
+	if a.settingsEditMode {
+		header = "Settings (editing undo levels)"
+	}
+	lines := []string{header, a.settingsHelpLine()}
 	for i, item := range items {
 		prefix := "  "
 		if i == a.settingIndex {
@@ -1585,6 +1659,20 @@ func (a *terminalApp) renderSettings(height int) string {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:height], "\n")
+}
+
+func (a *terminalApp) settingsUndoLevelsLabel(value int) string {
+	if a.settingsEditMode {
+		return fmt.Sprintf("undo levels: %s", a.settingsEditBuffer)
+	}
+	return fmt.Sprintf("undo levels: %d", value)
+}
+
+func (a *terminalApp) settingsHelpLine() string {
+	if a.settingsEditMode {
+		return "digits edit value | backspace delete | enter apply | esc cancel"
+	}
+	return "enter changes selected option"
 }
 
 func valueOrUnset(value string) string {
@@ -1707,6 +1795,9 @@ func (a *terminalApp) helpText() string {
 		if a.tabSelect {
 			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
 		}
+		if a.settingsEditMode {
+			return "settings/edit: digits edit | backspace delete | enter apply | esc cancel"
+		}
 		return "settings: ctrl+t tab bar | ctrl+s save | j/k move | enter change option"
 	default:
 		return "q quit | ctrl+t tab bar"
@@ -1767,6 +1858,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "h j k l, arrows", desc: "move cursor"},
 		{keys: "0, $", desc: "jump to line start or end"},
 		{keys: "w, b", desc: "move by word"},
+		{keys: "u", desc: "undo"},
 		{keys: "x", desc: "delete character under cursor"},
 		{keys: "xw", desc: "delete next word"},
 		{keys: "x$", desc: "delete to end of line"},
@@ -1798,6 +1890,9 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	})...)
 	lines = append(lines, renderSection("Notes command:", []helpEntry{
 		{keys: ":w", desc: "save current local state"},
+		{keys: "undo", desc: "undo last text change"},
+		{keys: "redo", desc: "redo last undone text change"},
+		{keys: "preview", desc: "toggle preview pane"},
 		{keys: "/text", desc: "search for text"},
 		{keys: "ol", desc: "review and open all unique external links"},
 		{keys: "rename NAME", desc: "rename the current note"},
@@ -1847,6 +1942,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	lines = append(lines, renderSection("Settings:", []helpEntry{
 		{keys: "j/k", desc: "move selection"},
 		{keys: "enter, space", desc: "change selected option"},
+		{keys: "digits, backspace, enter, esc", desc: "edit numeric setting values while a numeric field is active"},
 	})...)
 	return annotateHelpSearch(strings.TrimRight(strings.Join(lines, "\n"), "\n"), a.helpSearchQuery)
 }

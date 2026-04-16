@@ -42,6 +42,14 @@ func TestHelpTextForSettings(t *testing.T) {
 	}
 }
 
+func TestHelpTextForSettingsEditMode(t *testing.T) {
+	app := &terminalApp{view: viewSettings, settingsEditMode: true}
+	got := app.helpText()
+	if !strings.Contains(got, "digits edit") {
+		t.Fatalf("helpText() = %q, want numeric edit instructions", got)
+	}
+}
+
 func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 	app := &terminalApp{view: viewSync}
 	got := app.renderTabBar()
@@ -94,6 +102,39 @@ func TestHandleGlobalKeyAllowsPlainNumbersInInsertMode(t *testing.T) {
 	}
 	if !strings.Contains(ws.ActiveEditor().Text, "1") {
 		t.Fatalf("editor text = %q, want inserted digit", ws.ActiveEditor().Text)
+	}
+}
+
+func TestGeneratePasswordAndNotifyCopiesToClipboard(t *testing.T) {
+	helpers.InitStatusBar()
+	clipboardRestore := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer clipboardRestore()
+
+	app := &terminalApp{password: &password.Model{
+		Letters:     true,
+		SymbolCount: 8,
+	}}
+	app.generatePasswordAndNotify()
+	if app.password.Password == "" {
+		t.Fatal("password = empty, want generated password")
+	}
+	if got := helpers.StatusBarInst().Text(); got != "Password generated and copied to clipboard" {
+		t.Fatalf("status = %q, want clipboard success notice", got)
+	}
+}
+
+func TestGeneratePasswordAndNotifyReportsClipboardFailure(t *testing.T) {
+	helpers.InitStatusBar()
+	clipboardRestore := helpers.SetClipboardWriterForTesting(func(string) error { return os.ErrPermission })
+	defer clipboardRestore()
+
+	app := &terminalApp{password: &password.Model{
+		Letters:     true,
+		SymbolCount: 8,
+	}}
+	app.generatePasswordAndNotify()
+	if !strings.Contains(helpers.StatusBarInst().Text(), "clipboard copy failed") {
+		t.Fatalf("status = %q, want clipboard failure notice", helpers.StatusBarInst().Text())
 	}
 }
 
@@ -208,6 +249,73 @@ func TestRefreshNotesBodyShowsCommandBar(t *testing.T) {
 	}
 }
 
+func TestRefreshNotesBodyHidesPreviewPaneWhenPreviewIsToggledOff(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := notes.NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.PreviewHidden = true
+	app := &terminalApp{
+		view:        viewNotes,
+		notes:       ws,
+		width:       120,
+		height:      40,
+		header:      tview.NewTextView(),
+		statusBar:   tview.NewTextView(),
+		body:        tview.NewFlex(),
+		pagesRoot:   tview.NewPages(),
+		sidebar:     tview.NewTextView(),
+		editor:      tview.NewTextView(),
+		preview:     tview.NewTextView(),
+		commandBar:  tview.NewTextView(),
+		helpOverlay: tview.NewTextView(),
+	}
+	app.pagesRoot.AddPage("main", app.body, true, true)
+	app.pagesRoot.AddPage("help", app.helpOverlay, true, false)
+	app.pagesRoot.AddPage("shutdown", tview.NewTextView(), true, false)
+	app.refreshNotesBody()
+	if got := app.body.GetItemCount(); got != 2 {
+		t.Fatalf("body item count = %d, want 2", got)
+	}
+	content, ok := app.body.GetItem(0).(*tview.Flex)
+	if !ok {
+		t.Fatalf("content item type = %T, want *tview.Flex", app.body.GetItem(0))
+	}
+	if got := content.GetItemCount(); got != 2 {
+		t.Fatalf("content item count = %d, want 2 when preview is hidden", got)
+	}
+}
+
+func TestHandleSettingsKeyEditsUndoLevels(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	app := &terminalApp{view: viewSettings, settingIndex: 2}
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter) = false, want true")
+	}
+	if !app.settingsEditMode || app.settingsEditBuffer != "1000" {
+		t.Fatalf("settings edit state = mode:%t buffer:%q", app.settingsEditMode, app.settingsEditBuffer)
+	}
+	app.settingsEditBuffer = ""
+	if !app.handleSettingsKey(notes.Key{Name: "5", Rune: '5'}) {
+		t.Fatal("handleSettingsKey(5) = false, want true")
+	}
+	if !app.handleSettingsKey(notes.Key{Name: "0", Rune: '0'}) {
+		t.Fatal("handleSettingsKey(0) = false, want true")
+	}
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter apply) = false, want true")
+	}
+	if got := settings.Inst().NotesApp.UndoLevels; got != 50 {
+		t.Fatalf("UndoLevels = %d, want 50", got)
+	}
+	if !app.settingsDirty {
+		t.Fatal("settingsDirty = false, want true")
+	}
+}
+
 func TestHelpOverlayToggle(t *testing.T) {
 	app := &terminalApp{view: viewSettings, helpOverlay: tview.NewTextView()}
 	if !app.handleGlobalKey(notes.Key{Name: "?"}) {
@@ -264,6 +372,9 @@ func TestRenderHelpOverlayIncludesBottomSections(t *testing.T) {
 	}
 	if !strings.Contains(got, "Settings:") {
 		t.Fatalf("renderHelpOverlay() missing settings section: %q", got)
+	}
+	if !strings.Contains(got, "undo") || !strings.Contains(got, "redo") {
+		t.Fatalf("renderHelpOverlay() missing undo/redo help: %q", got)
 	}
 }
 

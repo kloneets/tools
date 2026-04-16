@@ -24,6 +24,9 @@ func TestDefaultSettings(t *testing.T) {
 	if got.NotesApp.TabSpaces != 4 {
 		t.Fatalf("TabSpaces = %d, want 4", got.NotesApp.TabSpaces)
 	}
+	if got.NotesApp.UndoLevels != 1000 {
+		t.Fatalf("UndoLevels = %d, want 1000", got.NotesApp.UndoLevels)
+	}
 	if !got.NotesApp.SidebarVisible {
 		t.Fatal("SidebarVisible = false, want true")
 	}
@@ -43,6 +46,9 @@ func TestNormalizeSettings(t *testing.T) {
 	}
 	if cfg.NotesApp.TabSpaces != 4 {
 		t.Fatalf("TabSpaces = %d, want 4", cfg.NotesApp.TabSpaces)
+	}
+	if cfg.NotesApp.UndoLevels != 1000 {
+		t.Fatalf("UndoLevels = %d, want 1000", cfg.NotesApp.UndoLevels)
 	}
 	if !cfg.NotesApp.SidebarVisible {
 		t.Fatal("SidebarVisible = false, want true")
@@ -83,6 +89,44 @@ func TestSaveNotesEditorWidth(t *testing.T) {
 	}
 	if _, err := os.Stat(fileName()); !os.IsNotExist(err) {
 		t.Fatalf("settings file should not be written automatically, stat err = %v", err)
+	}
+}
+
+func TestSaveNotesPreviewHiddenPersistsLocally(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.PendingSync = false
+	SaveNotesPreviewHidden(true)
+	if !settingsInstance.NotesApp.PreviewHidden {
+		t.Fatal("PreviewHidden = false, want true")
+	}
+	if settingsInstance.GDrive.PendingSync {
+		t.Fatal("PendingSync = true, want false for local UI preference persistence")
+	}
+	data, err := os.ReadFile(fileName())
+	if err != nil {
+		t.Fatalf("ReadFile(settings.json) error = %v", err)
+	}
+	if !strings.Contains(string(data), `"preview_hidden":true`) {
+		t.Fatalf("settings file = %q, want preview_hidden persisted", string(data))
+	}
+}
+
+func TestSaveNotesSessionPersistsLocally(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.PendingSync = false
+	SaveNotesSession([]string{"/tmp/Note 1.md", "/tmp/Note 2.md", "/tmp/Note 1.md"}, "/tmp/Note 2.md")
+	if settingsInstance.GDrive.PendingSync {
+		t.Fatal("PendingSync = true, want false for note session persistence")
+	}
+	if got := settingsInstance.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "/tmp/Note 1.md" || got[1] != "/tmp/Note 2.md" {
+		t.Fatalf("OpenNotePaths = %#v", got)
+	}
+	if got := settingsInstance.NotesApp.CurrentNotePath; got != "/tmp/Note 2.md" {
+		t.Fatalf("CurrentNotePath = %q, want /tmp/Note 2.md", got)
 	}
 }
 

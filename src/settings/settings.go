@@ -45,10 +45,14 @@ type PasswordAppSettings struct {
 }
 
 type NotesAppSettings struct {
-	TabSpaces      int  `json:"tab_spaces"`
-	EditorWidth    int  `json:"editor_width,omitempty"`
-	SidebarVisible bool `json:"sidebar_visible"`
-	VimMode        bool `json:"vim_mode"`
+	TabSpaces       int      `json:"tab_spaces"`
+	UndoLevels      int      `json:"undo_levels"`
+	EditorWidth     int      `json:"editor_width,omitempty"`
+	PreviewHidden   bool     `json:"preview_hidden,omitempty"`
+	OpenNotePaths   []string `json:"open_note_paths,omitempty"`
+	CurrentNotePath string   `json:"current_note_path,omitempty"`
+	SidebarVisible  bool     `json:"sidebar_visible"`
+	VimMode         bool     `json:"vim_mode"`
 }
 
 func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
@@ -175,6 +179,7 @@ func defaultSettings() *UserSettings {
 		},
 		NotesApp: NotesAppSettings{
 			TabSpaces:      4,
+			UndoLevels:     1000,
 			SidebarVisible: true,
 			VimMode:        true,
 		},
@@ -218,6 +223,9 @@ func normalizeSettings(s *UserSettings) {
 	}
 	if s.NotesApp.TabSpaces <= 0 {
 		s.NotesApp.TabSpaces = 4
+	}
+	if s.NotesApp.UndoLevels <= 0 {
+		s.NotesApp.UndoLevels = 1000
 	}
 	if s.NotesApp.TabSpaces == 4 && !s.NotesApp.VimMode && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
@@ -313,6 +321,54 @@ func SaveNotesEditorWidth(width int) {
 		return
 	}
 	settingsInstance.NotesApp.EditorWidth = width
+}
+
+func SaveNotesPreviewHidden(hidden bool) {
+	if settingsInstance == nil {
+		return
+	}
+	if settingsInstance.NotesApp.PreviewHidden == hidden {
+		return
+	}
+	settingsInstance.NotesApp.PreviewHidden = hidden
+	writeSettingsToDisk(false)
+}
+
+func SaveNotesSession(paths []string, currentPath string) {
+	if settingsInstance == nil {
+		return
+	}
+	normalized := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		normalized = append(normalized, path)
+	}
+	if slicesEqual(settingsInstance.NotesApp.OpenNotePaths, normalized) && settingsInstance.NotesApp.CurrentNotePath == currentPath {
+		return
+	}
+	settingsInstance.NotesApp.OpenNotePaths = normalized
+	settingsInstance.NotesApp.CurrentNotePath = currentPath
+	writeSettingsToDisk(false)
+}
+
+func slicesEqual(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func SaveAppWindowState(width int, height int, maximized bool) {

@@ -55,6 +55,30 @@ func TestParseVimCommandOpenLinks(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandUndoRedo(t *testing.T) {
+	cmd, err := parseVimCommand("undo")
+	if err != nil {
+		t.Fatalf("parseVimCommand(undo) error = %v", err)
+	}
+	if cmd.Kind != vimCommandUndo {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandUndo)
+	}
+	cmd, err = parseVimCommand("redo")
+	if err != nil {
+		t.Fatalf("parseVimCommand(redo) error = %v", err)
+	}
+	if cmd.Kind != vimCommandRedo {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandRedo)
+	}
+	cmd, err = parseVimCommand("preview")
+	if err != nil {
+		t.Fatalf("parseVimCommand(preview) error = %v", err)
+	}
+	if cmd.Kind != vimCommandPreview {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandPreview)
+	}
+}
+
 func TestCollectSupportedLinksDedupesAndFilters(t *testing.T) {
 	text := strings.Join([]string{
 		"[docs](https://example.com/docs)",

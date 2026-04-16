@@ -79,6 +79,11 @@ type FileEntry struct {
 	Image      bool
 }
 
+type editorSnapshot struct {
+	Text   string
+	Cursor int
+}
+
 type Editor struct {
 	Path                string
 	Title               string
@@ -104,6 +109,8 @@ type Editor struct {
 	AutoCompleteIndex   int
 	AutoCompleteStart   int
 	AutoCompleteEnd     int
+	UndoStack           []editorSnapshot
+	RedoStack           []editorSnapshot
 }
 
 type Workspace struct {
@@ -128,7 +135,10 @@ type Workspace struct {
 	LastHeight            int
 	EditorHeight          int
 	SelectedFolder        string
+	PreviewHidden         bool
 	pendingOpenLinks      []string
+	pendingDeletePath     string
+	pendingDeleteLabel    string
 }
 
 var currentNote *Workspace
@@ -148,7 +158,11 @@ func NewWorkspace() (*Workspace, error) {
 		return nil, err
 	}
 	_ = discardManagedFilesDraft()
-	ws := &Workspace{FocusSidebar: false, CurrentTab: -1}
+	ws := &Workspace{
+		FocusSidebar:  false,
+		CurrentTab:    -1,
+		PreviewHidden: settings.Inst().NotesApp.PreviewHidden,
+	}
 	ws.SidebarWidth = normalizeSidebarWidth(settings.PersistedNotesEditorWidth())
 	if pending, err := countLooseManagedFiles(); err != nil {
 		return nil, err
@@ -160,7 +174,7 @@ func NewWorkspace() (*Workspace, error) {
 	}
 	ws.refreshTree()
 	ws.refreshFiles()
-	if len(files) > 0 {
+	if !ws.restoreOpenTabs(files) && len(files) > 0 {
 		if err := ws.Open(files[0].Path); err != nil {
 			return nil, err
 		}
@@ -300,6 +314,7 @@ func (w *Workspace) Open(path string) error {
 	for i, tab := range w.Tabs {
 		if tab.Path == path {
 			w.CurrentTab = i
+			w.persistSession()
 			return nil
 		}
 	}
@@ -311,6 +326,7 @@ func (w *Workspace) Open(path string) error {
 	w.Tabs = append(w.Tabs, ed)
 	w.CurrentTab = len(w.Tabs) - 1
 	w.SelectedFolder = relativeNoteFolder(path)
+	w.persistSession()
 	return nil
 }
 
@@ -319,6 +335,138 @@ func defaultEditorMode() Mode {
 		return ModeNormal
 	}
 	return ModeInsert
+}
+
+func (w *Workspace) persistSession() {
+	if w == nil {
+		return
+	}
+	paths := make([]string, 0, len(w.Tabs))
+	current := ""
+	for i, tab := range w.Tabs {
+		if tab == nil || strings.TrimSpace(tab.Path) == "" {
+			continue
+		}
+		paths = append(paths, tab.Path)
+		if i == w.CurrentTab {
+			current = tab.Path
+		}
+	}
+	settings.SaveNotesSession(paths, current)
+}
+
+func (w *Workspace) restoreOpenTabs(files []noteFile) bool {
+	if w == nil {
+		return false
+	}
+	available := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		available[file.Path] = struct{}{}
+	}
+	session := settings.Inst().NotesApp
+	restored := false
+	for _, path := range session.OpenNotePaths {
+		if _, ok := available[path]; !ok {
+			continue
+		}
+		if err := w.Open(path); err == nil {
+			restored = true
+		}
+	}
+	if !restored {
+		return false
+	}
+	if session.CurrentNotePath != "" {
+		for i, tab := range w.Tabs {
+			if tab != nil && tab.Path == session.CurrentNotePath {
+				w.CurrentTab = i
+				break
+			}
+		}
+	}
+	w.persistSession()
+	return true
+}
+
+func currentEditorSnapshot(ed *Editor) editorSnapshot {
+	return editorSnapshot{
+		Text:   ed.Text,
+		Cursor: ed.Cursor,
+	}
+}
+
+func undoLimit() int {
+	limit := settings.Inst().NotesApp.UndoLevels
+	if limit <= 0 {
+		return 1000
+	}
+	return limit
+}
+
+func trimSnapshots(snaps []editorSnapshot, limit int) []editorSnapshot {
+	if limit <= 0 || len(snaps) <= limit {
+		return snaps
+	}
+	return append([]editorSnapshot(nil), snaps[len(snaps)-limit:]...)
+}
+
+func rememberUndoState(ed *Editor) {
+	if ed == nil {
+		return
+	}
+	snapshot := currentEditorSnapshot(ed)
+	if n := len(ed.UndoStack); n > 0 {
+		last := ed.UndoStack[n-1]
+		if last.Text == snapshot.Text && last.Cursor == snapshot.Cursor {
+			ed.RedoStack = nil
+			return
+		}
+	}
+	ed.UndoStack = append(ed.UndoStack, snapshot)
+	ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
+	ed.RedoStack = nil
+}
+
+func applyUndo(ed *Editor) bool {
+	if ed == nil || len(ed.UndoStack) == 0 {
+		if ed != nil {
+			ed.Status = "nothing to undo"
+		}
+		return false
+	}
+	ed.RedoStack = append(ed.RedoStack, currentEditorSnapshot(ed))
+	ed.RedoStack = trimSnapshots(ed.RedoStack, undoLimit())
+	snapshot := ed.UndoStack[len(ed.UndoStack)-1]
+	ed.UndoStack = ed.UndoStack[:len(ed.UndoStack)-1]
+	ed.Text = snapshot.Text
+	ed.Cursor = snapshot.Cursor
+	ed.Dirty = true
+	ed.Status = "undo"
+	clearAutoComplete(ed)
+	clearVisualSelection(ed)
+	ed.PendingOp = ""
+	return true
+}
+
+func applyRedo(ed *Editor) bool {
+	if ed == nil || len(ed.RedoStack) == 0 {
+		if ed != nil {
+			ed.Status = "nothing to redo"
+		}
+		return false
+	}
+	ed.UndoStack = append(ed.UndoStack, currentEditorSnapshot(ed))
+	ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
+	snapshot := ed.RedoStack[len(ed.RedoStack)-1]
+	ed.RedoStack = ed.RedoStack[:len(ed.RedoStack)-1]
+	ed.Text = snapshot.Text
+	ed.Cursor = snapshot.Cursor
+	ed.Dirty = true
+	ed.Status = "redo"
+	clearAutoComplete(ed)
+	clearVisualSelection(ed)
+	ed.PendingOp = ""
+	return true
 }
 
 func (w *Workspace) SaveCurrent() error {
@@ -439,6 +587,7 @@ func (w *Workspace) NextTab() bool {
 		return false
 	}
 	w.CurrentTab = (w.CurrentTab + 1) % len(w.Tabs)
+	w.persistSession()
 	return true
 }
 
@@ -450,6 +599,7 @@ func (w *Workspace) PrevTab() bool {
 	if w.CurrentTab < 0 {
 		w.CurrentTab = len(w.Tabs) - 1
 	}
+	w.persistSession()
 	return true
 }
 
@@ -471,24 +621,7 @@ func (w *Workspace) DeleteCurrentNote() bool {
 	if ed == nil {
 		return false
 	}
-	path := ed.Path
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		ed.Status = err.Error()
-		return false
-	}
-	w.closeTab(path)
-	w.refreshTree()
-	if len(w.Tabs) == 0 {
-		created, err := w.CreateNote("")
-		if err == nil {
-			_ = w.Open(created)
-		}
-	}
-	if w.CurrentTab >= 0 && w.CurrentTab < len(w.Tabs) {
-		w.SelectedFolder = relativeNoteFolder(w.Tabs[w.CurrentTab].Path)
-	}
-	w.refreshFiles()
-	return true
+	return w.DeleteNoteByPath(ed.Path) == nil
 }
 
 func (w *Workspace) CanDeleteFocusedNote() bool {
@@ -512,14 +645,72 @@ func (w *Workspace) FocusedNoteDeleteLabel() string {
 	return w.ActiveEditor().Title
 }
 
-func (w *Workspace) DeleteFocusedNote() bool {
-	if !w.CanDeleteFocusedNote() {
+func (w *Workspace) requestDeleteFocusedNote() bool {
+	path := w.FocusedNoteDeletePath()
+	if strings.TrimSpace(path) == "" {
 		return false
 	}
-	if w.FocusSidebar {
-		return w.DeleteSelection() == nil
+	w.pendingDeletePath = path
+	w.pendingDeleteLabel = w.FocusedNoteDeleteLabel()
+	return true
+}
+
+func (w *Workspace) FocusedNoteDeletePath() string {
+	if !w.CanDeleteFocusedNote() {
+		return ""
 	}
-	return w.DeleteCurrentNote()
+	if w.FocusSidebar {
+		entry := w.selectedEntry()
+		if entry == nil || entry.Kind != treeNote {
+			return ""
+		}
+		return entry.Path
+	}
+	if ed := w.ActiveEditor(); ed != nil {
+		return ed.Path
+	}
+	return ""
+}
+
+func (w *Workspace) DeleteFocusedNote() bool {
+	return w.DeleteNoteByPath(w.FocusedNoteDeletePath()) == nil
+}
+
+func (w *Workspace) TakePendingDeleteNote() (string, string, bool) {
+	if w == nil || strings.TrimSpace(w.pendingDeletePath) == "" {
+		return "", "", false
+	}
+	path := w.pendingDeletePath
+	label := w.pendingDeleteLabel
+	w.pendingDeletePath = ""
+	w.pendingDeleteLabel = ""
+	return path, label, true
+}
+
+func (w *Workspace) DeleteNoteByPath(path string) error {
+	if w == nil || strings.TrimSpace(path) == "" {
+		return fmt.Errorf("no note selected")
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if ed := w.ActiveEditor(); ed != nil {
+			ed.Status = err.Error()
+		}
+		return err
+	}
+	w.closeTab(path)
+	w.refreshTree()
+	if len(w.Tabs) == 0 {
+		created, err := w.CreateNote("")
+		if err == nil {
+			_ = w.Open(created)
+		}
+	}
+	if w.CurrentTab >= 0 && w.CurrentTab < len(w.Tabs) {
+		w.SelectedFolder = relativeNoteFolder(w.Tabs[w.CurrentTab].Path)
+	}
+	w.refreshFiles()
+	w.persistSession()
+	return nil
 }
 
 func (w *Workspace) RenameCurrentNote(name string) error {
@@ -553,6 +744,7 @@ func (w *Workspace) RenameCurrentNote(name string) error {
 	w.SelectedFolder = relativeNoteFolder(target)
 	w.refreshTree()
 	w.refreshFiles()
+	w.persistSession()
 	return nil
 }
 
@@ -565,7 +757,7 @@ func (w *Workspace) HandleKey(key Key) bool {
 		return w.NewNote()
 	}
 	if key.Ctrl && key.Name == "d" {
-		return w.DeleteCurrentNote()
+		return w.requestDeleteFocusedNote()
 	}
 	if key.Ctrl && key.Name == "e" {
 		w.FocusSidebar = !w.FocusSidebar
@@ -638,7 +830,7 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 		_ = w.CreateFolder("")
 		return true
 	case "d":
-		return w.DeleteSelection() == nil
+		return w.requestDeleteFocusedNote()
 	case "R":
 		ed := w.ActiveEditor()
 		if ed == nil {
@@ -705,10 +897,9 @@ func (w *Workspace) DeleteSelection() error {
 		}
 		w.closeTabsInFolder(entry.Folder)
 	} else {
-		if err := os.Remove(entry.Path); err != nil {
+		if err := w.DeleteNoteByPath(entry.Path); err != nil {
 			return err
 		}
-		w.closeTab(entry.Path)
 	}
 	w.refreshTree()
 	w.refreshFiles()
@@ -735,6 +926,7 @@ func (w *Workspace) closeTabsInFolder(folder string) {
 	if w.CurrentTab < 0 && len(w.Tabs) > 0 {
 		w.CurrentTab = 0
 	}
+	w.persistSession()
 }
 
 func (w *Workspace) closeTab(path string) {
@@ -748,6 +940,7 @@ func (w *Workspace) closeTab(path string) {
 	if w.CurrentTab >= len(w.Tabs) {
 		w.CurrentTab = len(w.Tabs) - 1
 	}
+	w.persistSession()
 }
 
 func (w *Workspace) selectedEntry() *TreeEntry {
@@ -834,6 +1027,7 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 		if ed.Cursor <= 0 {
 			return true
 		}
+		rememberUndoState(ed)
 		runes := []rune(ed.Text)
 		ed.Text = string(append(runes[:ed.Cursor-1], runes[ed.Cursor:]...))
 		ed.Cursor--
@@ -887,6 +1081,7 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	case "delete":
 		clearAutoComplete(ed)
+		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		return true
@@ -899,6 +1094,7 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 }
 
 func insertRune(ed *Editor, r rune) bool {
+	rememberUndoState(ed)
 	runes := []rune(ed.Text)
 	idx := vimClampOffset(ed.Text, ed.Cursor)
 	runes = append(runes[:idx], append([]rune{r}, runes[idx:]...)...)
@@ -975,11 +1171,13 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Mode = ModeInsert
 		return true
 	case "o":
+		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimOpenLineBelow(ed.Text, ed.Cursor)
 		ed.Mode = ModeInsert
 		ed.Dirty = true
 		return true
 	case "O":
+		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimOpenLineAbove(ed.Text, ed.Cursor)
 		ed.Mode = ModeInsert
 		ed.Dirty = true
@@ -1024,10 +1222,12 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.LastXText = ed.Text
 		ed.LastXCursor = ed.Cursor
 		ed.LastXArmed = true
+		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		return true
 	case "delete":
+		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		return true
@@ -1052,6 +1252,8 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	case "N":
 		repeatSearch(ed, false)
 		return true
+	case "u":
+		return applyUndo(ed)
 	case "tab":
 		w.FocusSidebar = true
 		return true
@@ -1064,11 +1266,13 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	case "d", "y", "c":
 		if ed.PendingOp == key.Name {
 			if key.Name == "d" || key.Name == "c" {
+				rememberUndoState(ed)
 				ed.Text, ed.Cursor = vimDeleteLine(ed.Text, ed.Cursor)
 				ed.Dirty = true
 			}
 			if key.Name == "y" {
 				ed.Register = vimYankLine(ed.Text, ed.Cursor, ed.Cursor)
+				updateClipboardForRegister(ed, "yanked line")
 			}
 			if key.Name == "c" {
 				ed.Mode = ModeInsert
@@ -1079,7 +1283,13 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.PendingOp = key.Name
 		return true
 	case "p":
-		reg := normalizePasteRegister(ed.Register)
+		reg, err := clipboardPasteRegister()
+		if err != nil {
+			ed.Status = "clipboard paste failed: " + err.Error()
+			return true
+		}
+		ed.Register = reg
+		rememberUndoState(ed)
 		switch reg.Kind {
 		case vimRegisterLine:
 			ed.Text, ed.Cursor = vimPasteLine(ed.Text, ed.Cursor, reg)
@@ -1112,6 +1322,7 @@ func handleReplacePending(ed *Editor, key Key) bool {
 	if key.Rune == 0 {
 		return false
 	}
+	rememberUndoState(ed)
 	ed.Text, ed.Cursor = vimReplaceChar(ed.Text, ed.Cursor, key.Rune)
 	ed.Dirty = true
 	ed.PendingOp = ""
@@ -1227,6 +1438,7 @@ func handleVisualMode(ed *Editor, key Key) bool {
 
 func applyPendingOperator(ed *Editor, key string) bool {
 	if ed.PendingOp == "d" && key == "w" {
+		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteWord(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		ed.PendingOp = ""
@@ -1245,6 +1457,7 @@ func applyPendingOperator(ed *Editor, key string) bool {
 	}
 	if ed.PendingOp == "y" {
 		ed.Register = vimYankChar(ed.Text, start, max(start, end-1))
+		updateClipboardForRegister(ed, "yanked text")
 		ed.PendingOp = ""
 		return true
 	}
@@ -1257,6 +1470,7 @@ func applyPendingOperator(ed *Editor, key string) bool {
 	}
 	deleted := string(runes[start:end])
 	ed.Register = vimRegister{Kind: vimRegisterChar, Text: deleted}
+	rememberUndoState(ed)
 	ed.Text = string(append(runes[:start], runes[end:]...))
 	ed.Cursor = start
 	ed.Dirty = true
@@ -1353,18 +1567,46 @@ func yankVisualSelection(ed *Editor) {
 	switch ed.SelectionMode {
 	case vimSelectionChar:
 		ed.Register = vimYankChar(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		ed.Status = "yanked selection"
+		updateClipboardForRegister(ed, "yanked selection")
 	case vimSelectionLine:
 		ed.Register = vimYankLine(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		ed.Status = "yanked lines"
+		updateClipboardForRegister(ed, "yanked lines")
 	case vimSelectionBlock:
 		ed.Register = vimYankBlock(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		ed.Status = "yanked block"
+		updateClipboardForRegister(ed, "yanked block")
 	}
 	clearVisualSelection(ed)
 }
 
+func clipboardPasteRegister() (vimRegister, error) {
+	text, err := helpers.ReadFromClipboard()
+	if err != nil {
+		return vimRegister{}, err
+	}
+	reg := vimRegister{Kind: vimRegisterChar, Text: text}
+	return normalizePasteRegister(reg), nil
+}
+
+func updateClipboardForRegister(ed *Editor, success string) {
+	text := serializeRegisterForClipboard(ed.Register)
+	if err := helpers.CopyToClipboard(text); err != nil {
+		ed.Status = success + "; clipboard copy failed: " + err.Error()
+		return
+	}
+	ed.Status = success
+}
+
+func serializeRegisterForClipboard(reg vimRegister) string {
+	switch reg.Kind {
+	case vimRegisterBlock:
+		return strings.Join(reg.Lines, "\n")
+	default:
+		return reg.Text
+	}
+}
+
 func deleteVisualSelection(ed *Editor) {
+	rememberUndoState(ed)
 	switch ed.SelectionMode {
 	case vimSelectionChar:
 		ed.Text, ed.Cursor = vimDeleteRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
@@ -1403,6 +1645,7 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 			ed.Status = "pattern not found"
 		}
 	case vimCommandReplace:
+		before := currentEditorSnapshot(ed)
 		var count int
 		if cmd.CurrentLine {
 			start, end := vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
@@ -1411,6 +1654,9 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 			ed.Text, count = replaceText(ed.Text, cmd.Query, cmd.Replacement, cmd.Global)
 		}
 		if count > 0 {
+			ed.UndoStack = append(ed.UndoStack, before)
+			ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
+			ed.RedoStack = nil
 			ed.Dirty = true
 		}
 		ed.Status = fmt.Sprintf("%d replacements", count)
@@ -1427,6 +1673,18 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 		} else {
 			w.pendingOpenLinks = append([]string(nil), links...)
 			ed.Status = fmt.Sprintf("%d links ready", len(links))
+		}
+	case vimCommandUndo:
+		applyUndo(ed)
+	case vimCommandRedo:
+		applyRedo(ed)
+	case vimCommandPreview:
+		w.PreviewHidden = !w.PreviewHidden
+		settings.SaveNotesPreviewHidden(w.PreviewHidden)
+		if w.PreviewHidden {
+			ed.Status = "preview hidden"
+		} else {
+			ed.Status = "preview shown"
 		}
 	}
 }
@@ -1480,12 +1738,12 @@ func (w *Workspace) HelpText() string {
 		return "notes/insert: tab complete or spaces | shift+tab reverse complete | esc normal | ctrl+s save | ctrl+e sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
 		return "notes/visual: h j k l move | V line | ctrl+v block | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+e sidebar"
+	return "notes/normal: i insert | u undo | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+e sidebar"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -1542,7 +1800,7 @@ func (w *Workspace) CommandLineText(width int) string {
 	if ed.LastSearch != "" {
 		return helpers.TruncateANSI("/"+ed.LastSearch, width)
 	}
-	return helpers.TruncateANSI(":w save | / search | n next | N prev", width)
+	return helpers.TruncateANSI(":w save | preview | / search | n next | N prev", width)
 }
 
 func (w *Workspace) PaneWidths(totalWidth int) (int, int, int) {
@@ -1562,6 +1820,9 @@ func (w *Workspace) PaneWidths(totalWidth int) (int, int, int) {
 	}
 	if contentWidth < 20 {
 		contentWidth = 20
+	}
+	if w.PreviewHidden {
+		return sidebarWidth, contentWidth, 0
 	}
 	editorWidth := resolveEditorWidth(settings.Inst().NotesApp.EditorWidth, contentWidth)
 	previewWidth := contentWidth - editorWidth
@@ -1693,6 +1954,15 @@ func (w *Workspace) renderEditor(height int, width int) []string {
 	ed := w.ActiveEditor()
 	if ed == nil {
 		return fillLines(height, "No note open")
+	}
+	if w.PreviewHidden {
+		tabsLine := helpers.TruncateANSI(renderTabs(w), width)
+		editorLines := renderEditorPane(ed, width, height-1)
+		lines := []string{tabsLine}
+		for i := 0; i < height-1; i++ {
+			lines = append(lines, helpers.PadANSI(lineAt(editorLines, i), width))
+		}
+		return lines
 	}
 	editorWidth := resolveEditorWidth(settings.Inst().NotesApp.EditorWidth, width)
 	previewWidth := width - editorWidth - 1

@@ -745,6 +745,7 @@ func insertTextAtCursor(ed *Editor, text string) {
 	if ed == nil {
 		return
 	}
+	rememberUndoState(ed)
 	runes := []rune(ed.Text)
 	idx := vimClampOffset(ed.Text, ed.Cursor)
 	insert := []rune(text)
@@ -1235,6 +1236,7 @@ func completeEditorPathReferenceBackward(w *Workspace, ed *Editor) bool {
 }
 
 func replaceRunes(ed *Editor, start int, end int, replacement string) {
+	rememberUndoState(ed)
 	runes := []rune(ed.Text)
 	if start < 0 {
 		start = 0
