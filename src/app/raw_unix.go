@@ -6,37 +6,44 @@ import (
 	"bufio"
 	"io"
 	"strings"
-	"syscall"
-	"unsafe"
 
 	"github.com/kloneets/tools/src/notes"
+	"golang.org/x/sys/unix"
 )
 
-type termState struct{ state syscall.Termios }
+type termState struct{ state unix.Termios }
 
 func makeRaw(fd int) (*termState, error) {
 	oldState, err := getTermios(fd)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	newState := *oldState
-	newState.Iflag &^= syscall.ICRNL | syscall.INLCR | syscall.IXON
-	newState.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.ISIG | syscall.IEXTEN
-	newState.Cflag &^= syscall.CSIZE | syscall.PARENB
-	newState.Cflag |= syscall.CS8
-	newState.Oflag &^= syscall.OPOST
-	newState.Cc[syscall.VMIN] = 1
-	newState.Cc[syscall.VTIME] = 0
-	if err := setTermios(fd, &newState); err != nil { return nil, err }
+	newState.Iflag &^= unix.ICRNL | unix.INLCR | unix.IXON
+	newState.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG | unix.IEXTEN
+	newState.Cflag &^= unix.CSIZE | unix.PARENB
+	newState.Cflag |= unix.CS8
+	newState.Oflag &^= unix.OPOST
+	newState.Cc[unix.VMIN] = 1
+	newState.Cc[unix.VTIME] = 0
+	if err := setTermios(fd, &newState); err != nil {
+		return nil, err
+	}
 	return &termState{state: *oldState}, nil
 }
 
 func restoreTerminal(fd int, state *termState) error {
-	if state == nil { return nil }
+	if state == nil {
+		return nil
+	}
 	return setTermios(fd, &state.state)
 }
 
 func terminalSize(fd int) (int, int) {
 	ws, err := getWinsize(fd)
-	if err != nil || ws.Col == 0 || ws.Row == 0 { return 120, 36 }
+	if err != nil || ws.Col == 0 || ws.Row == 0 {
+		return 120, 36
+	}
 	return int(ws.Col), int(ws.Row)
 }
 
@@ -49,7 +56,10 @@ func readKeys(r io.Reader, out chan<- notes.Key) {
 	reader := bufio.NewReader(r)
 	for {
 		b, err := reader.ReadByte()
-		if err != nil { close(out); return }
+		if err != nil {
+			close(out)
+			return
+		}
 		switch b {
 		case 3:
 			out <- notes.Key{Ctrl: true, Name: "c"}
@@ -147,25 +157,23 @@ func firstParam(params string) string {
 	return parts[0]
 }
 
-
-type winsize struct { Row, Col, Xpixel, Ypixel uint16 }
+type winsize struct{ Row, Col, Xpixel, Ypixel uint16 }
 
 func getWinsize(fd int) (*winsize, error) {
-	ws := &winsize{}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(ws)))
-	if errno != 0 { return nil, errno }
-	return ws, nil
+	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
+	if err != nil {
+		return nil, err
+	}
+	return &winsize{
+		Row:    ws.Row,
+		Col:    ws.Col,
+		Xpixel: ws.Xpixel,
+		Ypixel: ws.Ypixel,
+	}, nil
 }
 
-func getTermios(fd int) (*syscall.Termios, error) {
-	termios := &syscall.Termios{}
-	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(termios)), 0, 0, 0)
-	if errno != 0 { return nil, errno }
-	return termios, nil
-}
+func getTermios(fd int) (*unix.Termios, error) { return unix.IoctlGetTermios(fd, termiosReadRequest) }
 
-func setTermios(fd int, termios *syscall.Termios) error {
-	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(termios)), 0, 0, 0)
-	if errno != 0 { return errno }
-	return nil
+func setTermios(fd int, termios *unix.Termios) error {
+	return unix.IoctlSetTermios(fd, termiosWriteRequest, termios)
 }
