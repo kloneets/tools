@@ -175,6 +175,10 @@ func (a *terminalApp) initWidgets() {
 				return settings.SyncDriveData()
 			}, func() {
 				helpers.StatusBarInst().UpdateStatusBar("Saved locally and uploaded Drive snapshot at " + formatTimestampOrNever(settings.Inst().GDrive.LastDriveSaveAt))
+				a.shuttingDown = false
+				if a.pagesRoot != nil {
+					a.pagesRoot.HidePage("quit")
+				}
 				a.stopTUI()
 			}, func(err error) {
 				helpers.StatusBarInst().UpdateStatusBar("Save + Sync failed: " + err.Error())
@@ -806,11 +810,12 @@ func (a *terminalApp) stopTUI() {
 	if a == nil {
 		return
 	}
+	a.shuttingDown = false
 	if a.pagesRoot != nil {
 		a.pagesRoot.HidePage("quit")
 	}
 	if a.tui != nil {
-		a.tui.Stop()
+		go a.tui.Stop()
 	}
 }
 

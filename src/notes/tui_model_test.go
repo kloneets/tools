@@ -941,6 +941,49 @@ func TestNewWorkspaceRestoresOpenTabsSession(t *testing.T) {
 	}
 }
 
+func TestNewWorkspaceRestoresPortableSnapshotSessionPaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := w.ActiveEditor().Path
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatalf("CreateFolder() error = %v", err)
+	}
+	for i, entry := range w.Tree {
+		if entry.Kind == treeFolder && entry.Folder == "Projects" {
+			w.Selection = i
+			break
+		}
+	}
+	created, err := w.CreateNote("Plan")
+	if err != nil {
+		t.Fatalf("CreateNote() error = %v", err)
+	}
+	secondPath := created
+	settings.Inst().NotesApp.OpenNotePaths = []string{
+		"/old-home/.config/koko-tools/notes/Note 1.md",
+		"/old-home/.config/koko-tools/notes/Projects/Plan.md",
+	}
+	settings.Inst().NotesApp.CurrentNotePath = "/old-home/.config/koko-tools/notes/Projects/Plan.md"
+
+	restored, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(restored.Tabs); got != 2 {
+		t.Fatalf("restored tab count = %d, want 2", got)
+	}
+	if restored.Tabs[0].Path != firstPath || restored.Tabs[1].Path != secondPath {
+		t.Fatalf("restored paths = %q, %q", restored.Tabs[0].Path, restored.Tabs[1].Path)
+	}
+	if restored.ActiveEditor() == nil || restored.ActiveEditor().Path != secondPath {
+		t.Fatalf("active path = %v, want %q", restored.ActiveEditor(), secondPath)
+	}
+}
+
 func TestRenameCurrentNote(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1262,6 +1305,8 @@ func TestHandleNormalModeXWDeletesNextWord(t *testing.T) {
 }
 
 func TestHandleNormalModeDWDeletesWord(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
 	ed := &Editor{Text: "alpha beta gamma", Cursor: 0, Mode: ModeNormal}
 	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
 		t.Fatal("handleNormalMode(d) = false, want true")
@@ -1274,6 +1319,21 @@ func TestHandleNormalModeDWDeletesWord(t *testing.T) {
 	}
 	if ed.PendingOp != "" {
 		t.Fatalf("PendingOp = %q, want cleared", ed.PendingOp)
+	}
+}
+
+func TestHandleNormalModeDDollarDeletesToEndOfLine(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "alpha beta\ngamma", Cursor: 6, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "$", Rune: '$', Shift: true}) {
+		t.Fatal("handleNormalMode($) = false, want true after d")
+	}
+	if got := ed.Text; got != "alpha \ngamma" {
+		t.Fatalf("text = %q, want %q", got, "alpha \ngamma")
 	}
 }
 
@@ -1347,6 +1407,8 @@ func TestUndoLimitTrimsOldestSnapshots(t *testing.T) {
 }
 
 func TestHandleNormalModeXDollarDeletesToEndOfLine(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
 	ed := &Editor{Text: "alpha beta\ngamma", Cursor: 6, Mode: ModeNormal}
 	if !handleNormalMode(&Workspace{}, ed, Key{Name: "x", Rune: 'x'}) {
 		t.Fatal("handleNormalMode(x) = false, want true")
@@ -1356,6 +1418,117 @@ func TestHandleNormalModeXDollarDeletesToEndOfLine(t *testing.T) {
 	}
 	if got := ed.Text; got != "alpha \ngamma" {
 		t.Fatalf("text = %q, want %q", got, "alpha \ngamma")
+	}
+}
+
+func TestHandleNormalModeIAndAStayOnCurrentLine(t *testing.T) {
+	ed := &Editor{Text: "abcd", Cursor: 1, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "i", Rune: 'i'}) {
+		t.Fatal("handleNormalMode(i) = false, want true")
+	}
+	if ed.Mode != ModeInsert || ed.Cursor != 1 {
+		t.Fatalf("i -> mode=%q cursor=%d, want insert at 1", ed.Mode, ed.Cursor)
+	}
+
+	ed = &Editor{Text: "abcd", Cursor: 1, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "a", Rune: 'a'}) {
+		t.Fatal("handleNormalMode(a) = false, want true")
+	}
+	if ed.Mode != ModeInsert || ed.Cursor != 2 {
+		t.Fatalf("a -> mode=%q cursor=%d, want insert at 2", ed.Mode, ed.Cursor)
+	}
+}
+
+func TestInsertModeEnterContinuesIndentedBullet(t *testing.T) {
+	ed := &Editor{
+		Text:   "- item\n  - child",
+		Cursor: len([]rune("- item\n  - child")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "enter"}) {
+		t.Fatal("handleInsertMode(enter) = false, want true")
+	}
+	if got := ed.Text; got != "- item\n  - child\n  - " {
+		t.Fatalf("text = %q, want indented continued bullet", got)
+	}
+}
+
+func TestInsertModeTabIndentsBulletToNextLevel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.TabSpaces = 2
+	ed := &Editor{
+		Text:   "- item",
+		Cursor: len([]rune("- item")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "tab"}) {
+		t.Fatal("handleInsertMode(tab) = false, want true")
+	}
+	if got := ed.Text; got != "  - item" {
+		t.Fatalf("text = %q, want indented bullet", got)
+	}
+}
+
+func TestInsertModeTabIndentsOrderedItemToNextLevel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.TabSpaces = 2
+	ed := &Editor{
+		Text:   "1. item",
+		Cursor: len([]rune("1. item")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "tab"}) {
+		t.Fatal("handleInsertMode(tab) = false, want true")
+	}
+	if got := ed.Text; got != "  1. item" {
+		t.Fatalf("text = %q, want indented ordered item", got)
+	}
+}
+
+func TestInsertModeEnterOnEmptyBulletRemovesMarker(t *testing.T) {
+	ed := &Editor{
+		Text:   "- ",
+		Cursor: len([]rune("- ")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "enter"}) {
+		t.Fatal("handleInsertMode(enter) = false, want true")
+	}
+	if got := ed.Text; got != "" {
+		t.Fatalf("text = %q, want empty line after leaving bullet", got)
+	}
+}
+
+func TestInsertModeEnterOnEmptyOrderedItemRemovesMarker(t *testing.T) {
+	ed := &Editor{
+		Text:   "1. ",
+		Cursor: len([]rune("1. ")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "enter"}) {
+		t.Fatal("handleInsertMode(enter) = false, want true")
+	}
+	if got := ed.Text; got != "" {
+		t.Fatalf("text = %q, want empty line after leaving ordered item", got)
+	}
+}
+
+func TestInsertModeEnterOnEmptyBulletKeepsFollowingLine(t *testing.T) {
+	ed := &Editor{
+		Text:   "- \nnext",
+		Cursor: len([]rune("- ")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "enter"}) {
+		t.Fatal("handleInsertMode(enter) = false, want true")
+	}
+	if got := ed.Text; got != "\nnext" {
+		t.Fatalf("text = %q, want blank line preserved before next line", got)
+	}
+	if got := ed.Cursor; got != 0 {
+		t.Fatalf("cursor = %d, want 0", got)
 	}
 }
 
@@ -1417,6 +1590,35 @@ func TestVisualBlockYankAndDelete(t *testing.T) {
 	}
 }
 
+func TestVisualBlockDeleteThenPPastesDeletedBlock(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	restoreRead := helpers.SetClipboardReaderForTesting(func() (string, error) {
+		return "external clipboard", nil
+	})
+	defer restoreRead()
+
+	ed := &Editor{Text: "abcd\nwxyz", Cursor: 1, Mode: ModeNormal}
+	startVisualSelection(ed, vimSelectionBlock)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
+	refreshVisualSelection(ed)
+	if !handleVisualMode(ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("d in visual block mode should succeed")
+	}
+	if got := ed.Text; got != "ad\nwz" {
+		t.Fatalf("after delete text = %q, want %q", got, "ad\nwz")
+	}
+	ed.Mode = ModeNormal
+	ed.Cursor = 1
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "p", Rune: 'p'}) {
+		t.Fatal("handleNormalMode(p) = false, want true")
+	}
+	if got := ed.Text; got != "abcd\nwxyz" {
+		t.Fatalf("after paste text = %q, want original block restored", got)
+	}
+}
+
 func TestHandleNormalModeYYCopiesToClipboard(t *testing.T) {
 	var copied string
 	restore := helpers.SetClipboardWriterForTesting(func(text string) error {
@@ -1475,6 +1677,22 @@ func TestHandleNormalModePPasteReportsClipboardFailure(t *testing.T) {
 	}
 	if !strings.Contains(ed.Status, "clipboard paste failed") {
 		t.Fatalf("status = %q, want clipboard failure", ed.Status)
+	}
+}
+
+func TestHandleNormalModeSpaceTogglesCheckbox(t *testing.T) {
+	ed := &Editor{Text: "- [ ] task", Cursor: 4, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: " ", Rune: ' '}) {
+		t.Fatal("handleNormalMode(space) = false, want true")
+	}
+	if got := ed.Text; got != "- [x] task" {
+		t.Fatalf("text = %q, want checked task", got)
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: " ", Rune: ' '}) {
+		t.Fatal("second handleNormalMode(space) = false, want true")
+	}
+	if got := ed.Text; got != "- [ ] task" {
+		t.Fatalf("text = %q, want unchecked task", got)
 	}
 }
 

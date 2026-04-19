@@ -144,6 +144,16 @@ func vimDeleteLine(text string, offset int) (string, int) {
 	return updated, vimLineBoundaryOffset(updated, newOffset, false)
 }
 
+func vimDeleteToLineEnd(text string, offset int) (string, int) {
+	runes := []rune(text)
+	start := vimClampOffset(text, offset)
+	end := vimLineBoundaryOffset(text, offset, true)
+	if start >= len(runes) || start >= end {
+		return text, start
+	}
+	return string(append(runes[:start], runes[end:]...)), start
+}
+
 func vimOpenLineBelow(text string, offset int) (string, int) {
 	runes := []rune(text)
 	insertAt := vimLineBoundaryOffset(text, offset, true)
@@ -266,6 +276,12 @@ func vimYankBlock(text string, startOffset int, endOffset int) vimRegister {
 		Lines: blockLines,
 		Width: width,
 	}
+}
+
+func vimDeleteBlockRegister(text string, startOffset int, endOffset int) (string, int, vimRegister) {
+	reg := vimYankBlock(text, startOffset, endOffset)
+	updated, cursor := vimDeleteBlock(text, startOffset, endOffset)
+	return updated, cursor, reg
 }
 
 func vimPasteLine(text string, offset int, reg vimRegister) (string, int) {

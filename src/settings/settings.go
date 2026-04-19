@@ -227,6 +227,23 @@ func normalizeSettings(s *UserSettings) {
 	if s.NotesApp.UndoLevels <= 0 {
 		s.NotesApp.UndoLevels = 1000
 	}
+	if len(s.NotesApp.OpenNotePaths) > 0 {
+		normalized := make([]string, 0, len(s.NotesApp.OpenNotePaths))
+		seen := make(map[string]struct{}, len(s.NotesApp.OpenNotePaths))
+		for _, path := range s.NotesApp.OpenNotePaths {
+			path = normalizeNoteSessionPath(path)
+			if path == "" {
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			normalized = append(normalized, path)
+		}
+		s.NotesApp.OpenNotePaths = normalized
+	}
+	s.NotesApp.CurrentNotePath = normalizeNoteSessionPath(s.NotesApp.CurrentNotePath)
 	if s.NotesApp.TabSpaces == 4 && !s.NotesApp.VimMode && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
 	}
@@ -341,7 +358,7 @@ func SaveNotesSession(paths []string, currentPath string) {
 	normalized := make([]string, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
-		path = strings.TrimSpace(path)
+		path = normalizeNoteSessionPath(path)
 		if path == "" {
 			continue
 		}
@@ -351,12 +368,44 @@ func SaveNotesSession(paths []string, currentPath string) {
 		seen[path] = struct{}{}
 		normalized = append(normalized, path)
 	}
+	currentPath = normalizeNoteSessionPath(currentPath)
 	if slicesEqual(settingsInstance.NotesApp.OpenNotePaths, normalized) && settingsInstance.NotesApp.CurrentNotePath == currentPath {
 		return
 	}
 	settingsInstance.NotesApp.OpenNotePaths = normalized
 	settingsInstance.NotesApp.CurrentNotePath = currentPath
 	writeSettingsToDisk(false)
+}
+
+func normalizeNoteSessionPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		cleaned := filepath.ToSlash(filepath.Clean(path))
+		if cleaned == "." {
+			return ""
+		}
+		return cleaned
+	}
+
+	notesRoot := getFileName("notes")
+	if rel, err := filepath.Rel(notesRoot, path); err == nil && rel != "." && rel != "" && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+		return filepath.ToSlash(rel)
+	}
+
+	marker := "/" + filepath.ToSlash(filepath.Join(helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes")) + "/"
+	slashPath := filepath.ToSlash(filepath.Clean(path))
+	if idx := strings.Index(slashPath, marker); idx >= 0 {
+		rel := slashPath[idx+len(marker):]
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if rel != "." && rel != "" && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return rel
+		}
+	}
+
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 func slicesEqual(left []string, right []string) bool {

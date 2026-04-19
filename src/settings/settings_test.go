@@ -118,15 +118,40 @@ func TestSaveNotesSessionPersistsLocally(t *testing.T) {
 	t.Setenv("HOME", home)
 	settingsInstance = defaultSettings()
 	settingsInstance.GDrive.PendingSync = false
-	SaveNotesSession([]string{"/tmp/Note 1.md", "/tmp/Note 2.md", "/tmp/Note 1.md"}, "/tmp/Note 2.md")
+	root := getFileName("notes")
+	SaveNotesSession([]string{
+		filepath.Join(root, "Note 1.md"),
+		filepath.Join(root, "Projects", "Note 2.md"),
+		filepath.Join(root, "Note 1.md"),
+	}, filepath.Join(root, "Projects", "Note 2.md"))
 	if settingsInstance.GDrive.PendingSync {
 		t.Fatal("PendingSync = true, want false for note session persistence")
 	}
-	if got := settingsInstance.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "/tmp/Note 1.md" || got[1] != "/tmp/Note 2.md" {
+	if got := settingsInstance.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "Note 1.md" || got[1] != "Projects/Note 2.md" {
 		t.Fatalf("OpenNotePaths = %#v", got)
 	}
-	if got := settingsInstance.NotesApp.CurrentNotePath; got != "/tmp/Note 2.md" {
-		t.Fatalf("CurrentNotePath = %q, want /tmp/Note 2.md", got)
+	if got := settingsInstance.NotesApp.CurrentNotePath; got != "Projects/Note 2.md" {
+		t.Fatalf("CurrentNotePath = %q, want Projects/Note 2.md", got)
+	}
+}
+
+func TestNormalizeSettingsConvertsPortableAbsoluteNoteSessionPaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := defaultSettings()
+	s.NotesApp.OpenNotePaths = []string{
+		"/old-home/.config/koko-tools/notes/Note 1.md",
+		"/old-home/.config/koko-tools/notes/Projects/Note 2.md",
+	}
+	s.NotesApp.CurrentNotePath = "/old-home/.config/koko-tools/notes/Projects/Note 2.md"
+
+	normalizeSettings(s)
+
+	if got := s.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "Note 1.md" || got[1] != "Projects/Note 2.md" {
+		t.Fatalf("OpenNotePaths = %#v", got)
+	}
+	if got := s.NotesApp.CurrentNotePath; got != "Projects/Note 2.md" {
+		t.Fatalf("CurrentNotePath = %q, want Projects/Note 2.md", got)
 	}
 }
 
@@ -313,6 +338,11 @@ func TestRestoreDriveSnapshotUsesHook(t *testing.T) {
 	driveRestoreSnapshotFunc = func(snapshotID string) ([]byte, error) {
 		restored := defaultSettings()
 		restored.NotesApp.TabSpaces = 8
+		restored.NotesApp.OpenNotePaths = []string{
+			"/old-home/.config/koko-tools/notes/Note 1.md",
+			"/old-home/.config/koko-tools/notes/Projects/Plan.md",
+		}
+		restored.NotesApp.CurrentNotePath = "/old-home/.config/koko-tools/notes/Projects/Plan.md"
 		return json.Marshal(restored)
 	}
 
@@ -324,5 +354,11 @@ func TestRestoreDriveSnapshotUsesHook(t *testing.T) {
 	}
 	if got := settingsInstance.GDrive.SelectedSnapshotID; got != "snap-2" {
 		t.Fatalf("SelectedSnapshotID = %q, want snap-2", got)
+	}
+	if got := settingsInstance.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "Note 1.md" || got[1] != "Projects/Plan.md" {
+		t.Fatalf("OpenNotePaths = %#v", got)
+	}
+	if got := settingsInstance.NotesApp.CurrentNotePath; got != "Projects/Plan.md" {
+		t.Fatalf("CurrentNotePath = %q, want Projects/Plan.md", got)
 	}
 }

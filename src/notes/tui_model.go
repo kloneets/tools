@@ -365,7 +365,8 @@ func (w *Workspace) restoreOpenTabs(files []noteFile) bool {
 	}
 	session := settings.Inst().NotesApp
 	restored := false
-	for _, path := range session.OpenNotePaths {
+	for _, stored := range session.OpenNotePaths {
+		path := resolveSessionNotePath(stored)
 		if _, ok := available[path]; !ok {
 			continue
 		}
@@ -376,9 +377,10 @@ func (w *Workspace) restoreOpenTabs(files []noteFile) bool {
 	if !restored {
 		return false
 	}
-	if session.CurrentNotePath != "" {
+	currentPath := resolveSessionNotePath(session.CurrentNotePath)
+	if currentPath != "" {
 		for i, tab := range w.Tabs {
-			if tab != nil && tab.Path == session.CurrentNotePath {
+			if tab != nil && tab.Path == currentPath {
 				w.CurrentTab = i
 				break
 			}
@@ -386,6 +388,29 @@ func (w *Workspace) restoreOpenTabs(files []noteFile) bool {
 	}
 	w.persistSession()
 	return true
+}
+
+func resolveSessionNotePath(stored string) string {
+	stored = strings.TrimSpace(stored)
+	if stored == "" {
+		return ""
+	}
+	if !filepath.IsAbs(stored) {
+		return filepath.Join(notesDir(), filepath.FromSlash(stored))
+	}
+	if rel, err := filepath.Rel(notesDir(), stored); err == nil && rel != "." && rel != "" && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+		return filepath.Join(notesDir(), rel)
+	}
+	marker := "/" + filepath.ToSlash(filepath.Join(helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes")) + "/"
+	slashPath := filepath.ToSlash(filepath.Clean(stored))
+	if idx := strings.Index(slashPath, marker); idx >= 0 {
+		rel := slashPath[idx+len(marker):]
+		rel = filepath.Clean(filepath.FromSlash(rel))
+		if rel != "." && rel != "" && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.Join(notesDir(), rel)
+		}
+	}
+	return filepath.Clean(stored)
 }
 
 func currentEditorSnapshot(ed *Editor) editorSnapshot {
@@ -1035,12 +1060,15 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	case "enter":
 		clearAutoComplete(ed)
-		return insertRune(ed, '\n')
+		return insertNewline(ed)
 	case "tab":
 		if key.Shift {
 			return completeEditorPathReferenceBackward(w, ed)
 		}
 		if completeEditorPathReference(w, ed) {
+			return true
+		}
+		if indentListItem(ed) {
 			return true
 		}
 		for i := 0; i < settings.Inst().NotesApp.TabSpaces; i++ {
@@ -1102,6 +1130,143 @@ func insertRune(ed *Editor, r rune) bool {
 	ed.Cursor = idx + 1
 	ed.Dirty = true
 	return true
+}
+
+func insertNewline(ed *Editor) bool {
+	if deleteEmptyListMarker(ed) {
+		return true
+	}
+	rememberUndoState(ed)
+	runes := []rune(ed.Text)
+	idx := vimClampOffset(ed.Text, ed.Cursor)
+	insert := []rune("\n" + newlineContinuationPrefix(ed.Text, ed.Cursor))
+	runes = append(runes[:idx], append(insert, runes[idx:]...)...)
+	ed.Text = string(runes)
+	ed.Cursor = idx + len(insert)
+	ed.Dirty = true
+	return true
+}
+
+func indentListItem(ed *Editor) bool {
+	if ed == nil {
+		return false
+	}
+	lineStart, lineEnd, line := currentEditorLine(ed)
+	prefix, content, ok := listPrefixParts(line)
+	if !ok || strings.TrimSpace(prefix) == "" {
+		return false
+	}
+	rememberUndoState(ed)
+	indent := strings.Repeat(" ", settings.Inst().NotesApp.TabSpaces)
+	replacement := indent + prefix + content
+	runes := []rune(ed.Text)
+	updated := string(runes[:lineStart]) + replacement + string(runes[lineEnd:])
+	cursorShift := len([]rune(indent))
+	ed.Text = updated
+	ed.Cursor += cursorShift
+	ed.Dirty = true
+	return true
+}
+
+func deleteEmptyListMarker(ed *Editor) bool {
+	if ed == nil {
+		return false
+	}
+	lineStart, lineEnd, line := currentEditorLine(ed)
+	_, content, ok := listPrefixParts(line)
+	if !ok || strings.TrimSpace(content) != "" {
+		return false
+	}
+	rememberUndoState(ed)
+	runes := []rune(ed.Text)
+	updated := string(runes[:lineStart]) + string(runes[lineEnd:])
+	ed.Text = updated
+	ed.Cursor = lineStart
+	ed.Dirty = true
+	return true
+}
+
+func currentEditorLine(ed *Editor) (int, int, string) {
+	lineStart := vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
+	lineEnd := vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
+	runes := []rune(ed.Text)
+	if lineStart > len(runes) {
+		lineStart = len(runes)
+	}
+	if lineEnd > len(runes) {
+		lineEnd = len(runes)
+	}
+	return lineStart, lineEnd, string(runes[lineStart:lineEnd])
+}
+
+func listPrefixParts(line string) (prefix string, content string, ok bool) {
+	indentLen := len(line) - len(strings.TrimLeft(line, " \t"))
+	indent := line[:indentLen]
+	trimmed := line[indentLen:]
+	switch {
+	case strings.HasPrefix(trimmed, "- [ ] "):
+		return indent + "- [ ] ", trimmed[len("- [ ] "):], true
+	case strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
+		return indent + trimmed[:len("- [x] ")], trimmed[len("- [x] "):], true
+	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), strings.HasPrefix(trimmed, "+ "):
+		return indent + trimmed[:2], trimmed[2:], true
+	default:
+		i := 0
+		for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+			i++
+		}
+		if i > 0 && i+1 < len(trimmed) && trimmed[i] == '.' && trimmed[i+1] == ' ' {
+			return indent + trimmed[:i+2], trimmed[i+2:], true
+		}
+		return "", "", false
+	}
+}
+
+func newlineContinuationPrefix(text string, cursor int) string {
+	lineStart := vimLineBoundaryOffset(text, cursor, false)
+	lineEnd := vimLineBoundaryOffset(text, cursor, true)
+	runes := []rune(text)
+	if lineStart > len(runes) {
+		return ""
+	}
+	if lineEnd > len(runes) {
+		lineEnd = len(runes)
+	}
+	line := string(runes[lineStart:lineEnd])
+	indentLen := len(line) - len(strings.TrimLeft(line, " \t"))
+	indent := line[:indentLen]
+	trimmed := strings.TrimLeft(line, " \t")
+
+	switch {
+	case strings.HasPrefix(trimmed, "- [ ] "), strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
+		return indent + "- [ ] "
+	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), strings.HasPrefix(trimmed, "+ "):
+		return indent + trimmed[:2]
+	default:
+		number, suffix, ok := orderedListPrefix(trimmed)
+		if ok {
+			return indent + strconv.Itoa(number) + suffix
+		}
+		return ""
+	}
+}
+
+func orderedListPrefix(trimmed string) (int, string, bool) {
+	i := 0
+	for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+		i++
+	}
+	if i == 0 || i+1 >= len(trimmed) {
+		return 0, "", false
+	}
+	if trimmed[i] != '.' || trimmed[i+1] != ' ' {
+		return 0, "", false
+	}
+	number, err := strconv.Atoi(trimmed[:i])
+	if err != nil || number <= 0 {
+		return 0, "", false
+	}
+	return number + 1, ". ", true
 }
 
 func clearAutoComplete(ed *Editor) {
@@ -1167,7 +1332,10 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Mode = ModeInsert
 		return true
 	case "a":
-		ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
+		runes := []rune(ed.Text)
+		if ed.Cursor < len(runes) && runes[ed.Cursor] != '\n' {
+			ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
+		}
 		ed.Mode = ModeInsert
 		return true
 	case "o":
@@ -1222,11 +1390,15 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.LastXText = ed.Text
 		ed.LastXCursor = ed.Cursor
 		ed.LastXArmed = true
+		ed.Register = vimYankChar(ed.Text, ed.Cursor, ed.Cursor)
+		updateClipboardForRegister(ed, "deleted char")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		return true
 	case "delete":
+		ed.Register = vimYankChar(ed.Text, ed.Cursor, ed.Cursor)
+		updateClipboardForRegister(ed, "deleted char")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
@@ -1254,6 +1426,8 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	case "u":
 		return applyUndo(ed)
+	case " ":
+		return toggleCheckboxAtCursor(ed)
 	case "tab":
 		w.FocusSidebar = true
 		return true
@@ -1266,6 +1440,8 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	case "d", "y", "c":
 		if ed.PendingOp == key.Name {
 			if key.Name == "d" || key.Name == "c" {
+				ed.Register = vimYankLine(ed.Text, ed.Cursor, ed.Cursor)
+				updateClipboardForRegister(ed, "deleted line")
 				rememberUndoState(ed)
 				ed.Text, ed.Cursor = vimDeleteLine(ed.Text, ed.Cursor)
 				ed.Dirty = true
@@ -1283,7 +1459,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.PendingOp = key.Name
 		return true
 	case "p":
-		reg, err := clipboardPasteRegister()
+		reg, err := pasteRegister(ed)
 		if err != nil {
 			ed.Status = "clipboard paste failed: " + err.Error()
 			return true
@@ -1312,6 +1488,24 @@ func normalizePasteRegister(reg vimRegister) vimRegister {
 		}
 	}
 	return reg
+}
+
+func pasteRegister(ed *Editor) (vimRegister, error) {
+	if ed != nil && registerHasContent(ed.Register) {
+		return normalizePasteRegister(ed.Register), nil
+	}
+	return clipboardPasteRegister()
+}
+
+func registerHasContent(reg vimRegister) bool {
+	switch reg.Kind {
+	case vimRegisterBlock:
+		return len(reg.Lines) > 0
+	case vimRegisterLine, vimRegisterChar:
+		return reg.Text != ""
+	default:
+		return false
+	}
 }
 
 func handleReplacePending(ed *Editor, key Key) bool {
@@ -1345,6 +1539,8 @@ func consumeXMotionOverride(ed *Editor, key Key) bool {
 		if end <= start {
 			return false
 		}
+		ed.Register = vimYankChar(ed.LastXText, start, end-1)
+		updateClipboardForRegister(ed, "deleted word")
 		ed.Text, ed.Cursor = vimDeleteRange(ed.LastXText, start, end-1)
 		ed.Dirty = true
 		return true
@@ -1354,6 +1550,8 @@ func consumeXMotionOverride(ed *Editor, key Key) bool {
 		if end <= start {
 			return false
 		}
+		ed.Register = vimYankChar(ed.LastXText, start, end-1)
+		updateClipboardForRegister(ed, "deleted to end of line")
 		ed.Text, ed.Cursor = vimDeleteRange(ed.LastXText, start, end-1)
 		ed.Dirty = true
 		return true
@@ -1438,8 +1636,25 @@ func handleVisualMode(ed *Editor, key Key) bool {
 
 func applyPendingOperator(ed *Editor, key string) bool {
 	if ed.PendingOp == "d" && key == "w" {
+		ed.Register = vimYankWord(ed.Text, ed.Cursor)
+		updateClipboardForRegister(ed, "deleted word")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteWord(ed.Text, ed.Cursor)
+		ed.Dirty = true
+		ed.PendingOp = ""
+		return true
+	}
+	if ed.PendingOp == "d" && (key == "$" || key == "end") {
+		start := ed.Cursor
+		end := vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
+		if end <= start {
+			ed.PendingOp = ""
+			return true
+		}
+		ed.Register = vimYankChar(ed.Text, start, end-1)
+		updateClipboardForRegister(ed, "deleted to end of line")
+		rememberUndoState(ed)
+		ed.Text, ed.Cursor = vimDeleteToLineEnd(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		ed.PendingOp = ""
 		return true
@@ -1451,6 +1666,8 @@ func applyPendingOperator(ed *Editor, key string) bool {
 		end = moveWordForward(ed.Text, ed.Cursor)
 	case "b":
 		end = moveWordBackward(ed.Text, ed.Cursor)
+	case "$", "end":
+		end = vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
 	default:
 		ed.PendingOp = ""
 		return false
@@ -1470,6 +1687,7 @@ func applyPendingOperator(ed *Editor, key string) bool {
 	}
 	deleted := string(runes[start:end])
 	ed.Register = vimRegister{Kind: vimRegisterChar, Text: deleted}
+	updateClipboardForRegister(ed, "deleted text")
 	rememberUndoState(ed)
 	ed.Text = string(append(runes[:start], runes[end:]...))
 	ed.Cursor = start
@@ -1479,6 +1697,40 @@ func applyPendingOperator(ed *Editor, key string) bool {
 	if mode == "c" {
 		ed.Mode = ModeInsert
 	}
+	return true
+}
+
+func toggleCheckboxAtCursor(ed *Editor) bool {
+	if ed == nil {
+		return false
+	}
+	lineStart := vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
+	lineEnd := vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
+	runes := []rune(ed.Text)
+	if lineStart > len(runes) {
+		return false
+	}
+	if lineEnd > len(runes) {
+		lineEnd = len(runes)
+	}
+	line := string(runes[lineStart:lineEnd])
+	idx := strings.Index(line, "[ ]")
+	if idx < 0 {
+		idx = strings.Index(strings.ToLower(line), "[x]")
+	}
+	if idx < 0 {
+		return false
+	}
+	absStart := lineStart + idx
+	absEnd := absStart + 3
+	if ed.Cursor < absStart || ed.Cursor > absEnd {
+		return false
+	}
+	rememberUndoState(ed)
+	updated, _, _ := toggleChecklist(ed.Text, ed.Cursor, ed.Cursor)
+	ed.Text = updated
+	ed.Dirty = true
+	ed.Status = "checkbox toggled"
 	return true
 }
 
@@ -1609,12 +1861,19 @@ func deleteVisualSelection(ed *Editor) {
 	rememberUndoState(ed)
 	switch ed.SelectionMode {
 	case vimSelectionChar:
+		ed.Register = vimYankChar(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+		updateClipboardForRegister(ed, "deleted selection")
 		ed.Text, ed.Cursor = vimDeleteRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 	case vimSelectionLine:
+		ed.Register = vimYankLine(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+		updateClipboardForRegister(ed, "deleted lines")
 		start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		ed.Text, ed.Cursor = vimDeleteRange(ed.Text, start, max(start, end-1))
 	case vimSelectionBlock:
-		ed.Text, ed.Cursor = vimDeleteBlock(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+		var reg vimRegister
+		ed.Text, ed.Cursor, reg = vimDeleteBlockRegister(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+		ed.Register = reg
+		updateClipboardForRegister(ed, "deleted block")
 	default:
 		return
 	}

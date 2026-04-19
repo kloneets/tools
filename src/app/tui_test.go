@@ -537,6 +537,18 @@ func TestShutdownAndStopDoesNotSyncOnClose(t *testing.T) {
 	}
 }
 
+func TestStopTUIClearsShutdownState(t *testing.T) {
+	app := &terminalApp{
+		shuttingDown: true,
+		pagesRoot:    tview.NewPages(),
+	}
+	app.pagesRoot.AddPage("quit", tview.NewModal(), true, true)
+	app.stopTUI()
+	if app.shuttingDown {
+		t.Fatal("shuttingDown = true, want false after stopTUI")
+	}
+}
+
 func TestRequestShutdownShowsModalForUnsyncedState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
