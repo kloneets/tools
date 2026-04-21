@@ -354,6 +354,19 @@ func vimPasteChar(text string, offset int, reg vimRegister) (string, int) {
 	return string(updated), offset + len(insert)
 }
 
+func vimPasteCharAfter(text string, offset int, reg vimRegister) (string, int) {
+	if reg.Kind != vimRegisterChar || reg.Text == "" {
+		return text, offset
+	}
+	runes := []rune(text)
+	offset = vimClampOffset(text, offset)
+	insertAt := offset
+	if insertAt < len(runes) && runes[insertAt] != '\n' {
+		insertAt++
+	}
+	return vimPasteChar(text, insertAt, reg)
+}
+
 func vimDeleteRange(text string, startOffset int, endOffset int) (string, int) {
 	start := startOffset
 	end := endOffset
@@ -436,8 +449,21 @@ func vimWordRange(text string, offset int) (int, int) {
 	return start, end
 }
 
+func vimStrictWordRange(text string, offset int) (int, int) {
+	runes := []rune(text)
+	start := vimClampOffset(text, offset)
+	for start < len(runes) && !vimIsWordRune(runes[start]) {
+		start++
+	}
+	end := start
+	for end < len(runes) && vimIsWordRune(runes[end]) {
+		end++
+	}
+	return start, end
+}
+
 func vimYankWord(text string, offset int) vimRegister {
-	start, end := vimWordRange(text, offset)
+	start, end := vimStrictWordRange(text, offset)
 	if start == end {
 		return vimRegister{}
 	}

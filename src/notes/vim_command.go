@@ -21,6 +21,8 @@ const (
 	vimCommandRedo      vimCommandKind = "redo"
 	vimCommandPreview   vimCommandKind = "preview"
 	vimCommandSidebar   vimCommandKind = "sidebar"
+	vimCommandQuit      vimCommandKind = "quit"
+	vimCommandSequence  vimCommandKind = "sequence"
 )
 
 type vimCommand struct {
@@ -30,6 +32,8 @@ type vimCommand struct {
 	Global      bool
 	CurrentLine bool
 	Name        string
+	Commands    []vimCommand
+	Force       bool
 }
 
 func parseVimCommand(raw string) (vimCommand, error) {
@@ -49,6 +53,8 @@ func parseVimCommand(raw string) (vimCommand, error) {
 	switch cmd {
 	case "w", "write", "save":
 		return vimCommand{Kind: vimCommandSave}, nil
+	case "q", "quit":
+		return vimCommand{Kind: vimCommandQuit}, nil
 	case "ol":
 		return vimCommand{Kind: vimCommandOpenLinks}, nil
 	case "undo":
@@ -59,6 +65,10 @@ func parseVimCommand(raw string) (vimCommand, error) {
 		return vimCommand{Kind: vimCommandPreview}, nil
 	case "sidebar", "sb":
 		return vimCommand{Kind: vimCommandSidebar}, nil
+	}
+
+	if chained, ok := parseOneCharCommandChain(cmd); ok {
+		return chained, nil
 	}
 
 	if strings.HasPrefix(cmd, "search ") {
@@ -105,6 +115,27 @@ func parseVimCommand(raw string) (vimCommand, error) {
 	}
 
 	return vimCommand{}, fmt.Errorf("unknown command: %s", cmd)
+}
+
+func parseOneCharCommandChain(cmd string) (vimCommand, bool) {
+	runes := []rune(cmd)
+	if len(runes) < 2 {
+		return vimCommand{}, false
+	}
+	commands := make([]vimCommand, 0, len(runes))
+	seenSave := false
+	for _, r := range runes {
+		switch r {
+		case 'w':
+			commands = append(commands, vimCommand{Kind: vimCommandSave})
+			seenSave = true
+		case 'q':
+			commands = append(commands, vimCommand{Kind: vimCommandQuit, Force: seenSave})
+		default:
+			return vimCommand{}, false
+		}
+	}
+	return vimCommand{Kind: vimCommandSequence, Commands: commands}, true
 }
 
 func parseSubstituteCommand(cmd string) (string, string, bool, bool, bool) {
@@ -254,6 +285,10 @@ func collectSupportedLinks(text string) []string {
 		add(item.uri)
 	}
 	return links
+}
+
+func CollectSupportedLinks(text string) []string {
+	return collectSupportedLinks(text)
 }
 
 func isSupportedExternalURI(raw string) bool {

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -90,6 +91,24 @@ type terminalApp struct {
 	notesMouseMoved    bool
 	notesMouseStartRow int
 	notesMouseStartCol int
+	inputSeqMu         sync.Mutex
+	inputSeq           string
+	inputSeqTimer      *time.Timer
+}
+
+type appTab struct {
+	label string
+	view  view
+	key   string
+}
+
+var appTabs = []appTab{
+	{"Notes", viewNotes, "1"},
+	{"Files", viewFiles, "2"},
+	{"Pages", viewPages, "3"},
+	{"Password", viewPassword, "4"},
+	{"Sync", viewSync, "5"},
+	{"Settings", viewSettings, "6"},
 }
 
 func InitApp() {
@@ -118,6 +137,7 @@ func newTerminalApp() (*terminalApp, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyGlobalBackgroundStyle()
 	app := &terminalApp{
 		view:        viewNotes,
 		notes:       noteWS,
@@ -132,6 +152,7 @@ func newTerminalApp() (*terminalApp, error) {
 }
 
 func (a *terminalApp) initWidgets() {
+	applyGlobalBackgroundStyle()
 	a.header = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 	a.header.SetBorder(true).SetTitle("Koko Tools")
 	a.help = tview.NewTextView().SetWrap(false)
@@ -255,6 +276,7 @@ func (a *terminalApp) initWidgets() {
 	a.root.AddItem(a.header, 3, 0, false)
 	a.root.AddItem(a.pagesRoot, 0, 1, false)
 	a.root.AddItem(a.statusBar, 3, 0, false)
+	a.applyWidgetBackgroundStyle()
 }
 
 func (a *terminalApp) Run(ctx context.Context) error {
@@ -268,6 +290,8 @@ func (a *terminalApp) Run(ctx context.Context) error {
 	app.SetInputCapture(a.captureInput)
 	app.SetMouseCapture(a.captureMouse)
 	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
+		applyGlobalBackgroundStyle()
+		screen.SetStyle(tcell.StyleDefault.Background(appBackgroundColor()).Foreground(tview.Styles.PrimaryTextColor))
 		w, h := screen.Size()
 		if w != a.width || h != a.height {
 			a.width, a.height = w, h
@@ -281,6 +305,90 @@ func (a *terminalApp) Run(ctx context.Context) error {
 	go a.watchStatus(ctx)
 	a.refresh()
 	return app.Run()
+}
+
+func transparentBackgroundEnabled() bool {
+	cfg := settings.Inst()
+	return cfg != nil && cfg.UI != nil && cfg.UI.TransparentBackground
+}
+
+func appBackgroundColor() tcell.Color {
+	if transparentBackgroundEnabled() {
+		return tcell.ColorDefault
+	}
+	return themeColor(currentTheme().Background)
+}
+
+func applyGlobalBackgroundStyle() {
+	theme := currentTheme()
+	background := appBackgroundColor()
+	contrastBackground := themeColor(theme.Panel)
+	moreContrastBackground := themeColor(theme.SelectionBG)
+	if transparentBackgroundEnabled() {
+		contrastBackground = tcell.ColorDefault
+		moreContrastBackground = tcell.ColorDefault
+	}
+	tview.Styles.PrimitiveBackgroundColor = background
+	tview.Styles.ContrastBackgroundColor = contrastBackground
+	tview.Styles.MoreContrastBackgroundColor = moreContrastBackground
+	tview.Styles.PrimaryTextColor = themeColor(theme.Primary)
+	tview.Styles.SecondaryTextColor = themeColor(theme.Secondary)
+	tview.Styles.TertiaryTextColor = themeColor(theme.Dim)
+	tview.Styles.BorderColor = themeColor(theme.Border)
+	tview.Styles.TitleColor = themeColor(theme.Title)
+	tview.Styles.GraphicsColor = themeColor(theme.Border)
+	tview.Styles.ContrastSecondaryTextColor = themeColor(theme.SelectionFG)
+}
+
+func (a *terminalApp) applyWidgetBackgroundStyle() {
+	if a == nil {
+		return
+	}
+	theme := currentTheme()
+	background := appBackgroundColor()
+	for _, view := range []*tview.TextView{a.header, a.help, a.statusBar, a.sidebar, a.editor, a.preview, a.commandBar, a.single, a.helpOverlay} {
+		if view != nil {
+			view.SetBackgroundColor(background)
+			view.SetTextColor(themeColor(theme.Primary))
+			view.SetBorderColor(themeColor(theme.Border))
+			view.SetTitleColor(themeColor(theme.Title))
+		}
+	}
+	for _, box := range []*tview.Box{boxFromFlex(a.body), boxFromFlex(a.root), boxFromPages(a.pagesRoot)} {
+		if box != nil {
+			box.SetBackgroundColor(background)
+		}
+	}
+	for _, modal := range []*tview.Modal{a.quitModal, a.discardFilesModal, a.deleteNoteModal, a.openLinksModal} {
+		if modal != nil {
+			modal.SetBackgroundColor(background)
+			modal.SetTextColor(themeColor(theme.Primary))
+			modal.SetButtonTextColor(themeColor(theme.Primary))
+			modal.SetButtonBackgroundColor(themeColor(theme.SelectionBG))
+		}
+	}
+	if a.statusBar != nil {
+		a.statusBar.SetBorderColor(themeColor(theme.StatusAccent))
+		a.statusBar.SetTitleColor(themeColor(theme.StatusAccent))
+	}
+	if a.commandBar != nil {
+		a.commandBar.SetBorderColor(themeColor(theme.CommandAccent))
+		a.commandBar.SetTitleColor(themeColor(theme.CommandAccent))
+	}
+}
+
+func boxFromFlex(f *tview.Flex) *tview.Box {
+	if f == nil {
+		return nil
+	}
+	return f.Box
+}
+
+func boxFromPages(p *tview.Pages) *tview.Box {
+	if p == nil {
+		return nil
+	}
+	return p.Box
 }
 
 func (a *terminalApp) runLineMode(ctx context.Context) error {
@@ -299,7 +407,7 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 			return nil
 		case "help":
 			fmt.Println("views: notes, files, pages, password, sync, settings")
-			fmt.Println("save: :w")
+			fmt.Println("save: :w, quit: :q, save and quit: :wq")
 		case "notes":
 			a.view = viewNotes
 		case "files":
@@ -314,6 +422,10 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 			a.view = viewSettings
 		case ":w":
 			_ = a.notes.SaveCurrent()
+		case ":wq":
+			_ = a.notes.SaveCurrent()
+			a.stopTUI()
+			return nil
 		case "save":
 			_ = a.saveLocalState()
 		default:
@@ -423,6 +535,9 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 		}
 		return nil
 	}
+	if a.consumeInputSequenceShortcut(event) {
+		return nil
+	}
 	if key, ok := mapTCellKey(event); ok {
 		a.handleGlobalKey(key)
 		a.refresh()
@@ -432,10 +547,26 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 }
 
 func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
-	if event == nil || a == nil || a.view != viewNotes || a.notes == nil || a.showHelp || a.shuttingDown {
+	if event == nil || a == nil || a.shuttingDown {
 		return event, action
 	}
 	x, y := event.Position()
+	if a.header != nil {
+		hx, hy, hw, hh := a.header.GetInnerRect()
+		if pointInRect(x, y, hx, hy, hw, hh) {
+			if action == tview.MouseLeftClick || action == tview.MouseLeftDown {
+				if target, ok := a.appTabAtColumn(x - hx); ok {
+					a.switchAppTab(target)
+					a.refresh()
+					return nil, action
+				}
+			}
+			return event, action
+		}
+	}
+	if a.view != viewNotes || a.notes == nil || a.showHelp {
+		return event, action
+	}
 	if settings.Inst().NotesApp.SidebarVisible && a.sidebar != nil {
 		sx, sy, sw, sh := a.sidebar.GetInnerRect()
 		if pointInRect(x, y, sx, sy, sw, sh) {
@@ -460,6 +591,17 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	}
 	row := y - ey - 1
 	col := x - ex
+	if row == -1 {
+		if action == tview.MouseLeftClick || action == tview.MouseLeftDown {
+			if a.notes.SwitchToTabAtColumn(col) {
+				a.notesMouseDragging = false
+				a.notesMouseMoved = false
+				a.refresh()
+				return nil, action
+			}
+		}
+		return event, action
+	}
 	if row < 0 {
 		row = 0
 	}
@@ -499,8 +641,162 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	return nil, action
 }
 
+var inputSequenceShortcuts = map[string]notes.Key{
+	"\x1b[9;5u":    {Name: "tab", Ctrl: true},
+	"\x1b[27;5;9~": {Name: "tab", Ctrl: true},
+	"\x1b[1;5I":    {Name: "tab", Ctrl: true},
+}
+
+func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
+	if a == nil || event == nil {
+		return false
+	}
+	if event.Key() == tcell.KeyEsc && event.Modifiers() == 0 {
+		a.startInputSequence()
+		return true
+	}
+	token, ok := inputSequenceToken(event)
+	if !ok {
+		return a.flushInputSequence()
+	}
+	a.inputSeqMu.Lock()
+	if a.inputSeq == "" {
+		a.inputSeqMu.Unlock()
+		return false
+	}
+	candidate := a.inputSeq + token
+	if key, ok := inputSequenceShortcuts[candidate]; ok {
+		a.clearInputSequenceLocked()
+		a.inputSeqMu.Unlock()
+		a.handleGlobalKey(key)
+		a.refresh()
+		return true
+	}
+	if inputSequenceHasPrefix(candidate) {
+		a.inputSeq = candidate
+		a.resetInputSequenceTimerLocked()
+		a.inputSeqMu.Unlock()
+		return true
+	}
+	a.clearInputSequenceLocked()
+	a.inputSeqMu.Unlock()
+	a.handleGlobalKey(notes.Key{Name: "esc"})
+	a.refresh()
+	return false
+}
+
+func inputSequenceToken(event *tcell.EventKey) (string, bool) {
+	if event == nil {
+		return "", false
+	}
+	if event.Key() == tcell.KeyRune {
+		return string(event.Rune()), true
+	}
+	if event.Key() == tcell.KeyTab {
+		return "\t", true
+	}
+	return "", false
+}
+
+func inputSequenceHasPrefix(seq string) bool {
+	for shortcut := range inputSequenceShortcuts {
+		if strings.HasPrefix(shortcut, seq) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *terminalApp) startInputSequence() {
+	a.inputSeqMu.Lock()
+	a.inputSeq = "\x1b"
+	a.resetInputSequenceTimerLocked()
+	a.inputSeqMu.Unlock()
+}
+
+func (a *terminalApp) resetInputSequenceTimerLocked() {
+	if a.inputSeqTimer != nil {
+		a.inputSeqTimer.Stop()
+	}
+	a.inputSeqTimer = time.AfterFunc(40*time.Millisecond, func() {
+		a.flushInputSequenceAsync()
+	})
+}
+
+func (a *terminalApp) clearInputSequenceLocked() {
+	if a.inputSeqTimer != nil {
+		a.inputSeqTimer.Stop()
+		a.inputSeqTimer = nil
+	}
+	a.inputSeq = ""
+}
+
+func (a *terminalApp) flushInputSequence() bool {
+	a.inputSeqMu.Lock()
+	if a.inputSeq == "" {
+		a.inputSeqMu.Unlock()
+		return false
+	}
+	a.clearInputSequenceLocked()
+	a.inputSeqMu.Unlock()
+	a.handleGlobalKey(notes.Key{Name: "esc"})
+	a.refresh()
+	return true
+}
+
+func (a *terminalApp) flushInputSequenceAsync() {
+	run := func() {
+		_ = a.flushInputSequence()
+	}
+	if a.tui != nil {
+		a.tui.QueueUpdateDraw(run)
+		return
+	}
+	run()
+}
+
 func pointInRect(x int, y int, rx int, ry int, width int, height int) bool {
 	return x >= rx && x < rx+width && y >= ry && y < ry+height
+}
+
+func appTabViewForKey(key string) (view, bool) {
+	for _, tab := range appTabs {
+		if tab.key == key {
+			return tab.view, true
+		}
+	}
+	return viewNotes, false
+}
+
+func (a *terminalApp) switchAppTab(target view) {
+	a.view = target
+	a.tabSelect = false
+}
+
+func (a *terminalApp) appTabAtColumn(col int) (view, bool) {
+	if col < 0 {
+		return viewNotes, false
+	}
+	pos := 0
+	for i, tab := range appTabs {
+		labelName := tab.label
+		if a != nil && a.viewDirty(tab.view) {
+			labelName += "*"
+		}
+		label := fmt.Sprintf(" %s:%s ", tab.key, labelName)
+		next := pos + len([]rune(label))
+		if col >= pos && col < next {
+			return tab.view, true
+		}
+		pos = next
+		if i < len(appTabs)-1 {
+			if col == pos {
+				return viewNotes, false
+			}
+			pos++
+		}
+	}
+	return viewNotes, false
 }
 
 func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
@@ -514,10 +810,16 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 	case tcell.KeyEnter:
 		return notes.Key{Name: "enter"}, true
 	case tcell.KeyTab:
+		if event.Modifiers()&tcell.ModCtrl != 0 {
+			return notes.Key{Name: "tab", Ctrl: true}, true
+		}
 		return notes.Key{Name: "tab"}, true
 	case tcell.KeyBacktab:
 		return notes.Key{Shift: true, Name: "tab"}, true
 	case tcell.KeyEsc:
+		if event.Modifiers()&tcell.ModCtrl != 0 {
+			return notes.Key{Name: "3", Ctrl: true}, true
+		}
 		return notes.Key{Name: "esc"}, true
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		return notes.Key{Name: "backspace"}, true
@@ -565,6 +867,14 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 		return notes.Key{Name: "a", Ctrl: true}, true
 	case tcell.KeyCtrlV:
 		return notes.Key{Name: "v", Ctrl: true}, true
+	case tcell.KeyCtrlSpace:
+		return notes.Key{Name: "2", Ctrl: true}, true
+	case tcell.KeyCtrlBackslash:
+		return notes.Key{Name: "4", Ctrl: true}, true
+	case tcell.KeyCtrlRightSq:
+		return notes.Key{Name: "5", Ctrl: true}, true
+	case tcell.KeyCtrlCarat:
+		return notes.Key{Name: "6", Ctrl: true}, true
 	default:
 		return notes.Key{}, false
 	}
@@ -584,10 +894,22 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 	}
 	if key.Ctrl {
 		switch key.Name {
+		case "tab":
+			a.switchAppTab(a.nextView())
+			return true
 		case "t":
 			a.tabSelect = !a.tabSelect
 			return true
+		case "1", "2", "3", "4", "5", "6":
+			if target, ok := appTabViewForKey(key.Name); ok {
+				a.switchAppTab(target)
+				return true
+			}
 		}
+	}
+	if !key.Ctrl && !key.Shift && !key.Meta && !key.Alt && key.Name == "tab" && a.wantsPlainTabAppCycle() {
+		a.switchAppTab(a.nextView())
+		return true
 	}
 	if !key.Ctrl && key.Name == "?" && a.wantsHelpToggle() {
 		a.showHelp = !a.showHelp
@@ -612,28 +934,22 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 	if a.tabSelect && !key.Meta && !key.Ctrl {
 		switch key.Name {
 		case "1":
-			a.view = viewNotes
-			a.tabSelect = false
+			a.switchAppTab(viewNotes)
 			return true
 		case "2":
-			a.view = viewFiles
-			a.tabSelect = false
+			a.switchAppTab(viewFiles)
 			return true
 		case "3":
-			a.view = viewPages
-			a.tabSelect = false
+			a.switchAppTab(viewPages)
 			return true
 		case "4":
-			a.view = viewPassword
-			a.tabSelect = false
+			a.switchAppTab(viewPassword)
 			return true
 		case "5":
-			a.view = viewSync
-			a.tabSelect = false
+			a.switchAppTab(viewSync)
 			return true
 		case "6":
-			a.view = viewSettings
-			a.tabSelect = false
+			a.switchAppTab(viewSettings)
 			return true
 		case "left":
 			a.view = a.prevView()
@@ -653,6 +969,7 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 	case viewNotes:
 		handled := a.notes.HandleKey(key)
 		a.consumePendingNoteActions()
+		a.scheduleYankHighlightClear()
 		return handled
 	case viewFiles:
 		if !key.Ctrl && key.Name == "D" && a.notes != nil {
@@ -682,6 +999,18 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 	}
 }
 
+func (a *terminalApp) scheduleYankHighlightClear() {
+	if a == nil || a.notes == nil || a.tui == nil || !a.notes.HasActiveYankHighlight() {
+		return
+	}
+	go func() {
+		time.Sleep(notes.YankHighlightDuration() + 20*time.Millisecond)
+		a.tui.QueueUpdateDraw(func() {
+			a.refresh()
+		})
+	}()
+}
+
 func (a *terminalApp) consumePendingNoteActions() {
 	if a == nil || a.notes == nil {
 		return
@@ -690,6 +1019,14 @@ func (a *terminalApp) consumePendingNoteActions() {
 		a.deleteNotePath = path
 		a.deleteNoteLabel = label
 		a.showDeleteNoteModal()
+		return
+	}
+	if quit, force := a.notes.TakePendingQuit(); quit {
+		if force {
+			a.stopTUI()
+		} else {
+			a.requestShutdown()
+		}
 		return
 	}
 	links := a.notes.TakePendingOpenLinks()
@@ -757,6 +1094,27 @@ func (a *terminalApp) prevView() view {
 }
 
 func (a *terminalApp) wantsQuitOnQ() bool {
+	switch a.view {
+	case viewNotes:
+		return a.notes == nil || !a.notes.IsEditableContext()
+	case viewFiles:
+		return a.notes == nil || !a.notes.IsFilesEditableContext()
+	case viewPages:
+		return a.pages == nil || !a.pages.IsEditing()
+	case viewSettings:
+		return !a.settingsEditMode
+	default:
+		return true
+	}
+}
+
+func (a *terminalApp) wantsPlainTabAppCycle() bool {
+	if a == nil {
+		return false
+	}
+	if a.tabSelect {
+		return true
+	}
 	switch a.view {
 	case viewNotes:
 		return a.notes == nil || !a.notes.IsEditableContext()
@@ -1169,6 +1527,24 @@ func (a *terminalApp) syncItems() []actionItem {
 func (a *terminalApp) settingsItems() []actionItem {
 	cfg := settings.Inst()
 	return []actionItem{
+		{Label: fmt.Sprintf("theme: %s", settings.CurrentTheme()), Apply: func() {
+			if cfg.UI == nil {
+				cfg.UI = &settings.UISettings{}
+			}
+			cfg.UI.Theme = settings.NextTheme(settings.CurrentTheme())
+			applyGlobalBackgroundStyle()
+			a.applyWidgetBackgroundStyle()
+			a.settingsDirty = true
+		}},
+		{Label: fmt.Sprintf("transparent background: %t", cfg.UI != nil && cfg.UI.TransparentBackground), Apply: func() {
+			if cfg.UI == nil {
+				cfg.UI = &settings.UISettings{}
+			}
+			cfg.UI.TransparentBackground = !cfg.UI.TransparentBackground
+			applyGlobalBackgroundStyle()
+			a.applyWidgetBackgroundStyle()
+			a.settingsDirty = true
+		}},
 		{Label: fmt.Sprintf("vim mode: %t", cfg.NotesApp.VimMode), Apply: func() {
 			cfg.NotesApp.VimMode = !cfg.NotesApp.VimMode
 			a.settingsDirty = true
@@ -1188,11 +1564,13 @@ func (a *terminalApp) settingsItems() []actionItem {
 }
 
 func (a *terminalApp) refresh() {
+	applyGlobalBackgroundStyle()
+	a.applyWidgetBackgroundStyle()
 	if a.header != nil {
 		if a.tabSelect {
-			a.header.SetBorderColor(tcell.ColorYellow)
+			a.header.SetBorderColor(themeColor(currentTheme().StatusAccent))
 		} else {
-			a.header.SetBorderColor(tcell.ColorWhite)
+			a.header.SetBorderColor(themeColor(currentTheme().Border))
 		}
 		a.header.SetText(a.renderTabBar())
 	}
@@ -1264,34 +1642,22 @@ func (a *terminalApp) refresh() {
 }
 
 func (a *terminalApp) renderTabBar() string {
-	tabs := []struct {
-		label string
-		view  view
-		key   string
-	}{
-		{"Notes", viewNotes, "1"},
-		{"Files", viewFiles, "2"},
-		{"Pages", viewPages, "3"},
-		{"Password", viewPassword, "4"},
-		{"Sync", viewSync, "5"},
-		{"Settings", viewSettings, "6"},
-	}
-	parts := make([]string, 0, len(tabs))
-	for _, tab := range tabs {
+	parts := make([]string, 0, len(appTabs))
+	for _, tab := range appTabs {
 		labelName := tab.label
 		if a.viewDirty(tab.view) {
 			labelName += "*"
 		}
 		label := fmt.Sprintf(" %s:%s ", tab.key, labelName)
 		if a.tabSelect && tab.view == a.view {
-			parts = append(parts, "[yellow:black::b]"+tview.Escape(label)+"[-:-:-]")
+			parts = append(parts, themeMarkupFGStyleBG(currentTheme().Background, currentTheme().StatusAccent, ":b")+tview.Escape(label)+"[-:-:-]")
 			continue
 		}
 		if tab.view == a.view {
-			parts = append(parts, "[black:white::b]"+tview.Escape(label)+"[-:-:-]")
+			parts = append(parts, themeMarkupFGStyleBG(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG, ":b")+tview.Escape(label)+"[-:-:-]")
 			continue
 		}
-		parts = append(parts, "[gray]"+tview.Escape(label)+"[-:-:-]")
+		parts = append(parts, themeMarkupFG(currentTheme().Dim)+tview.Escape(label)+"[-:-:-]")
 	}
 	return strings.Join(parts, " ")
 }
@@ -1408,7 +1774,7 @@ func (a *terminalApp) refreshNotesBody() {
 	editorLines := make([]string, 0, editorInnerHeight)
 	a.notes.EditorHeight = maxInt(1, editorInnerHeight-1)
 	a.notes.EditorRenderWidth = maxInt(1, editorWidth-2)
-	editorLines = append(editorLines, helpers.StripANSI(a.notes.TabsText(maxInt(10, editorWidth-3))))
+	editorLines = append(editorLines, a.notes.TabsText(maxInt(10, editorWidth-3)))
 	editorLines = append(editorLines, a.notes.EditorRows(maxInt(1, editorWidth-2), maxInt(1, editorInnerHeight-1))...)
 	a.editor.SetText(joinTViewLines(editorLines))
 	a.preview.SetText(joinTViewLines(a.notes.PreviewRows(maxInt(1, previewWidth-2), editorInnerHeight)))
@@ -1630,19 +1996,41 @@ func joinTViewLines(lines []string) string {
 }
 
 func ansiToTView(s string) string {
+	theme := currentTheme()
 	escaped := tview.Escape(s)
 	replacer := strings.NewReplacer(
 		helpers.ANSIBold, "[::b]",
 		helpers.ANSIItalic, "[::i]",
-		helpers.ANSIDim, "[gray]",
-		helpers.ANSIReverse, "[black:white]",
-		helpers.ANSIFgBlue, "[#7dcfff]",
-		helpers.ANSIFgGreen, "[#9ece6a]",
-		helpers.ANSIFgYellow, "[#e0af68]",
-		helpers.ANSIFgPurple, "[#bb9af7]",
-		helpers.ANSIFgCyan, "[#7dcfff]",
-		helpers.ANSIFgGray, "[#737aa2]",
-		helpers.ANSIFgOrange, "[#ff9e64]",
+		helpers.ANSIDim, themeMarkupFG(theme.Dim),
+		helpers.ANSIReverse, themeMarkupPair(theme.SelectionFG, theme.SelectionBG),
+		helpers.ANSIFgBlue, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading1]),
+		helpers.ANSIFgGreen, themeMarkupFG(theme.Syntax[helpers.ANSIRoleString]),
+		helpers.ANSIFgYellow, themeMarkupFG(theme.Syntax[helpers.ANSIRoleProperty]),
+		helpers.ANSIFgPurple, themeMarkupFG(theme.Syntax[helpers.ANSIRoleKeyword]),
+		helpers.ANSIFgCyan, themeMarkupFG(theme.Syntax[helpers.ANSIRoleType]),
+		helpers.ANSIFgGray, themeMarkupFG(theme.Dim),
+		helpers.ANSIFgOrange, themeMarkupFG(theme.Syntax[helpers.ANSIRoleNumber]),
+		helpers.ANSIRoleHeading1, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading1]),
+		helpers.ANSIRoleHeading2, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading2]),
+		helpers.ANSIRoleHeading3, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading3]),
+		helpers.ANSIRoleHeading4, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading4]),
+		helpers.ANSIRoleHeading5, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading5]),
+		helpers.ANSIRoleHeading6, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading6]),
+		helpers.ANSIRoleListMarker, themeMarkupFGStyle(theme.Syntax[helpers.ANSIRoleListMarker], "b"),
+		helpers.ANSIRoleLink, themeMarkupFG(theme.Syntax[helpers.ANSIRoleLink]),
+		helpers.ANSIRoleCode, themeMarkupFG(theme.Syntax[helpers.ANSIRoleCode]),
+		helpers.ANSIRoleString, themeMarkupFG(theme.Syntax[helpers.ANSIRoleString]),
+		helpers.ANSIRoleKeyword, themeMarkupFG(theme.Syntax[helpers.ANSIRoleKeyword]),
+		helpers.ANSIRoleNumber, themeMarkupFG(theme.Syntax[helpers.ANSIRoleNumber]),
+		helpers.ANSIRoleComment, themeMarkupFG(theme.Syntax[helpers.ANSIRoleComment]),
+		helpers.ANSIRoleType, themeMarkupFG(theme.Syntax[helpers.ANSIRoleType]),
+		helpers.ANSIRoleFunction, themeMarkupFG(theme.Syntax[helpers.ANSIRoleFunction]),
+		helpers.ANSIRoleProperty, themeMarkupFG(theme.Syntax[helpers.ANSIRoleProperty]),
+		helpers.ANSIRoleConstant, themeMarkupFGStyle(theme.Syntax[helpers.ANSIRoleConstant], "b"),
+		helpers.ANSIRoleSearch, themeMarkupPair(theme.Syntax[helpers.ANSIRoleSearch], theme.SelectionBG),
+		helpers.ANSIRoleVisualSelection, themeMarkupPair(theme.Syntax[helpers.ANSIRoleVisualSelection], theme.SelectionBG),
+		helpers.ANSIRoleActiveTab, themeMarkupPair(theme.ActiveTabFG, theme.ActiveTabBG),
+		helpers.ANSIRoleSelection, themeMarkupPair(theme.SelectionFG, theme.SelectionBG),
 		"\x1b[0m", "[-:-:-]",
 	)
 	return replacer.Replace(escaped)
@@ -1856,42 +2244,42 @@ func (a *terminalApp) helpText() string {
 	switch a.view {
 	case viewNotes:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
+			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
 		}
-		return a.notes.HelpText() + " | ctrl+t tab bar"
+		return a.notes.HelpText() + " | ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs"
 	case viewFiles:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
+			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
 		}
-		return "files: j/k move | / filter | a import into scope | f nested folder | F scope folder | D discard staged | i smart | I link | p image | o open | y copy md | Y copy path | M migrate | : command"
+		return "files: ctrl+tab next tab | ctrl+1-6 tabs | j/k move | / filter | a import into scope | f nested folder | F scope folder | D discard staged | i smart | I link | p image | o open | y copy md | Y copy path | M migrate | : command"
 	case viewPages:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
+			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
 		}
 		if a.pages != nil && a.pages.IsEditing() {
 			return "pages/edit: digits edit | backspace delete | enter apply | esc stop edit"
 		}
-		return "pages: q quit | ctrl+t tab bar | ctrl+s save | j/k move | e edit | r recalc"
+		return "pages: q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | ctrl+s save | j/k move | e edit | r recalc"
 	case viewPassword:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
+			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
 		}
-		return "password: ctrl+t tab bar | ctrl+s save | g generate | l/n/s toggle | +/- length"
+		return "password: ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | ctrl+s save | g generate | l/n/s toggle | +/- length"
 	case viewSync:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
+			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
 		}
-		return "sync: ctrl+t tab bar | j/k move | enter run action | save locally before upload"
+		return "sync: ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | j/k move | enter run action | save locally before upload"
 	case viewSettings:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | enter confirm | esc cancel"
+			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
 		}
 		if a.settingsEditMode {
 			return "settings/edit: digits edit | backspace delete | enter apply | esc cancel"
 		}
-		return "settings: ctrl+t tab bar | ctrl+s save | j/k move | enter change option"
+		return "settings: ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | ctrl+s save | j/k move | enter change option"
 	default:
-		return "q quit | ctrl+t tab bar"
+		return "q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs"
 	}
 }
 
@@ -1925,7 +2313,10 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	lines = append(lines, renderSection("Global:", []helpEntry{
 		{keys: "q", desc: "quit when not editing"},
 		{keys: "ctrl+t", desc: "activate tab bar"},
+		{keys: "ctrl+tab", desc: "cycle to the next app tab"},
+		{keys: "ctrl+1-6", desc: "jump directly to an app tab"},
 		{keys: "1-6", desc: "jump to tab while tab bar is active"},
+		{keys: "mouse click tab", desc: "jump directly to an app tab"},
 		{keys: "left/right", desc: "move tab selection while tab bar is active"},
 		{keys: "enter", desc: "confirm tab selection"},
 		{keys: "esc", desc: "cancel tab selection or close active prompt/help state"},
@@ -1937,6 +2328,8 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "j/k, arrows", desc: "move selection"},
 		{keys: "enter, l", desc: "open note or toggle folder"},
 		{keys: "h", desc: "return to editor"},
+		{keys: "a", desc: "switch to last accessed note and return to editor"},
+		{keys: "1-9, 0", desc: "switch to numbered open note and return to editor"},
 		{keys: "n", desc: "new note"},
 		{keys: "f", desc: "new folder"},
 		{keys: "d", desc: "delete selected note"},

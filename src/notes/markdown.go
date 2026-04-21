@@ -32,6 +32,7 @@ const (
 	tagCodeConstant          = "md-code-constant"
 	tagLink                  = "md-link"
 	tagVisualSelection       = "md-visual-selection"
+	tagYankHighlight         = "md-yank-highlight"
 	markdownImagePlaceholder = "\uFFFC"
 )
 

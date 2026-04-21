@@ -56,8 +56,28 @@ func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 	if !strings.Contains(got, "5:Sync") {
 		t.Fatalf("renderTabBar() = %q, want sync tab label", got)
 	}
-	if !strings.Contains(got, "[black:white::b]") {
+	if !strings.Contains(got, themeMarkupFGStyleBG(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG, ":b")) {
 		t.Fatalf("renderTabBar() = %q, want active tab styling", got)
+	}
+}
+
+func TestRefreshNotesBodyKeepsActiveNoteTabHighlight(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{
+			{Title: "One", Text: "one", Mode: notes.ModeNormal},
+			{Title: "Two", Text: "two", Mode: notes.ModeNormal},
+		},
+		CurrentTab:   1,
+		SidebarWidth: 28,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws, width: 120, height: 36}
+	app.initWidgets()
+	app.refreshNotesBody()
+	got := app.editor.GetText(false)
+	if !strings.Contains(got, themeMarkupPair(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG)+"[2:Two[]") {
+		t.Fatalf("editor text = %q, want highlighted current note tab", got)
 	}
 }
 
@@ -73,9 +93,16 @@ func TestMapTCellKey(t *testing.T) {
 		{tcell.NewEventKey(tcell.KeyCtrlD, 0, tcell.ModCtrl), notes.Key{Name: "d", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone), notes.Key{Name: "a", Rune: 'a'}},
 		{tcell.NewEventKey(tcell.KeyCtrlE, 0, tcell.ModCtrl), notes.Key{Name: "e", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModCtrl), notes.Key{Name: "tab", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl), notes.Key{Name: "a", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModCtrl), notes.Key{Name: "v", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModCtrl), notes.Key{Name: "t", Ctrl: true, Rune: 't'}},
+		{tcell.NewEventKey(tcell.KeyRune, '1', tcell.ModCtrl), notes.Key{Name: "1", Ctrl: true, Rune: '1'}},
+		{tcell.NewEventKey(tcell.KeyRune, 0, tcell.ModNone), notes.Key{Name: "2", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModCtrl), notes.Key{Name: "3", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyRune, 0x1c, tcell.ModNone), notes.Key{Name: "4", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyRune, 0x1d, tcell.ModNone), notes.Key{Name: "5", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyRune, 0x1e, tcell.ModNone), notes.Key{Name: "6", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModMeta), notes.Key{Name: "right", Meta: true}},
 		{tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModAlt), notes.Key{Name: "right", Meta: true}},
 	}
@@ -303,6 +330,132 @@ func TestHandleGlobalKeySwitchesTabAfterTabSelect(t *testing.T) {
 	}
 }
 
+func TestHandleGlobalKeyCtrlNumberSwitchesTabDirectly(t *testing.T) {
+	app := &terminalApp{view: viewNotes, tabSelect: true}
+	if !app.handleGlobalKey(notes.Key{Name: "5", Rune: '5', Ctrl: true}) {
+		t.Fatal("handleGlobalKey() = false, want true for ctrl+number")
+	}
+	if app.view != viewSync {
+		t.Fatalf("view = %v, want %v", app.view, viewSync)
+	}
+	if app.tabSelect {
+		t.Fatal("tabSelect = true, want false after direct switch")
+	}
+}
+
+func TestHandleGlobalKeyCtrlTabCyclesAppTabs(t *testing.T) {
+	app := &terminalApp{view: viewSettings, tabSelect: true}
+	if !app.handleGlobalKey(notes.Key{Name: "tab", Ctrl: true}) {
+		t.Fatal("handleGlobalKey() = false, want true for ctrl+tab")
+	}
+	if app.view != viewNotes {
+		t.Fatalf("view = %v, want %v", app.view, viewNotes)
+	}
+	if app.tabSelect {
+		t.Fatal("tabSelect = true, want false after ctrl+tab")
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "tab", Ctrl: true}) {
+		t.Fatal("handleGlobalKey() second = false, want true for ctrl+tab")
+	}
+	if app.view != viewFiles {
+		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	}
+}
+
+func TestHandleGlobalKeyPlainTabFallbackCyclesOutsideEditing(t *testing.T) {
+	ws := &notes.Workspace{
+		Tabs:       []*notes.Editor{{Text: "alpha", Mode: notes.ModeNormal}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "tab"}) {
+		t.Fatal("handleGlobalKey(tab) = false, want true for fallback app tab cycle")
+	}
+	if app.view != viewFiles {
+		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	}
+	if ws.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want tab fallback to avoid sidebar focus")
+	}
+}
+
+func TestHandleGlobalKeyPlainTabStillReachesNotesInsertMode(t *testing.T) {
+	ws := &notes.Workspace{
+		Tabs:       []*notes.Editor{{Text: "alpha", Mode: notes.ModeInsert}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "tab"}) {
+		t.Fatal("handleGlobalKey(tab) = false, want notes insert tab handling")
+	}
+	if app.view != viewNotes {
+		t.Fatalf("view = %v, want notes", app.view)
+	}
+}
+
+func TestCaptureInputCtrlTabCSIuCyclesAppTabs(t *testing.T) {
+	app := &terminalApp{view: viewNotes}
+	events := []*tcell.EventKey{
+		tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '[', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '9', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, ';', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '5', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, 'u', tcell.ModNone),
+	}
+	for _, event := range events {
+		if got := app.captureInput(event); got != nil {
+			t.Fatalf("captureInput(%v) returned event, want consumed", event)
+		}
+	}
+	if app.view != viewFiles {
+		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	}
+}
+
+func TestAppTabAtColumnUsesRenderedTabTargets(t *testing.T) {
+	app := &terminalApp{view: viewNotes}
+	target, ok := app.appTabAtColumn(1)
+	if !ok || target != viewNotes {
+		t.Fatalf("appTabAtColumn(1) = %v, %v; want notes", target, ok)
+	}
+	target, ok = app.appTabAtColumn(len(" 1:Notes "))
+	if ok {
+		t.Fatalf("appTabAtColumn(separator) = %v, true; want no target", target)
+	}
+	target, ok = app.appTabAtColumn(len(" 1:Notes ") + 1)
+	if !ok || target != viewFiles {
+		t.Fatalf("appTabAtColumn(files start) = %v, %v; want files", target, ok)
+	}
+}
+
+func TestCaptureMouseSwitchesNoteTabOnEditorTabRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{
+			{Title: "Plan", Mode: notes.ModeNormal},
+			{Title: "Log", Mode: notes.ModeNormal},
+		},
+		CurrentTab: 0,
+	}
+	editor := tview.NewTextView()
+	editor.SetRect(0, 0, 80, 10)
+	app := &terminalApp{
+		view:   viewNotes,
+		notes:  ws,
+		editor: editor,
+	}
+	event := tcell.NewEventMouse(len("[1:Plan] "), 0, tcell.Button1, 0)
+	returned, _ := app.captureMouse(event, tview.MouseLeftClick)
+	if returned != nil {
+		t.Fatal("captureMouse() returned event, want consumed note-tab click")
+	}
+	if ws.CurrentTab != 1 {
+		t.Fatalf("CurrentTab = %d, want 1", ws.CurrentTab)
+	}
+}
+
 func TestHandleGlobalKeyMovesTabSelectionWithArrows(t *testing.T) {
 	app := &terminalApp{view: viewNotes, tabSelect: true}
 	if !app.handleGlobalKey(notes.Key{Name: "right"}) {
@@ -350,8 +503,8 @@ func TestRefreshHighlightsHeaderBorderDuringTabSelect(t *testing.T) {
 	app.pagesRoot.AddPage("help", app.helpOverlay, true, false)
 	app.pagesRoot.AddPage("shutdown", tview.NewTextView(), true, false)
 	app.refresh()
-	if got := app.header.GetBorderColor(); got != tcell.ColorYellow {
-		t.Fatalf("header border color = %v, want %v", got, tcell.ColorYellow)
+	if want := themeColor(currentTheme().StatusAccent); app.header.GetBorderColor() != want {
+		t.Fatalf("header border color = %v, want %v", app.header.GetBorderColor(), want)
 	}
 }
 
@@ -433,7 +586,7 @@ func TestRefreshNotesBodyHidesPreviewPaneWhenPreviewIsToggledOff(t *testing.T) {
 func TestHandleSettingsKeyEditsUndoLevels(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	app := &terminalApp{view: viewSettings, settingIndex: 2}
+	app := &terminalApp{view: viewSettings, settingIndex: 4}
 	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
 		t.Fatal("handleSettingsKey(enter) = false, want true")
 	}
@@ -455,6 +608,90 @@ func TestHandleSettingsKeyEditsUndoLevels(t *testing.T) {
 	}
 	if !app.settingsDirty {
 		t.Fatal("settingsDirty = false, want true")
+	}
+}
+
+func TestHandleSettingsKeyCyclesTheme(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	app := &terminalApp{view: viewSettings, settingIndex: 0}
+	for _, want := range settings.BuiltInThemes[1:] {
+		if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+			t.Fatal("handleSettingsKey(enter) = false, want true")
+		}
+		if got := settings.Inst().UI.Theme; got != want {
+			t.Fatalf("Theme = %q, want %q", got, want)
+		}
+	}
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter wrap) = false, want true")
+	}
+	if got := settings.Inst().UI.Theme; got != settings.BuiltInThemes[0] {
+		t.Fatalf("Theme = %q, want wrap to %q", got, settings.BuiltInThemes[0])
+	}
+	if !app.settingsDirty {
+		t.Fatal("settingsDirty = false, want true")
+	}
+}
+
+func TestHandleSettingsKeyTogglesTransparentBackground(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	defer func() {
+		settings.Inst().UI.TransparentBackground = false
+		applyGlobalBackgroundStyle()
+	}()
+	app := &terminalApp{view: viewSettings, settingIndex: 1}
+	app.initWidgets()
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter) = false, want true")
+	}
+	if settings.Inst().UI == nil || !settings.Inst().UI.TransparentBackground {
+		t.Fatal("TransparentBackground = false, want true")
+	}
+	if got := tview.Styles.PrimitiveBackgroundColor; got != tcell.ColorDefault {
+		t.Fatalf("PrimitiveBackgroundColor = %v, want ColorDefault", got)
+	}
+	if got := tview.Styles.ContrastBackgroundColor; got != tcell.ColorDefault {
+		t.Fatalf("ContrastBackgroundColor = %v, want ColorDefault", got)
+	}
+	if got := app.editor.GetBackgroundColor(); got != tcell.ColorDefault {
+		t.Fatalf("editor background = %v, want ColorDefault", got)
+	}
+	if got, want := tview.Styles.PrimaryTextColor, themeColor(currentTheme().Primary); got != want {
+		t.Fatalf("PrimaryTextColor = %v, want themed foreground %v", got, want)
+	}
+	if !app.settingsDirty {
+		t.Fatal("settingsDirty = false, want true")
+	}
+	if got := app.renderSettings(6); !strings.Contains(got, "transparent background: true") {
+		t.Fatalf("renderSettings() = %q, want transparent background label", got)
+	}
+}
+
+func TestApplyWidgetBackgroundStyleRestoresOpaqueBackground(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	defer func() {
+		settings.Inst().UI.TransparentBackground = false
+		applyGlobalBackgroundStyle()
+	}()
+	app := &terminalApp{}
+	app.initWidgets()
+	settings.Inst().UI.TransparentBackground = true
+	applyGlobalBackgroundStyle()
+	app.applyWidgetBackgroundStyle()
+	settings.Inst().UI.TransparentBackground = false
+	applyGlobalBackgroundStyle()
+	app.applyWidgetBackgroundStyle()
+	if got, want := tview.Styles.PrimitiveBackgroundColor, themeColor(currentTheme().Background); got != want {
+		t.Fatalf("PrimitiveBackgroundColor = %v, want default background", got)
+	}
+	if got, want := app.editor.GetBackgroundColor(), themeColor(currentTheme().Background); got != want {
+		t.Fatalf("editor background = %v, want default background", got)
+	}
+	if got, want := app.editor.GetBorderColor(), themeColor(currentTheme().Border); got != want {
+		t.Fatalf("editor border color = %v, want themed border %v", got, want)
 	}
 }
 
@@ -625,6 +862,30 @@ func TestHandleGlobalKeyEnterOnOpenLinksCommandShowsModal(t *testing.T) {
 	}
 	if len(app.openLinks) != 1 || app.openLinks[0] != "https://example.com" {
 		t.Fatalf("openLinks = %v, want extracted URL", app.openLinks)
+	}
+}
+
+func TestHandleGlobalKeyEnterOnQuitCommandShowsQuitModal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Title:   "Plan",
+			Text:    "unsaved",
+			Dirty:   true,
+			Mode:    notes.ModeCommand,
+			Command: "q",
+		}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	app.initWidgets()
+	if !app.handleGlobalKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleGlobalKey(enter) = false, want true")
+	}
+	front, _ := app.pagesRoot.GetFrontPage()
+	if front != "quit" {
+		t.Fatalf("front page = %q, want quit", front)
 	}
 }
 

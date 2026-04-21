@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
@@ -155,7 +156,7 @@ func TestApplyANSIMarkdownPrefersTokenColorsOverCodeBlockSpan(t *testing.T) {
 		{Tag: tagCodeFunction, Start: 5, End: 9},
 	}
 	got := applyANSIMarkdown(line, spans)
-	if !strings.Contains(got, helpers.ANSIFgPurple) && !strings.Contains(got, helpers.ANSIFgBlue) {
+	if !strings.Contains(got, helpers.ANSIRoleKeyword) && !strings.Contains(got, helpers.ANSIRoleFunction) {
 		t.Fatalf("applyANSIMarkdown() = %q, want token styling inside code block", got)
 	}
 }
@@ -499,7 +500,7 @@ func TestRenderEditorPaneHighlightsAllSearchOccurrences(t *testing.T) {
 		Mode:       ModeNormal,
 	}
 	got := renderEditorPane(ed, 40, 1)[0]
-	if strings.Count(got, helpers.ANSIReverse) != 2 {
+	if strings.Count(got, helpers.ANSIRoleSearch) != 2 {
 		t.Fatalf("renderEditorPane() = %q, want both search matches highlighted", got)
 	}
 }
@@ -1081,7 +1082,7 @@ func TestHandleNormalModePSingleLineCharRegisterPastesInline(t *testing.T) {
 	if !handleNormalMode(&Workspace{}, ed, Key{Name: "p", Rune: 'p'}) {
 		t.Fatal("handleNormalMode(p) = false, want true")
 	}
-	if ed.Text != "oZZne" {
+	if ed.Text != "onZZe" {
 		t.Fatalf("editor text = %q, want inline paste", ed.Text)
 	}
 }
@@ -1143,6 +1144,125 @@ func TestWorkspaceTabNavigationAndCurrentNoteActions(t *testing.T) {
 	}
 	if _, err := os.Stat(secondPath); !os.IsNotExist(err) {
 		t.Fatalf("deleted note should be gone, stat err = %v", err)
+	}
+}
+
+func TestCtrlAThenASwitchesToLastAccessedNoteAndFocusesEditor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := w.ActiveEditor().Path
+	if !w.NewNote() {
+		t.Fatal("NewNote() = false, want true")
+	}
+	secondPath := w.ActiveEditor().Path
+	if secondPath == firstPath {
+		t.Fatal("expected second note path to differ from first")
+	}
+	if !w.HandleKey(Key{Name: "a", Ctrl: true}) {
+		t.Fatal("HandleKey(ctrl+a) = false, want sidebar focus")
+	}
+	if !w.FocusSidebar {
+		t.Fatal("FocusSidebar = false, want sidebar focused after ctrl+a")
+	}
+	if !w.HandleKey(Key{Name: "a", Rune: 'a'}) {
+		t.Fatal("HandleKey(a) = false, want switch to last accessed note")
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want editor focused after switch")
+	}
+	if got := w.ActiveEditor().Path; got != firstPath {
+		t.Fatalf("active path = %q, want previous note %q", got, firstPath)
+	}
+	if !w.HandleKey(Key{Name: "a", Ctrl: true}) || !w.HandleKey(Key{Name: "a", Rune: 'a'}) {
+		t.Fatal("ctrl+a then a should switch back to second note")
+	}
+	if got := w.ActiveEditor().Path; got != secondPath {
+		t.Fatalf("active path = %q, want second note %q", got, secondPath)
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want editor focused after switching back")
+	}
+}
+
+func TestCtrlAThenNumberSwitchesToNumberedNoteAndFocusesEditor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := w.ActiveEditor().Path
+	if !w.NewNote() {
+		t.Fatal("NewNote() second = false, want true")
+	}
+	secondPath := w.ActiveEditor().Path
+	if !w.NewNote() {
+		t.Fatal("NewNote() third = false, want true")
+	}
+	if !w.HandleKey(Key{Name: "a", Ctrl: true}) {
+		t.Fatal("HandleKey(ctrl+a) = false, want sidebar focus")
+	}
+	if !w.HandleKey(Key{Name: "1", Rune: '1'}) {
+		t.Fatal("HandleKey(1) = false, want numbered note switch")
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want editor focused after numbered switch")
+	}
+	if got := w.ActiveEditor().Path; got != firstPath {
+		t.Fatalf("active path = %q, want first note %q", got, firstPath)
+	}
+	if !w.HandleKey(Key{Name: "a", Ctrl: true}) || !w.HandleKey(Key{Name: "2", Rune: '2'}) {
+		t.Fatal("ctrl+a then 2 should switch to second note")
+	}
+	if got := w.ActiveEditor().Path; got != secondPath {
+		t.Fatalf("active path = %q, want second note %q", got, secondPath)
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want editor focused after second numbered switch")
+	}
+}
+
+func TestRenderTabsIncludesNoteShortcutIndicators(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Title: "Plan"},
+			{Title: "Log"},
+		},
+		CurrentTab: 1,
+	}
+	got := helpers.StripANSI(renderTabs(w))
+	if !strings.Contains(got, "[1:Plan]") {
+		t.Fatalf("renderTabs() = %q, want first note shortcut indicator", got)
+	}
+	if !strings.Contains(got, "[2:Log]") {
+		t.Fatalf("renderTabs() = %q, want second note shortcut indicator", got)
+	}
+}
+
+func TestSwitchToTabAtColumnSwitchesClickedNoteAndFocusesEditor(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Title: "Plan"},
+			{Title: "Log"},
+		},
+		CurrentTab:   0,
+		FocusSidebar: true,
+	}
+	if !w.SwitchToTabAtColumn(len("[1:Plan] ")) {
+		t.Fatal("SwitchToTabAtColumn(second tab start) = false, want true")
+	}
+	if w.CurrentTab != 1 {
+		t.Fatalf("CurrentTab = %d, want 1", w.CurrentTab)
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want editor focused")
+	}
+	if w.SwitchToTabAtColumn(len("[1:Plan]")) {
+		t.Fatal("SwitchToTabAtColumn(separator) = true, want false")
 	}
 }
 
@@ -1309,6 +1429,44 @@ func TestExecuteVimCommandOpenLinksQueuesPendingRequest(t *testing.T) {
 	}
 }
 
+func TestExecuteVimCommandQuitQueuesPendingQuit(t *testing.T) {
+	w := &Workspace{Tabs: []*Editor{{Title: "Plan", Text: "x"}}, CurrentTab: 0}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandQuit})
+	quit, force := w.TakePendingQuit()
+	if !quit {
+		t.Fatal("TakePendingQuit() = false, want true")
+	}
+	if force {
+		t.Fatal("force = true, want false for plain quit")
+	}
+	if quit, _ := w.TakePendingQuit(); quit {
+		t.Fatal("TakePendingQuit() should clear request")
+	}
+}
+
+func TestExecuteVimCommandChainSavesThenQueuesForcedQuit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := ws.ActiveEditor()
+	ed.Text = "saved by wq"
+	ed.Dirty = true
+	executeVimCommand(ws, ed, vimCommand{Kind: vimCommandSequence, Commands: []vimCommand{
+		{Kind: vimCommandSave},
+		{Kind: vimCommandQuit, Force: true},
+	}})
+	if ed.Dirty {
+		t.Fatal("Dirty = true, want saved")
+	}
+	quit, force := ws.TakePendingQuit()
+	if !quit || !force {
+		t.Fatalf("TakePendingQuit() = %t, %t; want forced quit", quit, force)
+	}
+}
+
 func TestExecuteVimCommandPreviewTogglesPane(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1387,6 +1545,19 @@ func TestCanDeleteFocusedNoteDistinguishesSidebarFolders(t *testing.T) {
 	}
 	if w.CanDeleteFocusedNote() {
 		t.Fatal("CanDeleteFocusedNote() = true, want false for folder selection")
+	}
+}
+
+func TestHandleSidebarKeyEscReturnsFocusToEditor(t *testing.T) {
+	w := &Workspace{
+		FocusSidebar: true,
+		Tree:         []TreeEntry{{Kind: treeNote, Label: "Plan"}},
+	}
+	if !w.handleSidebarKey(Key{Name: "esc"}) {
+		t.Fatal("handleSidebarKey(esc) = false, want true")
+	}
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want false")
 	}
 }
 
@@ -1700,6 +1871,68 @@ func TestHandleNormalModeIAndAStayOnCurrentLine(t *testing.T) {
 	}
 }
 
+func TestHandleNormalModeCountGJumpsToLineStart(t *testing.T) {
+	lines := make([]string, 0, 12)
+	for i := 1; i <= 12; i++ {
+		lines = append(lines, fmt.Sprintf("line%d", i))
+	}
+	text := strings.Join(lines, "\n")
+	ed := &Editor{Text: text, Cursor: 0, Mode: ModeNormal}
+	w := &Workspace{}
+	for _, key := range []Key{
+		{Name: "1", Rune: '1'},
+		{Name: "2", Rune: '2'},
+		{Name: "G", Rune: 'G', Shift: true},
+	} {
+		if !handleNormalMode(w, ed, key) {
+			t.Fatalf("handleNormalMode(%q) = false, want true", key.Name)
+		}
+	}
+	want := len([]rune(strings.Join(lines[:11], "\n"))) + 1
+	if ed.Cursor != want {
+		t.Fatalf("cursor = %d, want start of line 12 at %d", ed.Cursor, want)
+	}
+	if ed.NormalCount != "" {
+		t.Fatalf("NormalCount = %q, want cleared", ed.NormalCount)
+	}
+}
+
+func TestHandleNormalModeGDefaultsToLastLine(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree", Cursor: 0, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "G", Rune: 'G', Shift: true}) {
+		t.Fatal("handleNormalMode(G) = false, want true")
+	}
+	if want := len([]rune("one\ntwo\n")); ed.Cursor != want {
+		t.Fatalf("cursor = %d, want last line start %d", ed.Cursor, want)
+	}
+}
+
+func TestHandleNormalModeCountGClampsToLastLine(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree", Cursor: 0, Mode: ModeNormal}
+	for _, key := range []Key{
+		{Name: "9", Rune: '9'},
+		{Name: "9", Rune: '9'},
+		{Name: "G", Rune: 'G', Shift: true},
+	} {
+		if !handleNormalMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleNormalMode(%q) = false, want true", key.Name)
+		}
+	}
+	if want := len([]rune("one\ntwo\n")); ed.Cursor != want {
+		t.Fatalf("cursor = %d, want clamped last line start %d", ed.Cursor, want)
+	}
+}
+
+func TestHandleNormalModeZeroWithoutCountKeepsLineStartBehavior(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo", Cursor: len([]rune("one\nt")), Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "0", Rune: '0'}) {
+		t.Fatal("handleNormalMode(0) = false, want true")
+	}
+	if want := len([]rune("one\n")); ed.Cursor != want {
+		t.Fatalf("cursor = %d, want current line start %d", ed.Cursor, want)
+	}
+}
+
 func TestInsertModeEnterContinuesIndentedBullet(t *testing.T) {
 	ed := &Editor{
 		Text:   "- item\n  - child",
@@ -1881,6 +2114,8 @@ func TestVisualBlockDeleteThenPPastesDeletedBlock(t *testing.T) {
 }
 
 func TestHandleNormalModeYYCopiesToClipboard(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
 	var copied string
 	restore := helpers.SetClipboardWriterForTesting(func(text string) error {
 		copied = text
@@ -1900,9 +2135,15 @@ func TestHandleNormalModeYYCopiesToClipboard(t *testing.T) {
 	if ed.Status != "yanked line" {
 		t.Fatalf("status = %q, want %q", ed.Status, "yanked line")
 	}
+	got := strings.Join(renderEditorPane(ed, 40, 2), "\n")
+	if !strings.Contains(got, helpers.ANSIRoleSelection) {
+		t.Fatalf("renderEditorPane() = %q, want yank highlight", got)
+	}
 }
 
 func TestHandleNormalModeYWCopiesToClipboard(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
 	var copied string
 	restore := helpers.SetClipboardWriterForTesting(func(text string) error {
 		copied = text
@@ -1916,11 +2157,33 @@ func TestHandleNormalModeYWCopiesToClipboard(t *testing.T) {
 	if !handleNormalMode(&Workspace{}, ed, Key{Name: "w", Rune: 'w'}) {
 		t.Fatal("w after y should yank word")
 	}
-	if copied != "alpha " {
-		t.Fatalf("copied = %q, want %q", copied, "alpha ")
+	if copied != "alpha" {
+		t.Fatalf("copied = %q, want %q", copied, "alpha")
 	}
 	if ed.Status != "yanked text" {
 		t.Fatalf("status = %q, want %q", ed.Status, "yanked text")
+	}
+	got := renderEditorPane(ed, 40, 1)[0]
+	if !strings.Contains(got, helpers.ANSIRoleSelection) {
+		t.Fatalf("renderEditorPane() = %q, want yank highlight", got)
+	}
+	if strings.Contains(got, helpers.ANSIRoleSelection+" ") {
+		t.Fatalf("renderEditorPane() = %q, want highlight to stop before trailing space", got)
+	}
+}
+
+func TestYankHighlightExpires(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:               "alpha beta",
+		YankHighlightStart: 0,
+		YankHighlightEnd:   5,
+		YankHighlightUntil: time.Now().Add(-time.Millisecond),
+	}
+	got := renderEditorPane(ed, 40, 1)[0]
+	if strings.Contains(got, helpers.ANSIRoleSelection) {
+		t.Fatalf("renderEditorPane() = %q, want expired yank highlight hidden", got)
 	}
 }
 
@@ -1989,7 +2252,7 @@ func TestRenderEditorPaneHighlightsVisualSelection(t *testing.T) {
 		SelectionCursor: 6,
 	}
 	got := strings.Join(renderEditorPane(ed, 40, 3), "\n")
-	if !strings.Contains(got, helpers.ANSIReverse) {
+	if !strings.Contains(got, helpers.ANSIRoleVisualSelection) {
 		t.Fatalf("renderEditorPane() = %q, want visual selection highlight", got)
 	}
 }

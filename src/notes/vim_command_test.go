@@ -15,6 +15,29 @@ func TestParseVimCommandSave(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandQuit(t *testing.T) {
+	cmd, err := parseVimCommand("q")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandQuit {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandQuit)
+	}
+}
+
+func TestParseVimCommandOneCharChain(t *testing.T) {
+	cmd, err := parseVimCommand("wq")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandSequence || len(cmd.Commands) != 2 {
+		t.Fatalf("cmd = %#v, want two-command sequence", cmd)
+	}
+	if cmd.Commands[0].Kind != vimCommandSave || cmd.Commands[1].Kind != vimCommandQuit || !cmd.Commands[1].Force {
+		t.Fatalf("commands = %#v, want save then forced quit", cmd.Commands)
+	}
+}
+
 func TestParseVimCommandSearch(t *testing.T) {
 	cmd, err := parseVimCommand("/needle")
 	if err != nil {

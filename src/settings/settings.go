@@ -73,9 +73,11 @@ func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
 }
 
 type UISettings struct {
-	ShowPages    bool `json:"show_pages"`
-	ShowPassword bool `json:"show_password"`
-	ShowNotes    bool `json:"show_notes"`
+	ShowPages             bool   `json:"show_pages"`
+	ShowPassword          bool   `json:"show_password"`
+	ShowNotes             bool   `json:"show_notes"`
+	Theme                 string `json:"theme,omitempty"`
+	TransparentBackground bool   `json:"transparent_background,omitempty"`
 }
 
 type GDriveSettings struct {
@@ -115,6 +117,17 @@ var statusUpdater = func(text string) {
 	if helpers.HasStatusBar() {
 		helpers.StatusBarInst().UpdateStatusBar(text)
 	}
+}
+
+const DefaultTheme = "tokyo-night"
+
+var BuiltInThemes = []string{
+	"tokyo-night",
+	"catppuccin",
+	"kanagawa",
+	"gruvbox",
+	"rose-pine",
+	"flexoki",
 }
 
 func Inst() *UserSettings {
@@ -196,9 +209,11 @@ func defaultGDriveSettings() *GDriveSettings {
 
 func defaultUISettings() *UISettings {
 	return &UISettings{
-		ShowPages:    true,
-		ShowPassword: true,
-		ShowNotes:    true,
+		ShowPages:             true,
+		ShowPassword:          true,
+		ShowNotes:             true,
+		Theme:                 DefaultTheme,
+		TransparentBackground: false,
 	}
 }
 
@@ -214,6 +229,9 @@ func normalizeSettings(s *UserSettings) {
 	}
 	if s.UI == nil {
 		s.UI = defaultUISettings()
+	}
+	if !ValidTheme(s.UI.Theme) {
+		s.UI.Theme = DefaultTheme
 	}
 	if s.AppWindow.Width <= 0 {
 		s.AppWindow.Width = 600
@@ -247,6 +265,31 @@ func normalizeSettings(s *UserSettings) {
 	if s.NotesApp.TabSpaces == 4 && !s.NotesApp.VimMode && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
 	}
+}
+
+func CurrentTheme() string {
+	if settingsInstance == nil || settingsInstance.UI == nil || !ValidTheme(settingsInstance.UI.Theme) {
+		return DefaultTheme
+	}
+	return settingsInstance.UI.Theme
+}
+
+func ValidTheme(theme string) bool {
+	for _, candidate := range BuiltInThemes {
+		if theme == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func NextTheme(theme string) string {
+	for i, candidate := range BuiltInThemes {
+		if theme == candidate {
+			return BuiltInThemes[(i+1)%len(BuiltInThemes)]
+		}
+	}
+	return DefaultTheme
 }
 
 func RegisterSaveHook(fn func(*UserSettings)) {

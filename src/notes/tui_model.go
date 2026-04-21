@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/kloneets/tools/src/helpers"
@@ -24,6 +25,8 @@ const (
 	ModeVisual  Mode = "VISUAL"
 	tagSearch        = "md-search"
 )
+
+const yankHighlightDuration = 180 * time.Millisecond
 
 type Key struct {
 	Rune  rune
@@ -97,12 +100,16 @@ type Editor struct {
 	Status              string
 	Dirty               bool
 	PendingOp           string
+	NormalCount         string
 	LastSearch          string
 	LastSearchPos       int
 	Register            vimRegister
 	SelectionMode       vimSelectionMode
 	SelectionMark       int
 	SelectionCursor     int
+	YankHighlightStart  int
+	YankHighlightEnd    int
+	YankHighlightUntil  time.Time
 	LastXText           string
 	LastXCursor         int
 	LastXArmed          bool
@@ -130,6 +137,7 @@ type Workspace struct {
 	PendingMigrationCount int
 	Tabs                  []*Editor
 	CurrentTab            int
+	LastAccessedTab       int
 	FocusSidebar          bool
 	SidebarWidth          int
 	PreviewWidth          int
@@ -139,6 +147,8 @@ type Workspace struct {
 	SelectedFolder        string
 	PreviewHidden         bool
 	pendingOpenLinks      []string
+	pendingQuit           bool
+	pendingQuitForce      bool
 	pendingDeletePath     string
 	pendingDeleteLabel    string
 }
@@ -161,9 +171,10 @@ func NewWorkspace() (*Workspace, error) {
 	}
 	_ = discardManagedFilesDraft()
 	ws := &Workspace{
-		FocusSidebar:  false,
-		CurrentTab:    -1,
-		PreviewHidden: settings.Inst().NotesApp.PreviewHidden,
+		FocusSidebar:    false,
+		CurrentTab:      -1,
+		LastAccessedTab: -1,
+		PreviewHidden:   settings.Inst().NotesApp.PreviewHidden,
 	}
 	ws.SidebarWidth = normalizeSidebarWidth(settings.PersistedNotesEditorWidth())
 	if pending, err := countLooseManagedFiles(); err != nil {
@@ -191,6 +202,17 @@ func (w *Workspace) ActiveEditor() *Editor {
 		return nil
 	}
 	return w.Tabs[w.CurrentTab]
+}
+
+func (w *Workspace) setCurrentTab(index int) bool {
+	if w == nil || index < 0 || index >= len(w.Tabs) {
+		return false
+	}
+	if w.CurrentTab >= 0 && w.CurrentTab < len(w.Tabs) && w.CurrentTab != index {
+		w.LastAccessedTab = w.CurrentTab
+	}
+	w.CurrentTab = index
+	return true
 }
 
 func (w *Workspace) refreshTree() {
@@ -315,7 +337,7 @@ func isHiddenByCollapsed(folder string, collapsed map[string]bool) bool {
 func (w *Workspace) Open(path string) error {
 	for i, tab := range w.Tabs {
 		if tab.Path == path {
-			w.CurrentTab = i
+			w.setCurrentTab(i)
 			w.persistSession()
 			return nil
 		}
@@ -326,7 +348,7 @@ func (w *Workspace) Open(path string) error {
 	}
 	ed := &Editor{Path: path, Title: noteTitleFromPath(path), Text: text, Mode: defaultEditorMode(), LastSearchPos: -1}
 	w.Tabs = append(w.Tabs, ed)
-	w.CurrentTab = len(w.Tabs) - 1
+	w.setCurrentTab(len(w.Tabs) - 1)
 	w.SelectedFolder = relativeNoteFolder(path)
 	w.persistSession()
 	return nil
@@ -613,7 +635,7 @@ func (w *Workspace) NextTab() bool {
 	if w == nil || len(w.Tabs) <= 1 {
 		return false
 	}
-	w.CurrentTab = (w.CurrentTab + 1) % len(w.Tabs)
+	w.setCurrentTab((w.CurrentTab + 1) % len(w.Tabs))
 	w.persistSession()
 	return true
 }
@@ -622,10 +644,46 @@ func (w *Workspace) PrevTab() bool {
 	if w == nil || len(w.Tabs) <= 1 {
 		return false
 	}
-	w.CurrentTab--
-	if w.CurrentTab < 0 {
-		w.CurrentTab = len(w.Tabs) - 1
+	next := w.CurrentTab - 1
+	if next < 0 {
+		next = len(w.Tabs) - 1
 	}
+	w.setCurrentTab(next)
+	w.persistSession()
+	return true
+}
+
+func (w *Workspace) SwitchToLastAccessedTab() bool {
+	if w == nil || w.LastAccessedTab < 0 || w.LastAccessedTab >= len(w.Tabs) || w.LastAccessedTab == w.CurrentTab {
+		return false
+	}
+	w.setCurrentTab(w.LastAccessedTab)
+	w.FocusSidebar = false
+	w.ensureEditorVisible()
+	w.persistSession()
+	return true
+}
+
+func (w *Workspace) SwitchToTabShortcut(shortcut string) bool {
+	index, ok := noteTabShortcutIndex(shortcut)
+	if !ok || w == nil || index < 0 || index >= len(w.Tabs) {
+		return false
+	}
+	w.setCurrentTab(index)
+	w.FocusSidebar = false
+	w.ensureEditorVisible()
+	w.persistSession()
+	return true
+}
+
+func (w *Workspace) SwitchToTabAtColumn(col int) bool {
+	index, ok := w.tabIndexAtColumn(col)
+	if !ok {
+		return false
+	}
+	w.setCurrentTab(index)
+	w.FocusSidebar = false
+	w.ensureEditorVisible()
 	w.persistSession()
 	return true
 }
@@ -824,6 +882,20 @@ func (w *Workspace) HandleKey(key Key) bool {
 }
 
 func (w *Workspace) handleSidebarKey(key Key) bool {
+	switch key.Name {
+	case "a":
+		if w.SwitchToLastAccessedTab() {
+			return true
+		}
+		w.FocusSidebar = false
+		return true
+	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		if w.SwitchToTabShortcut(key.Name) {
+			return true
+		}
+		w.FocusSidebar = false
+		return true
+	}
 	if len(w.Tree) == 0 {
 		return false
 	}
@@ -858,7 +930,7 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 		w.FocusSidebar = false
 		w.ensureEditorVisible()
 		return true
-	case "h":
+	case "h", "esc":
 		w.FocusSidebar = false
 		return true
 	case "n":
@@ -964,6 +1036,9 @@ func (w *Workspace) closeTabsInFolder(folder string) {
 	if w.CurrentTab < 0 && len(w.Tabs) > 0 {
 		w.CurrentTab = 0
 	}
+	if w.LastAccessedTab >= len(w.Tabs) || w.LastAccessedTab == w.CurrentTab {
+		w.LastAccessedTab = -1
+	}
 	w.persistSession()
 }
 
@@ -977,6 +1052,9 @@ func (w *Workspace) closeTab(path string) {
 	w.Tabs = kept
 	if w.CurrentTab >= len(w.Tabs) {
 		w.CurrentTab = len(w.Tabs) - 1
+	}
+	if w.LastAccessedTab >= len(w.Tabs) || w.LastAccessedTab == w.CurrentTab {
+		w.LastAccessedTab = -1
 	}
 	w.persistSession()
 }
@@ -1381,11 +1459,21 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		}
 		ed.PendingOp = ""
 	}
+	if key.Name >= "0" && key.Name <= "9" && len([]rune(key.Name)) == 1 {
+		if key.Name == "0" && ed.NormalCount == "" {
+			ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
+			return true
+		}
+		ed.NormalCount += key.Name
+		return true
+	}
 	switch key.Name {
 	case "i":
+		ed.NormalCount = ""
 		ed.Mode = ModeInsert
 		return true
 	case "a":
+		ed.NormalCount = ""
 		runes := []rune(ed.Text)
 		if ed.Cursor < len(runes) && runes[ed.Cursor] != '\n' {
 			ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
@@ -1393,54 +1481,70 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Mode = ModeInsert
 		return true
 	case "o":
+		ed.NormalCount = ""
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimOpenLineBelow(ed.Text, ed.Cursor)
 		ed.Mode = ModeInsert
 		ed.Dirty = true
 		return true
 	case "O":
+		ed.NormalCount = ""
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimOpenLineAbove(ed.Text, ed.Cursor)
 		ed.Mode = ModeInsert
 		ed.Dirty = true
 		return true
 	case "h", "left":
+		ed.NormalCount = ""
 		ed.Cursor = vimClampOffset(ed.Text, ed.Cursor-1)
 		return true
 	case "l", "right":
+		ed.NormalCount = ""
 		ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
 		return true
 	case "j", "down":
+		ed.NormalCount = ""
 		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 		return true
 	case "k", "up":
+		ed.NormalCount = ""
 		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, -1)
 		return true
 	case "home":
+		ed.NormalCount = ""
 		ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
 		return true
 	case "end":
+		ed.NormalCount = ""
 		ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
 		return true
 	case "pageup":
+		ed.NormalCount = ""
 		ed.Cursor = vimPageMoveOffset(ed.Text, ed.Cursor, -10)
 		return true
 	case "pagedown":
+		ed.NormalCount = ""
 		ed.Cursor = vimPageMoveOffset(ed.Text, ed.Cursor, 10)
 		return true
-	case "0":
-		ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
-		return true
 	case "$":
+		ed.NormalCount = ""
 		ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
 		return true
+	case "G":
+		targetLine := normalModeCount(ed)
+		ed.NormalCount = ""
+		ed.Cursor = vimLineStartForNumber(ed.Text, targetLine)
+		return true
 	case "w":
+		ed.NormalCount = ""
 		ed.Cursor = moveWordForward(ed.Text, ed.Cursor)
 		return true
 	case "b":
+		ed.NormalCount = ""
 		ed.Cursor = moveWordBackward(ed.Text, ed.Cursor)
 		return true
 	case "x":
+		ed.NormalCount = ""
 		ed.LastXText = ed.Text
 		ed.LastXCursor = ed.Cursor
 		ed.LastXArmed = true
@@ -1451,6 +1555,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Dirty = true
 		return true
 	case "delete":
+		ed.NormalCount = ""
 		ed.Register = vimYankChar(ed.Text, ed.Cursor, ed.Cursor)
 		updateClipboardForRegister(ed, "deleted char")
 		rememberUndoState(ed)
@@ -1458,40 +1563,52 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Dirty = true
 		return true
 	case "r":
+		ed.NormalCount = ""
 		ed.PendingOp = "r"
 		return true
 	case ":":
+		ed.NormalCount = ""
 		ed.Mode = ModeCommand
 		ed.Command = ""
 		return true
 	case "/":
+		ed.NormalCount = ""
 		ed.Mode = ModeCommand
 		ed.Command = "/"
 		return true
 	case "R":
+		ed.NormalCount = ""
 		ed.Mode = ModeCommand
 		ed.Command = "rename " + ed.Title
 		return true
 	case "n":
+		ed.NormalCount = ""
 		repeatSearch(ed, true)
 		return true
 	case "N":
+		ed.NormalCount = ""
 		repeatSearch(ed, false)
 		return true
 	case "u":
+		ed.NormalCount = ""
 		return applyUndo(ed)
 	case " ":
+		ed.NormalCount = ""
 		return toggleCheckboxAtCursor(ed)
 	case "tab":
+		ed.NormalCount = ""
 		w.FocusSidebar = true
 		return true
 	case "V":
+		ed.NormalCount = ""
 		startVisualSelection(ed, vimSelectionLine)
 		return true
 	case "v":
+		ed.NormalCount = ""
 		startVisualSelection(ed, vimSelectionChar)
 		return true
 	case "d", "y", "c":
+		ed.NormalCount = ""
 		if ed.PendingOp == key.Name {
 			if key.Name == "d" || key.Name == "c" {
 				ed.Register = vimYankLine(ed.Text, ed.Cursor, ed.Cursor)
@@ -1501,8 +1618,10 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 				ed.Dirty = true
 			}
 			if key.Name == "y" {
+				start, end := vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
 				ed.Register = vimYankLine(ed.Text, ed.Cursor, ed.Cursor)
 				updateClipboardForRegister(ed, "yanked line")
+				flashYankRange(ed, start, end)
 			}
 			if key.Name == "c" {
 				ed.Mode = ModeInsert
@@ -1513,6 +1632,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.PendingOp = key.Name
 		return true
 	case "p":
+		ed.NormalCount = ""
 		reg, err := pasteRegister(ed)
 		if err != nil {
 			ed.Status = "clipboard paste failed: " + err.Error()
@@ -1526,12 +1646,38 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		case vimRegisterBlock:
 			ed.Text, ed.Cursor = vimPasteBlock(ed.Text, ed.Cursor, reg)
 		default:
-			ed.Text, ed.Cursor = vimPasteChar(ed.Text, ed.Cursor, reg)
+			ed.Text, ed.Cursor = vimPasteCharAfter(ed.Text, ed.Cursor, reg)
 		}
 		ed.Dirty = true
 		return true
 	}
+	ed.NormalCount = ""
 	return false
+}
+
+func normalModeCount(ed *Editor) int {
+	if ed == nil || ed.NormalCount == "" {
+		return 0
+	}
+	count, err := strconv.Atoi(ed.NormalCount)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+func vimLineStartForNumber(text string, lineNumber int) int {
+	lines := vimLineInfos(text)
+	if len(lines) == 0 {
+		return 0
+	}
+	if lineNumber <= 0 {
+		lineNumber = len(lines)
+	}
+	if lineNumber > len(lines) {
+		lineNumber = len(lines)
+	}
+	return lines[lineNumber-1].start
 }
 
 func normalizePasteRegister(reg vimRegister) vimRegister {
@@ -1727,8 +1873,13 @@ func applyPendingOperator(ed *Editor, key string) bool {
 		return false
 	}
 	if ed.PendingOp == "y" {
-		ed.Register = vimYankChar(ed.Text, start, max(start, end-1))
+		yankStart, yankEnd := start, end
+		if key == "w" {
+			yankStart, yankEnd = vimStrictWordRange(ed.Text, ed.Cursor)
+		}
+		ed.Register = vimYankChar(ed.Text, yankStart, max(yankStart, yankEnd-1))
 		updateClipboardForRegister(ed, "yanked text")
+		flashYankRange(ed, min(yankStart, yankEnd), max(yankStart, yankEnd))
 		ed.PendingOp = ""
 		return true
 	}
@@ -1874,14 +2025,42 @@ func yankVisualSelection(ed *Editor) {
 	case vimSelectionChar:
 		ed.Register = vimYankChar(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		updateClipboardForRegister(ed, "yanked selection")
+		flashYankRange(ed, min(ed.SelectionMark, ed.SelectionCursor), max(ed.SelectionMark, ed.SelectionCursor)+1)
 	case vimSelectionLine:
+		start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		ed.Register = vimYankLine(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		updateClipboardForRegister(ed, "yanked lines")
+		flashYankRange(ed, start, end)
 	case vimSelectionBlock:
 		ed.Register = vimYankBlock(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		updateClipboardForRegister(ed, "yanked block")
 	}
 	clearVisualSelection(ed)
+}
+
+func flashYankRange(ed *Editor, start int, end int) {
+	if ed == nil {
+		return
+	}
+	runeCount := len([]rune(ed.Text))
+	if start > end {
+		start, end = end, start
+	}
+	if start < 0 {
+		start = 0
+	}
+	if end > runeCount {
+		end = runeCount
+	}
+	if end <= start {
+		ed.YankHighlightStart = 0
+		ed.YankHighlightEnd = 0
+		ed.YankHighlightUntil = time.Time{}
+		return
+	}
+	ed.YankHighlightStart = start
+	ed.YankHighlightEnd = end
+	ed.YankHighlightUntil = time.Now().Add(yankHighlightDuration)
 }
 
 func clipboardPasteRegister() (vimRegister, error) {
@@ -1938,12 +2117,23 @@ func deleteVisualSelection(ed *Editor) {
 
 func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 	switch cmd.Kind {
+	case vimCommandSequence:
+		for _, child := range cmd.Commands {
+			executeVimCommand(w, ed, child)
+			if child.Kind == vimCommandSave && ed.Status != "saved" {
+				return
+			}
+		}
 	case vimCommandSave:
 		if err := w.SaveCurrent(); err != nil {
 			ed.Status = err.Error()
 		} else {
 			ed.Status = "saved"
 		}
+	case vimCommandQuit:
+		w.pendingQuit = true
+		w.pendingQuitForce = cmd.Force
+		ed.Status = "quit"
 	case vimCommandSearch:
 		ed.LastSearch = cmd.Query
 		idx := findNext(ed.Text, cmd.Query, ed.Cursor)
@@ -2048,7 +2238,7 @@ func (w *Workspace) HelpText() string {
 		return ""
 	}
 	if w.FocusSidebar {
-		return "notes/sidebar: j k move | enter open/toggle | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
+		return "notes/sidebar: j k move | enter open/toggle | a last note | 1-9/0 note | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
 	}
 	ed := w.ActiveEditor()
 	if ed == nil {
@@ -2058,12 +2248,12 @@ func (w *Workspace) HelpText() string {
 		return "notes/insert: tab complete or spaces | shift+tab reverse complete | esc normal | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | sidebar/sb | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | sidebar/sb | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
 		return "notes/visual: h j k l move | V line | ctrl+v block | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar"
+	return "notes/normal: i insert | u undo | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -2073,6 +2263,31 @@ func (w *Workspace) TakePendingOpenLinks() []string {
 	links := append([]string(nil), w.pendingOpenLinks...)
 	w.pendingOpenLinks = nil
 	return links
+}
+
+func (w *Workspace) TakePendingQuit() (bool, bool) {
+	if w == nil || !w.pendingQuit {
+		return false, false
+	}
+	force := w.pendingQuitForce
+	w.pendingQuit = false
+	w.pendingQuitForce = false
+	return true, force
+}
+
+func (w *Workspace) HasActiveYankHighlight() bool {
+	if w == nil {
+		return false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil || ed.YankHighlightEnd <= ed.YankHighlightStart || ed.YankHighlightUntil.IsZero() {
+		return false
+	}
+	return time.Now().Before(ed.YankHighlightUntil)
+}
+
+func YankHighlightDuration() time.Duration {
+	return yankHighlightDuration
 }
 
 func (w *Workspace) SidebarRows(height int) []string {
@@ -2299,18 +2514,71 @@ func (w *Workspace) renderEditor(height int, width int) []string {
 func renderTabs(w *Workspace) string {
 	parts := make([]string, 0, len(w.Tabs))
 	for i, tab := range w.Tabs {
-		label := tab.Title
-		if tab.Dirty {
-			label += "*"
-		}
+		label := noteTabLabel(i, tab)
 		if i == w.CurrentTab {
-			label = helpers.ANSI(helpers.ANSIReverse, "["+label+"]")
+			label = helpers.ANSI(helpers.ANSIRoleActiveTab, "["+label+"]")
 		} else {
 			label = "[" + label + "]"
 		}
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, " ")
+}
+
+func (w *Workspace) tabIndexAtColumn(col int) (int, bool) {
+	if w == nil || col < 0 {
+		return 0, false
+	}
+	pos := 0
+	for i, tab := range w.Tabs {
+		label := "[" + noteTabLabel(i, tab) + "]"
+		next := pos + len([]rune(label))
+		if col >= pos && col < next {
+			return i, true
+		}
+		pos = next
+		if i < len(w.Tabs)-1 {
+			if col == pos {
+				return 0, false
+			}
+			pos++
+		}
+	}
+	return 0, false
+}
+
+func noteTabLabel(index int, tab *Editor) string {
+	label := ""
+	if tab != nil {
+		label = tab.Title
+		if tab.Dirty {
+			label += "*"
+		}
+	}
+	if shortcut := noteTabShortcutLabel(index); shortcut != "" {
+		label = shortcut + ":" + label
+	}
+	return label
+}
+
+func noteTabShortcutLabel(index int) string {
+	if index < 0 || index > 9 {
+		return ""
+	}
+	if index == 9 {
+		return "0"
+	}
+	return strconv.Itoa(index + 1)
+}
+
+func noteTabShortcutIndex(shortcut string) (int, bool) {
+	if shortcut == "0" {
+		return 9, true
+	}
+	if len(shortcut) != 1 || shortcut[0] < '1' || shortcut[0] > '9' {
+		return 0, false
+	}
+	return int(shortcut[0] - '1'), true
 }
 
 func renderEditorPane(ed *Editor, width int, height int) []string {
@@ -2382,6 +2650,7 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 	lineSpans := groupSpansByLine(ed.Text, editorRenderSpans(ed.Text, settings.Inst().NotesApp.TabSpaces))
 	searchSpans := groupSpansByLine(ed.Text, searchHighlightSpans(ed.Text, ed.LastSearch))
 	selectionSpans := groupSpansByLine(ed.Text, visualHighlightSpans(ed))
+	yankSpans := groupSpansByLine(ed.Text, yankHighlightSpans(ed))
 	gutterWidth := editorLineNumberWidth(lines, width)
 	contentWidth := max(1, width-gutterWidth)
 	rows := make([]string, 0, len(lines))
@@ -2394,6 +2663,8 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 			baseSpans = searchSpans[lineIdx]
 		} else if lineIdx < len(selectionSpans) && len(selectionSpans[lineIdx]) > 0 {
 			baseSpans = selectionSpans[lineIdx]
+		} else if lineIdx < len(yankSpans) && len(yankSpans[lineIdx]) > 0 {
+			baseSpans = yankSpans[lineIdx]
 		}
 		segments := wrapPlainLine(plainLine, contentWidth)
 		for segIdx, segment := range segments {
@@ -2827,48 +3098,62 @@ func applyANSIMarkdown(line string, spans []markdownSpan) string {
 func styleForMarkdownTag(tag string, text string) string {
 	switch tag {
 	case tagHeading1:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgBlue, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleHeading1, text)
 	case tagHeading2:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgPurple, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleHeading2, text)
 	case tagHeading3:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgYellow, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleHeading3, text)
 	case tagHeading4:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgCyan, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleHeading4, text)
 	case tagHeading5:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgOrange, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleHeading5, text)
 	case tagHeading6:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleHeading6, text)
 	case tagBold:
 		return helpers.ANSI(helpers.ANSIBold, text)
 	case tagItalic:
 		return helpers.ANSI(helpers.ANSIItalic, text)
 	case tagQuote, tagCodeComment:
-		return helpers.ANSI(helpers.ANSIDim+helpers.ANSIFgGray, text)
-	case tagCode, tagCodeString:
-		return helpers.ANSI(helpers.ANSIFgGreen, text)
+		return helpers.ANSI(helpers.ANSIDim+helpers.ANSIRoleComment, text)
+	case tagCode:
+		return helpers.ANSI(helpers.ANSIRoleCode, text)
+	case tagCodeString:
+		return helpers.ANSI(helpers.ANSIRoleString, text)
 	case tagCodeKeyword:
-		return helpers.ANSI(helpers.ANSIFgPurple, text)
+		return helpers.ANSI(helpers.ANSIRoleKeyword, text)
 	case tagList, tagOrdered, tagChecklist:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGray, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleListMarker, text)
 	case tagCodeNumber:
-		return helpers.ANSI(helpers.ANSIFgOrange, text)
+		return helpers.ANSI(helpers.ANSIRoleNumber, text)
 	case tagCodeType:
-		return helpers.ANSI(helpers.ANSIFgCyan, text)
+		return helpers.ANSI(helpers.ANSIRoleType, text)
 	case tagCodeFunction:
-		return helpers.ANSI(helpers.ANSIFgBlue, text)
+		return helpers.ANSI(helpers.ANSIRoleFunction, text)
 	case tagCodeProperty, tagLink:
-		return helpers.ANSI(helpers.ANSIFgYellow, text)
+		return helpers.ANSI(helpers.ANSIRoleProperty, text)
 	case tagCodeConstant:
-		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgYellow, text)
+		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleConstant, text)
 	case tagSearch:
-		return helpers.ANSI(helpers.ANSIReverse, text)
+		return helpers.ANSI(helpers.ANSIRoleSearch, text)
 	case tagVisualSelection:
-		return helpers.ANSI(helpers.ANSIReverse, text)
+		return helpers.ANSI(helpers.ANSIRoleVisualSelection, text)
+	case tagYankHighlight:
+		return helpers.ANSI(helpers.ANSIRoleSelection, text)
 	case tagCodeBlock:
 		return text
 	default:
 		return text
 	}
+}
+
+func yankHighlightSpans(ed *Editor) []markdownSpan {
+	if ed == nil || ed.YankHighlightEnd <= ed.YankHighlightStart || ed.YankHighlightUntil.IsZero() {
+		return nil
+	}
+	if time.Now().After(ed.YankHighlightUntil) {
+		return nil
+	}
+	return []markdownSpan{{Tag: tagYankHighlight, Start: ed.YankHighlightStart, End: ed.YankHighlightEnd}}
 }
 
 func visualHighlightSpans(ed *Editor) []markdownSpan {

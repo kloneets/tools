@@ -78,6 +78,13 @@ func TestVimPasteChar(t *testing.T) {
 	}
 }
 
+func TestVimPasteCharAfter(t *testing.T) {
+	got, cursor := vimPasteCharAfter("abcd", 2, vimRegister{Kind: vimRegisterChar, Text: "ZZ"})
+	if got != "abcZZd" || cursor != 5 {
+		t.Fatalf("vimPasteCharAfter() = %q,%d want %q,%d", got, cursor, "abcZZd", 5)
+	}
+}
+
 func TestVimDeleteRange(t *testing.T) {
 	got, cursor := vimDeleteRange("abcdef", 1, 3)
 	if got != "aef" || cursor != 1 {
@@ -101,7 +108,14 @@ func TestVimWordForwardOffset(t *testing.T) {
 
 func TestVimYankWord(t *testing.T) {
 	reg := vimYankWord("alpha beta", 0)
-	if reg.Kind != vimRegisterChar || reg.Text != "alpha " {
+	if reg.Kind != vimRegisterChar || reg.Text != "alpha" {
+		t.Fatalf("vimYankWord() = %#v", reg)
+	}
+}
+
+func TestVimYankWordSkipsPunctuationAndStopsBeforePunctuation(t *testing.T) {
+	reg := vimYankWord("(alpha, beta)", 0)
+	if reg.Kind != vimRegisterChar || reg.Text != "alpha" {
 		t.Fatalf("vimYankWord() = %#v", reg)
 	}
 }

@@ -33,6 +33,12 @@ func TestDefaultSettings(t *testing.T) {
 	if !got.NotesApp.VimMode {
 		t.Fatal("VimMode = false, want true")
 	}
+	if got.UI == nil || got.UI.TransparentBackground {
+		t.Fatalf("TransparentBackground = %v, want false", got.UI != nil && got.UI.TransparentBackground)
+	}
+	if got.UI.Theme != DefaultTheme {
+		t.Fatalf("Theme = %q, want %q", got.UI.Theme, DefaultTheme)
+	}
 }
 
 func TestNormalizeSettings(t *testing.T) {
@@ -44,6 +50,9 @@ func TestNormalizeSettings(t *testing.T) {
 	if cfg.UI == nil || !cfg.UI.ShowNotes || !cfg.UI.ShowPages || !cfg.UI.ShowPassword {
 		t.Fatalf("UI = %#v, want all widgets visible", cfg.UI)
 	}
+	if cfg.UI.Theme != DefaultTheme {
+		t.Fatalf("Theme = %q, want %q", cfg.UI.Theme, DefaultTheme)
+	}
 	if cfg.NotesApp.TabSpaces != 4 {
 		t.Fatalf("TabSpaces = %d, want 4", cfg.NotesApp.TabSpaces)
 	}
@@ -52,6 +61,29 @@ func TestNormalizeSettings(t *testing.T) {
 	}
 	if !cfg.NotesApp.SidebarVisible {
 		t.Fatal("SidebarVisible = false, want true")
+	}
+}
+
+func TestNormalizeSettingsResetsUnknownTheme(t *testing.T) {
+	cfg := &UserSettings{UI: &UISettings{Theme: "unknown"}}
+	normalizeSettings(cfg)
+	if cfg.UI.Theme != DefaultTheme {
+		t.Fatalf("Theme = %q, want %q", cfg.UI.Theme, DefaultTheme)
+	}
+}
+
+func TestThemePersistsInJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsInstance = defaultSettings()
+	settingsInstance.UI.Theme = "catppuccin"
+	writeSettingsToDisk(false)
+	data, err := os.ReadFile(fileName())
+	if err != nil {
+		t.Fatalf("ReadFile(settings.json) error = %v", err)
+	}
+	if !strings.Contains(string(data), `"theme":"catppuccin"`) {
+		t.Fatalf("settings file = %q, want theme persisted", string(data))
 	}
 }
 
