@@ -20,6 +20,7 @@ const (
 	vimCommandUndo      vimCommandKind = "undo"
 	vimCommandRedo      vimCommandKind = "redo"
 	vimCommandPreview   vimCommandKind = "preview"
+	vimCommandSidebar   vimCommandKind = "sidebar"
 )
 
 type vimCommand struct {
@@ -56,6 +57,8 @@ func parseVimCommand(raw string) (vimCommand, error) {
 		return vimCommand{Kind: vimCommandRedo}, nil
 	case "preview":
 		return vimCommand{Kind: vimCommandPreview}, nil
+	case "sidebar", "sb":
+		return vimCommand{Kind: vimCommandSidebar}, nil
 	}
 
 	if strings.HasPrefix(cmd, "search ") {

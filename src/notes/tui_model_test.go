@@ -102,7 +102,7 @@ func TestHelpTextIncludesNavigation(t *testing.T) {
 	settings.Init()
 	w := &Workspace{}
 	got := w.HelpText()
-	if !strings.Contains(got, "ctrl+e") {
+	if !strings.Contains(got, "ctrl+a") {
 		t.Fatalf("HelpText() = %q, want sidebar navigation help", got)
 	}
 }
@@ -291,6 +291,64 @@ func TestRenderPreviewPaneWrapsLongLines(t *testing.T) {
 	}
 }
 
+func TestWrapPlainLineHardWrapsLongUnbrokenLink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	link := "https://example.com/abcdefghijklmnopqrstuvwxyz"
+	segments := wrapPlainLine(link, 12)
+	if len(segments) < 3 {
+		t.Fatalf("wrapPlainLine() returned %d segment(s), want hard-wrapped long link", len(segments))
+	}
+	for _, segment := range segments {
+		if segment.displayWidth > 12 {
+			t.Fatalf("segment width = %d for %q, want <= 12", segment.displayWidth, segment.text)
+		}
+	}
+}
+
+func TestWrapPlainLinePrefersURLPunctuationBeforeHardBreak(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	line := "[LP-6926](https://lemonadefinance.atlassian.net/browse/LP-6926)"
+	segments := wrapPlainLine(line, 62)
+	if len(segments) < 2 {
+		t.Fatalf("wrapPlainLine() returned %d segment(s), want wrapped URL", len(segments))
+	}
+	if strings.HasSuffix(segments[0].text, "LP-69") {
+		t.Fatalf("first segment = %q, want break at URL punctuation instead of leaving a tiny suffix", segments[0].text)
+	}
+	for _, segment := range segments {
+		if segment.displayWidth > 62 {
+			t.Fatalf("segment width = %d for %q, want <= 62", segment.displayWidth, segment.text)
+		}
+	}
+}
+
+func TestEditorRenderSpansUseRawMarkdownOffsetsForLinks(t *testing.T) {
+	text := "[LP-6926](https://lemonadefinance.atlassian.net/browse/LP-6926)"
+	spans := editorRenderSpans(text, 4)
+	found := false
+	for _, span := range spans {
+		if span.Tag != tagLink {
+			continue
+		}
+		found = true
+		if span.Start != 1 || span.End != len([]rune("LP-6926"))+1 {
+			t.Fatalf("link span = %d..%d, want raw label offsets 1..8", span.Start, span.End)
+		}
+	}
+	if !found {
+		t.Fatal("editorRenderSpans() did not include link span")
+	}
+	rows := renderEditorPane(&Editor{Text: text, Mode: ModeInsert}, 24, 4)
+	for _, row := range rows {
+		plain := helpers.StripANSI(row)
+		if helpers.VisibleRuneCount(row) > 24 {
+			t.Fatalf("rendered row %q has visible width %d, want <= 24", plain, helpers.VisibleRuneCount(row))
+		}
+	}
+}
+
 func TestEditorCursorUsesWrappedRows(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -309,6 +367,107 @@ func TestEditorCursorUsesWrappedRows(t *testing.T) {
 	}
 	if row == 0 {
 		t.Fatalf("EditorCursor() row = %d, want wrapped row below first line", row)
+	}
+}
+
+func TestEditorCursorUsesCellWidthInsideHardWrappedLongLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 12,
+		Tabs: []*Editor{{
+			Text:   "abcdefghijklmnop",
+			Cursor: 12,
+			Mode:   ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	row, col, ok := w.EditorCursor()
+	if !ok {
+		t.Fatal("EditorCursor() ok = false, want true")
+	}
+	if row != 1 || col != 2 {
+		t.Fatalf("EditorCursor() = row %d col %d, want row 1 col 2", row, col)
+	}
+}
+
+func TestEditorOffsetAtVisualPositionMapsWrappedTextAndLongLinks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 12,
+		Tabs: []*Editor{{
+			Text: "alpha beta gamma\nhttps://example.com/abcdef",
+			Mode: ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	offset, ok := w.EditorOffsetAtVisualPosition(1, 4)
+	if !ok {
+		t.Fatal("EditorOffsetAtVisualPosition() ok = false, want true")
+	}
+	if offset != len([]rune("alpha "))+2 {
+		t.Fatalf("offset = %d, want mapped offset inside wrapped first line", offset)
+	}
+	offset, ok = w.EditorOffsetAtVisualPosition(3, 5)
+	if !ok {
+		t.Fatal("EditorOffsetAtVisualPosition() for link ok = false, want true")
+	}
+	want := len([]rune("alpha beta gamma\n")) + 11
+	if offset != want {
+		t.Fatalf("link offset = %d, want %d", offset, want)
+	}
+}
+
+func TestMouseDragSelectionUsesVisualPositions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 20,
+		Tabs: []*Editor{{
+			Text: "abcdef",
+			Mode: ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	if !w.BeginMouseSelection(0, 3) {
+		t.Fatal("BeginMouseSelection() = false, want true")
+	}
+	if !w.DragMouseSelection(0, 6) {
+		t.Fatal("DragMouseSelection() = false, want true")
+	}
+	ed := w.ActiveEditor()
+	if ed.Mode != ModeVisual || ed.SelectionMode != vimSelectionChar {
+		t.Fatalf("mode = %s selection = %s, want visual char selection", ed.Mode, ed.SelectionMode)
+	}
+	if ed.SelectionMark != 1 || ed.SelectionCursor != 4 || ed.Cursor != 4 {
+		t.Fatalf("selection mark/cursor = %d/%d cursor %d, want 1/4 cursor 4", ed.SelectionMark, ed.SelectionCursor, ed.Cursor)
+	}
+}
+
+func TestMouseClickLeavesEditorOutsideVisualMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 20,
+		Tabs: []*Editor{{
+			Text: "abcdef",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	if !w.BeginMouseSelection(0, 3) {
+		t.Fatal("BeginMouseSelection() = false, want true")
+	}
+	if !w.MoveEditorCursorToVisualPosition(0, 3) {
+		t.Fatal("MoveEditorCursorToVisualPosition() = false, want true")
+	}
+	ed := w.ActiveEditor()
+	if ed.Mode == ModeVisual || ed.SelectionMode != vimSelectionNone {
+		t.Fatalf("mode = %s selection = %s, want click to clear visual selection", ed.Mode, ed.SelectionMode)
+	}
+	if ed.Cursor != 1 {
+		t.Fatalf("cursor = %d, want clicked offset 1", ed.Cursor)
 	}
 }
 
@@ -766,6 +925,85 @@ func TestShiftTabCompletesBackward(t *testing.T) {
 	}
 }
 
+func TestInsertModeShiftTabOutdentsListItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.TabSpaces = 2
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "unordered", text: "  - item", want: "- item"},
+		{name: "checklist", text: "  - [ ] item", want: "- [ ] item"},
+		{name: "ordered", text: "  1. item", want: "1. item"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ed := &Editor{Text: tc.text, Cursor: len([]rune(tc.text)), Mode: ModeInsert}
+			if !handleInsertMode(&Workspace{}, ed, Key{Name: "tab", Shift: true}) {
+				t.Fatal("handleInsertMode(shift+tab) = false, want true")
+			}
+			if ed.Text != tc.want {
+				t.Fatalf("text = %q, want %q", ed.Text, tc.want)
+			}
+		})
+	}
+}
+
+func TestInsertModeShiftTabDoesNotOutdentBelowZero(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Text: "- item", Cursor: len([]rune("- item")), Mode: ModeInsert}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "tab", Shift: true}) {
+		t.Fatal("handleInsertMode(shift+tab) = false, want true")
+	}
+	if ed.Text != "- item" {
+		t.Fatalf("text = %q, want unchanged bullet", ed.Text)
+	}
+	if ed.Dirty {
+		t.Fatal("Dirty = true, want no-op outdent to leave note clean")
+	}
+}
+
+func TestInsertModeShiftTabCyclesActiveAutocompleteBackward(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
+	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "aaa.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Open(notePath); err != nil {
+		t.Fatal(err)
+	}
+	ed := ws.ActiveEditor()
+	ed.Mode = ModeInsert
+	ed.Text = "![alt](Plan.assets/)"
+	ed.Cursor = len([]rune(ed.Text)) - 1
+	if !handleInsertMode(ws, ed, Key{Name: "tab"}) {
+		t.Fatal("handleInsertMode(tab) = false, want autocomplete")
+	}
+	if !handleInsertMode(ws, ed, Key{Name: "tab", Shift: true}) {
+		t.Fatal("handleInsertMode(shift+tab) = false, want autocomplete cycle")
+	}
+	if !strings.Contains(ed.Text, "Plan.assets/img/") {
+		t.Fatalf("editor text = %q, want backward completion candidate", ed.Text)
+	}
+}
+
 func TestReferenceForFileOverrides(t *testing.T) {
 	entry := &FileEntry{
 		Path:  "/tmp/diagram.png",
@@ -1091,6 +1329,29 @@ func TestExecuteVimCommandPreviewTogglesPane(t *testing.T) {
 	}
 	if got := w.ActiveEditor().Status; got != "preview shown" {
 		t.Fatalf("status = %q, want %q", got, "preview shown")
+	}
+}
+
+func TestExecuteVimCommandSidebarTogglesFocus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tabs:       []*Editor{{Title: "Plan", Text: "hello", Mode: ModeNormal}},
+		CurrentTab: 0,
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandSidebar})
+	if !w.FocusSidebar {
+		t.Fatal("FocusSidebar = false, want true after sidebar command")
+	}
+	if got := w.ActiveEditor().Status; got != "sidebar focused" {
+		t.Fatalf("status = %q, want sidebar focused", got)
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandSidebar})
+	if w.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want false after second sidebar command")
+	}
+	if got := w.ActiveEditor().Status; got != "editor focused" {
+		t.Fatalf("status = %q, want editor focused", got)
 	}
 }
 

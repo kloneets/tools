@@ -86,6 +86,10 @@ type terminalApp struct {
 	openLinks          []string
 	deleteNotePath     string
 	deleteNoteLabel    string
+	notesMouseDragging bool
+	notesMouseMoved    bool
+	notesMouseStartRow int
+	notesMouseStartCol int
 }
 
 func InitApp() {
@@ -260,7 +264,9 @@ func (a *terminalApp) Run(ctx context.Context) error {
 	app := tview.NewApplication()
 	a.tui = app
 	app.SetRoot(a.root, true)
+	app.EnableMouse(true)
 	app.SetInputCapture(a.captureInput)
+	app.SetMouseCapture(a.captureMouse)
 	app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
 		w, h := screen.Size()
 		if w != a.width || h != a.height {
@@ -425,6 +431,78 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 	return nil
 }
 
+func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
+	if event == nil || a == nil || a.view != viewNotes || a.notes == nil || a.showHelp || a.shuttingDown {
+		return event, action
+	}
+	x, y := event.Position()
+	if settings.Inst().NotesApp.SidebarVisible && a.sidebar != nil {
+		sx, sy, sw, sh := a.sidebar.GetInnerRect()
+		if pointInRect(x, y, sx, sy, sw, sh) {
+			row := y - sy
+			switch action {
+			case tview.MouseLeftClick, tview.MouseLeftDown:
+				a.notes.SelectSidebarRow(row, false)
+			case tview.MouseLeftDoubleClick:
+				a.notes.SelectSidebarRow(row, true)
+				a.consumePendingNoteActions()
+			}
+			a.refresh()
+			return nil, action
+		}
+	}
+	if a.editor == nil {
+		return event, action
+	}
+	ex, ey, ew, eh := a.editor.GetInnerRect()
+	if !pointInRect(x, y, ex, ey, ew, eh) && !a.notesMouseDragging {
+		return event, action
+	}
+	row := y - ey - 1
+	col := x - ex
+	if row < 0 {
+		row = 0
+	}
+	switch action {
+	case tview.MouseLeftDown:
+		a.notesMouseDragging = true
+		a.notesMouseMoved = false
+		a.notesMouseStartRow = row
+		a.notesMouseStartCol = col
+		a.notes.BeginMouseSelection(row, col)
+	case tview.MouseMove:
+		if a.notesMouseDragging {
+			if row != a.notesMouseStartRow || col != a.notesMouseStartCol {
+				a.notesMouseMoved = true
+				a.notes.DragMouseSelection(row, col)
+			}
+		}
+	case tview.MouseLeftUp:
+		if a.notesMouseDragging {
+			if a.notesMouseMoved || row != a.notesMouseStartRow || col != a.notesMouseStartCol {
+				a.notesMouseMoved = true
+				a.notes.DragMouseSelection(row, col)
+			} else {
+				a.notes.MoveEditorCursorToVisualPosition(row, col)
+			}
+			a.notesMouseDragging = false
+		}
+	case tview.MouseLeftClick:
+		if a.notesMouseMoved {
+			a.notesMouseMoved = false
+			break
+		}
+		a.notesMouseDragging = false
+		a.notes.MoveEditorCursorToVisualPosition(row, col)
+	}
+	a.refresh()
+	return nil, action
+}
+
+func pointInRect(x int, y int, rx int, ry int, width int, height int) bool {
+	return x >= rx && x < rx+width && y >= ry && y < ry+height
+}
+
 func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 	switch event.Key() {
 	case tcell.KeyRune:
@@ -450,19 +528,25 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 	case tcell.KeyDown:
 		return notes.Key{Name: "down"}, true
 	case tcell.KeyLeft:
+		if event.Modifiers()&(tcell.ModMeta|tcell.ModAlt) != 0 {
+			return notes.Key{Name: "left", Meta: true}, true
+		}
 		if event.Modifiers()&tcell.ModCtrl != 0 {
 			return notes.Key{Name: "left", Ctrl: true}, true
 		}
 		return notes.Key{Name: "left"}, true
 	case tcell.KeyRight:
+		if event.Modifiers()&(tcell.ModMeta|tcell.ModAlt) != 0 {
+			return notes.Key{Name: "right", Meta: true}, true
+		}
 		if event.Modifiers()&tcell.ModCtrl != 0 {
 			return notes.Key{Name: "right", Ctrl: true}, true
 		}
 		return notes.Key{Name: "right"}, true
 	case tcell.KeyHome:
-		return notes.Key{Name: "home"}, true
+		return notes.Key{Name: "home", Meta: event.Modifiers()&(tcell.ModMeta|tcell.ModAlt) != 0, Ctrl: event.Modifiers()&tcell.ModCtrl != 0}, true
 	case tcell.KeyEnd:
-		return notes.Key{Name: "end"}, true
+		return notes.Key{Name: "end", Meta: event.Modifiers()&(tcell.ModMeta|tcell.ModAlt) != 0, Ctrl: event.Modifiers()&tcell.ModCtrl != 0}, true
 	case tcell.KeyPgUp:
 		return notes.Key{Name: "pageup"}, true
 	case tcell.KeyPgDn:
@@ -477,6 +561,8 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 		return notes.Key{Name: "d", Ctrl: true}, true
 	case tcell.KeyCtrlE:
 		return notes.Key{Name: "e", Ctrl: true}, true
+	case tcell.KeyCtrlA:
+		return notes.Key{Name: "a", Ctrl: true}, true
 	case tcell.KeyCtrlV:
 		return notes.Key{Name: "v", Ctrl: true}, true
 	default:
@@ -523,7 +609,7 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		a.requestShutdown()
 		return true
 	}
-	if a.tabSelect {
+	if a.tabSelect && !key.Meta && !key.Ctrl {
 		switch key.Name {
 		case "1":
 			a.view = viewNotes
@@ -1847,7 +1933,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "j/k, arrows, g/G, ctrl+b/ctrl+f", desc: "scroll help overlay"},
 	})...)
 	lines = append(lines, renderSection("Notes sidebar:", []helpEntry{
-		{keys: "ctrl+e", desc: "toggle sidebar/editor focus"},
+		{keys: "ctrl+a, :sidebar, :sb", desc: "toggle sidebar/editor focus"},
 		{keys: "j/k, arrows", desc: "move selection"},
 		{keys: "enter, l", desc: "open note or toggle folder"},
 		{keys: "h", desc: "return to editor"},

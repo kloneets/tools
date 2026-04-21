@@ -73,8 +73,11 @@ func TestMapTCellKey(t *testing.T) {
 		{tcell.NewEventKey(tcell.KeyCtrlD, 0, tcell.ModCtrl), notes.Key{Name: "d", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone), notes.Key{Name: "a", Rune: 'a'}},
 		{tcell.NewEventKey(tcell.KeyCtrlE, 0, tcell.ModCtrl), notes.Key{Name: "e", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl), notes.Key{Name: "a", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModCtrl), notes.Key{Name: "v", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModCtrl), notes.Key{Name: "t", Ctrl: true, Rune: 't'}},
+		{tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModMeta), notes.Key{Name: "right", Meta: true}},
+		{tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModAlt), notes.Key{Name: "right", Meta: true}},
 	}
 	for _, tc := range cases {
 		got, ok := mapTCellKey(tc.event)
@@ -84,6 +87,145 @@ func TestMapTCellKey(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("mapTCellKey(%v) = %#v, want %#v", tc.event, got, tc.want)
 		}
+	}
+}
+
+func TestHandleGlobalKeyMetaRightMovesEditorToLineEnd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Text:   "alpha beta\nnext",
+			Cursor: 2,
+			Mode:   notes.ModeInsert,
+		}},
+		CurrentTab:   0,
+		SidebarWidth: 28,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "right", Meta: true}) {
+		t.Fatal("handleGlobalKey(meta+right) = false, want true")
+	}
+	if got := ws.ActiveEditor().Cursor; got != len([]rune("alpha beta")) {
+		t.Fatalf("cursor = %d, want line end", got)
+	}
+}
+
+func TestHandleGlobalKeyMetaRightIgnoresTabSelectAndMovesEditorToLineEnd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Text:   "alpha beta\nnext",
+			Cursor: 2,
+			Mode:   notes.ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws, tabSelect: true}
+	if !app.handleGlobalKey(notes.Key{Name: "right", Meta: true}) {
+		t.Fatal("handleGlobalKey(meta+right) = false, want true")
+	}
+	if app.view != viewNotes {
+		t.Fatalf("view = %v, want notes", app.view)
+	}
+	if got := ws.ActiveEditor().Cursor; got != len([]rune("alpha beta")) {
+		t.Fatalf("cursor = %d, want line end", got)
+	}
+}
+
+func TestHandleGlobalKeyCtrlEVariantMovesEditorToLineEnd(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Text:   "alpha beta\nnext",
+			Cursor: 2,
+			Mode:   notes.ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "e", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+e) = false, want line end in editor")
+	}
+	if ws.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want editor to keep focus")
+	}
+	if got := ws.ActiveEditor().Cursor; got != len([]rune("alpha beta")) {
+		t.Fatalf("cursor = %d, want line end", got)
+	}
+}
+
+func TestHandleGlobalKeyCtrlATogglesNotesSidebar(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs:       []*notes.Editor{{Text: "alpha", Mode: notes.ModeInsert}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "a", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+a) = false, want sidebar toggle")
+	}
+	if !ws.FocusSidebar {
+		t.Fatal("FocusSidebar = false, want true")
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "a", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+a) second = false, want sidebar toggle")
+	}
+	if ws.FocusSidebar {
+		t.Fatal("FocusSidebar = true, want false")
+	}
+}
+
+func TestHandleGlobalKeyEditorCtrlRightDoesNotResizeSidebar(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Text:   "alpha beta\nnext",
+			Cursor: 2,
+			Mode:   notes.ModeInsert,
+		}},
+		CurrentTab:   0,
+		SidebarWidth: 28,
+		FocusSidebar: false,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "right", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+right) = false, want editor line navigation")
+	}
+	if got := ws.SidebarWidth; got != 28 {
+		t.Fatalf("SidebarWidth = %d, want unchanged", got)
+	}
+	if got := ws.ActiveEditor().Cursor; got != len([]rune("alpha beta")) {
+		t.Fatalf("cursor = %d, want line end", got)
+	}
+}
+
+func TestHandleGlobalKeySidebarCtrlArrowsResizeSidebar(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs:         []*notes.Editor{{Text: "alpha", Mode: notes.ModeNormal}},
+		CurrentTab:   0,
+		SidebarWidth: 28,
+		FocusSidebar: true,
+		Tree:         []notes.TreeEntry{{Label: "Plan"}},
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "right", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+right) = false, want resize")
+	}
+	if ws.SidebarWidth != 29 {
+		t.Fatalf("SidebarWidth after ctrl+right = %d, want 29", ws.SidebarWidth)
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "left", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+left) = false, want resize")
+	}
+	if ws.SidebarWidth != 28 {
+		t.Fatalf("SidebarWidth after ctrl+left = %d, want 28", ws.SidebarWidth)
 	}
 }
 

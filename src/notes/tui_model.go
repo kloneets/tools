@@ -12,6 +12,7 @@ import (
 
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
+	"github.com/mattn/go-runewidth"
 )
 
 type Mode string
@@ -29,6 +30,7 @@ type Key struct {
 	Name  string
 	Ctrl  bool
 	Alt   bool
+	Meta  bool
 	Shift bool
 }
 
@@ -778,24 +780,35 @@ func (w *Workspace) HandleKey(key Key) bool {
 		_ = w.SaveCurrent()
 		return true
 	}
+	if key.Ctrl && key.Name == "a" {
+		w.FocusSidebar = !w.FocusSidebar
+		return true
+	}
+	if key.Ctrl && !w.FocusSidebar && key.Name == "e" {
+		ed := w.ActiveEditor()
+		if ed != nil {
+			key = Key{Name: "right", Meta: true}
+			handled := w.handleEditorKey(key)
+			if handled {
+				w.ensureEditorVisible()
+			}
+			return handled
+		}
+	}
 	if key.Ctrl && key.Name == "n" {
 		return w.NewNote()
 	}
 	if key.Ctrl && key.Name == "d" {
 		return w.requestDeleteFocusedNote()
 	}
-	if key.Ctrl && key.Name == "e" {
-		w.FocusSidebar = !w.FocusSidebar
-		return true
-	}
-	if key.Ctrl && key.Name == "left" {
+	if key.Ctrl && key.Name == "left" && w.FocusSidebar {
 		if w.SidebarWidth > 20 {
 			w.SidebarWidth--
 			settings.SaveNotesEditorWidth(w.SidebarWidth)
 		}
 		return true
 	}
-	if key.Ctrl && key.Name == "right" {
+	if key.Ctrl && key.Name == "right" && w.FocusSidebar {
 		w.SidebarWidth++
 		settings.SaveNotesEditorWidth(normalizeSidebarWidth(w.SidebarWidth))
 		return true
@@ -980,6 +993,17 @@ func (w *Workspace) handleEditorKey(key Key) bool {
 	if ed == nil {
 		return false
 	}
+	if (key.Meta || key.Ctrl) && (key.Name == "left" || key.Name == "right") {
+		if key.Name == "left" {
+			ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
+		} else {
+			ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
+		}
+		if ed.Mode == ModeVisual {
+			refreshVisualSelection(ed)
+		}
+		return true
+	}
 	if key.Ctrl && key.Name == "v" {
 		if ed.Mode == ModeVisual && ed.SelectionMode == vimSelectionBlock {
 			clearVisualSelection(ed)
@@ -1063,7 +1087,10 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 		return insertNewline(ed)
 	case "tab":
 		if key.Shift {
-			return completeEditorPathReferenceBackward(w, ed)
+			if len(ed.AutoCompleteMatches) > 0 {
+				return completeEditorPathReferenceBackward(w, ed)
+			}
+			return outdentListItem(ed)
 		}
 		if completeEditorPathReference(w, ed) {
 			return true
@@ -1164,6 +1191,33 @@ func indentListItem(ed *Editor) bool {
 	cursorShift := len([]rune(indent))
 	ed.Text = updated
 	ed.Cursor += cursorShift
+	ed.Dirty = true
+	return true
+}
+
+func outdentListItem(ed *Editor) bool {
+	if ed == nil {
+		return false
+	}
+	lineStart, lineEnd, line := currentEditorLine(ed)
+	prefix, content, ok := listPrefixParts(line)
+	if !ok {
+		return true
+	}
+	indentLen := len(prefix) - len(strings.TrimLeft(prefix, " \t"))
+	if indentLen <= 0 {
+		return true
+	}
+	remove := min(settings.Inst().NotesApp.TabSpaces, indentLen)
+	rememberUndoState(ed)
+	replacement := prefix[remove:] + content
+	runes := []rune(ed.Text)
+	ed.Text = string(runes[:lineStart]) + replacement + string(runes[lineEnd:])
+	if ed.Cursor >= lineStart+remove {
+		ed.Cursor -= remove
+	} else {
+		ed.Cursor = lineStart
+	}
 	ed.Dirty = true
 	return true
 }
@@ -1945,6 +1999,13 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 		} else {
 			ed.Status = "preview shown"
 		}
+	case vimCommandSidebar:
+		w.FocusSidebar = !w.FocusSidebar
+		if w.FocusSidebar {
+			ed.Status = "sidebar focused"
+		} else {
+			ed.Status = "editor focused"
+		}
 	}
 }
 
@@ -1987,22 +2048,22 @@ func (w *Workspace) HelpText() string {
 		return ""
 	}
 	if w.FocusSidebar {
-		return "notes/sidebar: j k move | enter open/toggle | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+e editor"
+		return "notes/sidebar: j k move | enter open/toggle | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
 	}
 	ed := w.ActiveEditor()
 	if ed == nil {
-		return "notes: i insert | ctrl+e sidebar | ctrl+n new | ctrl+d delete | R rename | [/] tabs | ctrl+s save"
+		return "notes: i insert | ctrl+a sidebar | ctrl+n new | ctrl+d delete | R rename | [/] tabs | ctrl+s save"
 	}
 	if ed.Mode == ModeInsert {
-		return "notes/insert: tab complete or spaces | shift+tab reverse complete | esc normal | ctrl+s save | ctrl+e sidebar"
+		return "notes/insert: tab complete or spaces | shift+tab reverse complete | esc normal | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | sidebar/sb | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
 		return "notes/visual: h j k l move | V line | ctrl+v block | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+e sidebar"
+	return "notes/normal: i insert | u undo | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -2310,9 +2371,10 @@ func renderPreviewPane(ed *Editor, width int, height int) []string {
 }
 
 type wrappedSegment struct {
-	start int
-	end   int
-	text  string
+	start        int
+	end          int
+	text         string
+	displayWidth int
 }
 
 func buildEditorVisualRows(ed *Editor, width int) []string {
@@ -2373,42 +2435,110 @@ func wrapPlainLine(line string, width int) []wrappedSegment {
 	}
 	runes := []rune(line)
 	if len(runes) == 0 {
-		return []wrappedSegment{{start: 0, end: 0, text: ""}}
+		return []wrappedSegment{{start: 0, end: 0, text: "", displayWidth: 0}}
 	}
-	segments := make([]wrappedSegment, 0, (len(runes)/width)+1)
+	segments := make([]wrappedSegment, 0, len(runes)/width+1)
 	for start := 0; start < len(runes); {
-		end := min(start+width, len(runes))
-		if end < len(runes) {
-			breakAt := -1
-			for i := end - 1; i > start; i-- {
-				if runes[i] == ' ' || runes[i] == '\t' {
-					breakAt = i
-					break
-				}
+		end := start
+		cells := 0
+		lastBreak := -1
+		lastSoftBreak := -1
+		for end < len(runes) {
+			rw := runeCellWidth(runes[end])
+			if cells > 0 && cells+rw > width {
+				break
 			}
-			if breakAt > start {
-				trimEnd := breakAt
-				for trimEnd > start && (runes[trimEnd-1] == ' ' || runes[trimEnd-1] == '\t') {
-					trimEnd--
-				}
-				segments = append(segments, wrappedSegment{start: start, end: max(trimEnd, start), text: string(runes[start:trimEnd])})
-				start = breakAt + 1
-				for start < len(runes) && (runes[start] == ' ' || runes[start] == '\t') {
-					start++
-				}
-				if start >= len(runes) {
-					segments = append(segments, wrappedSegment{start: len(runes), end: len(runes), text: ""})
-				}
-				continue
+			if cells == 0 && rw > width {
+				rw = width
+			}
+			cells += rw
+			if runes[end] == ' ' || runes[end] == '\t' {
+				lastBreak = end
+			}
+			if isSoftWrapRune(runes[end]) {
+				lastSoftBreak = end
+			}
+			end++
+			if cells >= width {
+				break
 			}
 		}
-		segments = append(segments, wrappedSegment{start: start, end: end, text: string(runes[start:end])})
-		start = end
+		segEnd := end
+		next := end
+		if end < len(runes) && lastBreak > start {
+			segEnd = lastBreak
+			for segEnd > start && (runes[segEnd-1] == ' ' || runes[segEnd-1] == '\t') {
+				segEnd--
+			}
+			next = lastBreak + 1
+			for next < len(runes) && (runes[next] == ' ' || runes[next] == '\t') {
+				next++
+			}
+		} else if end < len(runes) && lastSoftBreak > start {
+			segEnd = lastSoftBreak + 1
+			next = segEnd
+		}
+		text := string(runes[start:segEnd])
+		segments = append(segments, wrappedSegment{start: start, end: segEnd, text: text, displayWidth: runewidth.StringWidth(text)})
+		if next <= start {
+			next = start + 1
+		}
+		start = next
 	}
 	if len(segments) == 0 {
-		return []wrappedSegment{{start: 0, end: 0, text: ""}}
+		return []wrappedSegment{{start: 0, end: 0, text: "", displayWidth: 0}}
 	}
 	return segments
+}
+
+func isSoftWrapRune(r rune) bool {
+	switch r {
+	case '/', '-', '_', '.', '?', '&', '=', '#':
+		return true
+	default:
+		return false
+	}
+}
+
+func runeCellWidth(r rune) int {
+	if r == '\t' {
+		return settings.Inst().NotesApp.TabSpaces
+	}
+	w := runewidth.RuneWidth(r)
+	if w <= 0 {
+		return 1
+	}
+	return w
+}
+
+func segmentCellWidthUntil(segment wrappedSegment, lineCol int) int {
+	if lineCol <= segment.start {
+		return 0
+	}
+	if lineCol >= segment.end {
+		return segment.displayWidth
+	}
+	runes := []rune(segment.text)
+	cells := 0
+	for i := 0; i < lineCol-segment.start && i < len(runes); i++ {
+		cells += runeCellWidth(runes[i])
+	}
+	return cells
+}
+
+func segmentRuneOffsetAtCell(segment wrappedSegment, cell int) int {
+	if cell <= 0 {
+		return segment.start
+	}
+	cells := 0
+	for idx, r := range []rune(segment.text) {
+		next := cells + runeCellWidth(r)
+		if cell < next {
+			return segment.start + idx
+		}
+		cells = next
+	}
+	return segment.end
 }
 
 func editorVisualCursor(ed *Editor, width int) (int, int) {
@@ -2422,11 +2552,11 @@ func editorVisualCursor(ed *Editor, width int) (int, int) {
 		if idx == cursorLine {
 			for segIdx, segment := range segments {
 				if cursorCol < segment.end || (segIdx == len(segments)-1 && cursorCol <= segment.end) {
-					return rowOffset + segIdx, cursorCol - segment.start
+					return rowOffset + segIdx, segmentCellWidthUntil(segment, cursorCol)
 				}
 			}
 			last := segments[len(segments)-1]
-			return rowOffset + len(segments) - 1, max(0, cursorCol-last.start)
+			return rowOffset + len(segments) - 1, min(last.displayWidth, segmentCellWidthUntil(last, cursorCol))
 		}
 		rowOffset += len(segments)
 	}
@@ -2445,6 +2575,117 @@ func (w *Workspace) editorRenderWidth() int {
 		return w.EditorRenderWidth
 	}
 	return editorWrapWidth()
+}
+
+func lineStartOffsets(text string) []int {
+	runes := []rune(text)
+	offsets := []int{0}
+	for i, r := range runes {
+		if r == '\n' {
+			offsets = append(offsets, i+1)
+		}
+	}
+	return offsets
+}
+
+func (w *Workspace) EditorOffsetAtVisualPosition(row int, col int) (int, bool) {
+	if w == nil {
+		return 0, false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return 0, false
+	}
+	lines := strings.Split(ed.Text, "\n")
+	offsets := lineStartOffsets(ed.Text)
+	gutterWidth := editorLineNumberWidth(lines, w.editorRenderWidth())
+	contentWidth := max(1, w.editorRenderWidth()-gutterWidth)
+	targetRow := ed.ScrollTop + max(0, row)
+	visualRow := 0
+	for lineIdx, line := range lines {
+		segments := wrapPlainLine(line, contentWidth)
+		for _, segment := range segments {
+			if visualRow == targetRow {
+				cell := col - gutterWidth
+				if cell < 0 {
+					cell = 0
+				}
+				if cell > segment.displayWidth {
+					cell = segment.displayWidth
+				}
+				return offsets[lineIdx] + segmentRuneOffsetAtCell(segment, cell), true
+			}
+			visualRow++
+		}
+	}
+	return len([]rune(ed.Text)), true
+}
+
+func (w *Workspace) MoveEditorCursorToVisualPosition(row int, col int) bool {
+	offset, ok := w.EditorOffsetAtVisualPosition(row, col)
+	if !ok {
+		return false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return false
+	}
+	w.FocusSidebar = false
+	clearVisualSelection(ed)
+	ed.Cursor = vimClampOffset(ed.Text, offset)
+	w.ensureEditorVisible()
+	return true
+}
+
+func (w *Workspace) BeginMouseSelection(row int, col int) bool {
+	if !w.MoveEditorCursorToVisualPosition(row, col) {
+		return false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return false
+	}
+	ed.SelectionMode = vimSelectionChar
+	ed.SelectionMark = ed.Cursor
+	ed.SelectionCursor = ed.Cursor
+	return true
+}
+
+func (w *Workspace) DragMouseSelection(row int, col int) bool {
+	offset, ok := w.EditorOffsetAtVisualPosition(row, col)
+	if !ok {
+		return false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return false
+	}
+	w.FocusSidebar = false
+	ed.Cursor = vimClampOffset(ed.Text, offset)
+	ed.SelectionCursor = ed.Cursor
+	ed.SelectionMode = vimSelectionChar
+	ed.Mode = ModeVisual
+	w.ensureEditorVisible()
+	return true
+}
+
+func (w *Workspace) SelectSidebarRow(row int, open bool) bool {
+	if w == nil || len(w.Tree) == 0 {
+		return false
+	}
+	idx := row - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(w.Tree) {
+		idx = len(w.Tree) - 1
+	}
+	w.FocusSidebar = true
+	w.Selection = idx
+	if open {
+		return w.handleSidebarKey(Key{Name: "enter"})
+	}
+	return true
 }
 
 func hasTag(spans []markdownSpan, tag string) bool {
@@ -2689,8 +2930,7 @@ func searchHighlightSpans(text string, query string) []markdownSpan {
 }
 
 func editorRenderSpans(text string, tabSpaces int) []markdownSpan {
-	render := markdownRenderFromText(text)
-	spans := append([]markdownSpan(nil), render.Spans...)
+	spans := editorMarkdownSpans(text)
 	lines := strings.Split(text, "\n")
 	offset := 0
 	inCodeBlock := false
@@ -2722,6 +2962,122 @@ func editorRenderSpans(text string, tabSpaces int) []markdownSpan {
 	if inCodeBlock {
 		blockText := strings.Join(codeLines, "\n")
 		spans = append(spans, treeSitterSpans(blockText, blockStartOffset, codeLanguage)...)
+	}
+	return spans
+}
+
+func editorMarkdownSpans(text string) []markdownSpan {
+	lines := strings.SplitAfter(text, "\n")
+	spans := make([]markdownSpan, 0)
+	offset := 0
+	inCodeBlock := false
+	for _, rawLine := range lines {
+		line := strings.TrimSuffix(rawLine, "\n")
+		lineEnd := offset + runeLen(line)
+		trimmed := strings.TrimLeft(line, " \t")
+		indent := runeLen(line[:len(line)-len(trimmed)])
+		if strings.HasPrefix(trimmed, "```") {
+			spans = append(spans, markdownSpan{Tag: tagCodeBlock, Start: offset, End: lineEnd})
+			inCodeBlock = !inCodeBlock
+			offset += runeLen(rawLine)
+			continue
+		}
+		if inCodeBlock {
+			spans = append(spans, markdownSpan{Tag: tagCodeBlock, Start: offset, End: lineEnd})
+			offset += runeLen(rawLine)
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "# "):
+			spans = append(spans, markdownSpan{Tag: tagHeading1, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "## "):
+			spans = append(spans, markdownSpan{Tag: tagHeading2, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading3, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "#### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading4, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "##### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading5, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "###### "):
+			spans = append(spans, markdownSpan{Tag: tagHeading6, Start: offset + indent, End: lineEnd})
+		case isHorizontalRule(trimmed):
+			spans = append(spans, markdownSpan{Tag: tagHorizontalRule, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "- [ ] "), strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
+			spans = append(spans, markdownSpan{Tag: tagChecklist, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
+			spans = append(spans, markdownSpan{Tag: tagList, Start: offset + indent, End: lineEnd})
+		case orderedListPrefixLength(trimmed) > 0:
+			spans = append(spans, markdownSpan{Tag: tagOrdered, Start: offset + indent, End: lineEnd})
+		case strings.HasPrefix(trimmed, "> "):
+			spans = append(spans, markdownSpan{Tag: tagQuote, Start: offset + indent, End: lineEnd})
+		}
+		spans = append(spans, editorInlineMarkdownSpans(line, offset)...)
+		offset += runeLen(rawLine)
+	}
+	return spans
+}
+
+func editorInlineMarkdownSpans(line string, offset int) []markdownSpan {
+	spans := make([]markdownSpan, 0)
+	for i := 0; i < len(line); {
+		if strings.HasPrefix(line[i:], "![") {
+			if endLabel := strings.IndexByte(line[i+2:], ']'); endLabel >= 0 {
+				labelEnd := i + 2 + endLabel
+				if labelEnd+1 < len(line) && line[labelEnd+1] == '(' {
+					if endURL := strings.IndexByte(line[labelEnd+2:], ')'); endURL >= 0 {
+						i = labelEnd + 2 + endURL + 1
+						continue
+					}
+				}
+			}
+		}
+		if strings.HasPrefix(line[i:], "**") || strings.HasPrefix(line[i:], "__") {
+			delim := line[i : i+2]
+			if closeIdx := strings.Index(line[i+2:], delim); closeIdx >= 0 {
+				start := runeLen(line[:i+2])
+				end := runeLen(line[:i+2+closeIdx+2])
+				spans = append(spans, markdownSpan{Tag: tagBold, Start: offset + start, End: offset + end})
+				i += 2 + closeIdx + 2
+				continue
+			}
+		}
+		if line[i] == '`' {
+			if closeIdx := strings.IndexByte(line[i+1:], '`'); closeIdx >= 0 {
+				start := runeLen(line[:i])
+				end := runeLen(line[:i+1+closeIdx+1])
+				spans = append(spans, markdownSpan{Tag: tagCode, Start: offset + start, End: offset + end})
+				i += closeIdx + 2
+				continue
+			}
+		}
+		if line[i] == '[' {
+			if endLabel := strings.IndexByte(line[i:], ']'); endLabel >= 0 {
+				labelEnd := i + endLabel
+				if labelEnd+1 < len(line) && line[labelEnd+1] == '(' {
+					if endURL := strings.IndexByte(line[labelEnd+2:], ')'); endURL >= 0 {
+						start := runeLen(line[:i+1])
+						end := runeLen(line[:labelEnd])
+						spans = append(spans, markdownSpan{Tag: tagLink, Start: offset + start, End: offset + end})
+						i = labelEnd + 2 + endURL + 1
+						continue
+					}
+				}
+			}
+		}
+		if (line[i] == '*' || line[i] == '_') && !isDoubleDelimiter(line, i, line[i]) {
+			if closeIdx := strings.IndexByte(line[i+1:], line[i]); closeIdx >= 0 {
+				start := runeLen(line[:i+1])
+				end := runeLen(line[:i+1+closeIdx+1])
+				spans = append(spans, markdownSpan{Tag: tagItalic, Start: offset + start, End: offset + end})
+				i += closeIdx + 2
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(line[i:])
+		if size <= 0 {
+			size = 1
+		}
+		i += size
 	}
 	return spans
 }

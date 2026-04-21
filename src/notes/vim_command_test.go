@@ -79,6 +79,18 @@ func TestParseVimCommandUndoRedo(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandSidebarAliases(t *testing.T) {
+	for _, raw := range []string{"sidebar", "sb"} {
+		cmd, err := parseVimCommand(raw)
+		if err != nil {
+			t.Fatalf("parseVimCommand(%q) error = %v", raw, err)
+		}
+		if cmd.Kind != vimCommandSidebar {
+			t.Fatalf("parseVimCommand(%q) kind = %q, want %q", raw, cmd.Kind, vimCommandSidebar)
+		}
+	}
+}
+
 func TestCollectSupportedLinksDedupesAndFilters(t *testing.T) {
 	text := strings.Join([]string{
 		"[docs](https://example.com/docs)",
