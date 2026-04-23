@@ -1,6 +1,10 @@
 package app
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +207,97 @@ func TestHandleGlobalKeyCtrlATogglesNotesSidebar(t *testing.T) {
 	}
 	if ws.FocusSidebar {
 		t.Fatal("FocusSidebar = true, want false")
+	}
+}
+
+func TestHandleGlobalKeyCtrlSSavesAllNotesAndSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	helpers.InitStatusBar()
+	settings.Init()
+	first := filepath.Join(home, "first.md")
+	second := filepath.Join(home, "second.md")
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{
+			{Path: first, Title: "first", Text: "first saved", Dirty: true, Mode: notes.ModeNormal},
+			{Path: second, Title: "second", Text: "second saved", Dirty: true, Mode: notes.ModeNormal},
+		},
+		CurrentTab: 0,
+	}
+	settings.Inst().UI.Theme = "gruvbox"
+	app := &terminalApp{view: viewNotes, notes: ws, settingsDirty: true}
+	if !app.handleGlobalKey(notes.Key{Name: "s", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+s) = false, want true")
+	}
+	assertFileContent(t, first, "first saved")
+	assertFileContent(t, second, "second saved")
+	if ws.Tabs[0].Dirty || ws.Tabs[1].Dirty {
+		t.Fatal("dirty notes were not cleared")
+	}
+	if app.settingsDirty {
+		t.Fatal("settingsDirty = true, want false")
+	}
+	data, err := os.ReadFile(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved settings.UserSettings
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.UI.Theme != "gruvbox" {
+		t.Fatalf("saved theme = %q, want gruvbox", saved.UI.Theme)
+	}
+}
+
+func TestNotesVimWriteRequestsSaveAllState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	helpers.InitStatusBar()
+	settings.Init()
+	first := filepath.Join(home, "first.md")
+	second := filepath.Join(home, "second.md")
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{
+			{Path: first, Title: "first", Text: "first saved", Dirty: true, Mode: notes.ModeCommand, Command: "w"},
+			{Path: second, Title: "second", Text: "second saved", Dirty: true, Mode: notes.ModeNormal},
+		},
+		CurrentTab: 0,
+	}
+	settings.Inst().UI.Theme = "kanagawa"
+	app := &terminalApp{view: viewNotes, notes: ws, settingsDirty: true}
+	if !app.handleGlobalKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleGlobalKey(enter) = false, want command handling")
+	}
+	assertFileContent(t, first, "first saved")
+	assertFileContent(t, second, "second saved")
+	if ws.Tabs[0].Dirty || ws.Tabs[1].Dirty {
+		t.Fatal("dirty notes were not cleared by :w")
+	}
+	if app.settingsDirty {
+		t.Fatal("settingsDirty = true, want false after :w")
+	}
+	data, err := os.ReadFile(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved settings.UserSettings
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.UI.Theme != "kanagawa" {
+		t.Fatalf("saved theme = %q, want kanagawa", saved.UI.Theme)
+	}
+}
+
+func assertFileContent(t *testing.T, path string, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("%s = %q, want %q", path, got, want)
 	}
 }
 
@@ -456,6 +551,36 @@ func TestCaptureMouseSwitchesNoteTabOnEditorTabRow(t *testing.T) {
 	}
 }
 
+func TestCaptureMouseScrollMovesNoteCursor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		EditorRenderWidth: 20,
+		EditorHeight:      4,
+		Tabs: []*notes.Editor{{
+			Text:   "alpha beta gamma\ndelta\nepsilon",
+			Cursor: 0,
+			Mode:   notes.ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	editor := tview.NewTextView()
+	editor.SetRect(0, 0, 20, 10)
+	app := &terminalApp{
+		view:   viewNotes,
+		notes:  ws,
+		editor: editor,
+	}
+	event := tcell.NewEventMouse(3, 1, tcell.ButtonNone, 0)
+	returned, _ := app.captureMouse(event, tview.MouseScrollDown)
+	if returned != nil {
+		t.Fatal("captureMouse() returned event, want consumed scroll")
+	}
+	if got := ws.ActiveEditor().Cursor; got == 0 {
+		t.Fatal("cursor = 0, want moved by scroll")
+	}
+}
+
 func TestHandleGlobalKeyMovesTabSelectionWithArrows(t *testing.T) {
 	app := &terminalApp{view: viewNotes, tabSelect: true}
 	if !app.handleGlobalKey(notes.Key{Name: "right"}) {
@@ -634,6 +759,47 @@ func TestHandleSettingsKeyCyclesTheme(t *testing.T) {
 	}
 }
 
+func TestRenderSettingsShowsThemePreview(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().UI.Theme = "rose-pine"
+	app := &terminalApp{view: viewSettings}
+	got := app.renderSettings(8)
+	if !strings.Contains(got, "theme: rose-pine") {
+		t.Fatalf("renderSettings() = %q, want theme label", got)
+	}
+	theme := themeByName("rose-pine")
+	if !strings.Contains(got, themeMarkupPair(theme.Primary, theme.Panel)+" txt ") {
+		t.Fatalf("renderSettings() = %q, want primary text swatch", got)
+	}
+	if !strings.Contains(got, themeMarkupPair(theme.Title, theme.Panel)+" ttl ") {
+		t.Fatalf("renderSettings() = %q, want title text swatch", got)
+	}
+	if !strings.Contains(got, themeMarkupPair(theme.Primary, theme.Background)+" bg ") {
+		t.Fatalf("renderSettings() = %q, want background swatch", got)
+	}
+	if !strings.Contains(got, themeMarkupPair(theme.ActiveTabFG, theme.ActiveTabBG)+" tab ") {
+		t.Fatalf("renderSettings() = %q, want active tab swatch", got)
+	}
+}
+
+func TestRenderThemePreviewUsesThemePalette(t *testing.T) {
+	preview := renderThemePreview(themeByName("gruvbox"))
+	theme := themeByName("gruvbox")
+	if !strings.Contains(preview, themeMarkupPair(theme.Secondary, theme.Panel)+" sub ") {
+		t.Fatalf("renderThemePreview() = %q, want secondary text swatch", preview)
+	}
+	if !strings.Contains(preview, themeMarkupPair(theme.Dim, theme.Panel)+" dim ") {
+		t.Fatalf("renderThemePreview() = %q, want dim text swatch", preview)
+	}
+	if !strings.Contains(preview, themeMarkupPair(theme.SelectionFG, theme.SelectionBG)+" sel ") {
+		t.Fatalf("renderThemePreview() = %q, want selection swatch", preview)
+	}
+	if !strings.Contains(preview, themeMarkupPair(theme.Background, theme.ErrorAccent)+" err ") {
+		t.Fatalf("renderThemePreview() = %q, want error swatch", preview)
+	}
+}
+
 func TestHandleSettingsKeyTogglesTransparentBackground(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -666,6 +832,119 @@ func TestHandleSettingsKeyTogglesTransparentBackground(t *testing.T) {
 	}
 	if got := app.renderSettings(6); !strings.Contains(got, "transparent background: true") {
 		t.Fatalf("renderSettings() = %q, want transparent background label", got)
+	}
+}
+
+func TestHandleSettingsKeyTogglesSpellChecking(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	app := &terminalApp{view: viewSettings, settingIndex: 5}
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter) = false, want true")
+	}
+	if !settings.Inst().NotesApp.SpellCheckEnabled {
+		t.Fatal("SpellCheckEnabled = false, want true")
+	}
+	if !app.settingsDirty {
+		t.Fatal("settingsDirty = false, want true")
+	}
+}
+
+func TestHandleSettingsKeyInstallsSpellDictionary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	defer notes.ResetSpellTestHooksForTests()
+	notes.SetSpellDownloadURLForTests(func(pkg string, file string) string {
+		return pkg + "/" + file
+	})
+	notes.SetSpellHTTPGetForTests(func(url string) (*http.Response, error) {
+		body := "SET UTF-8\n"
+		if strings.HasSuffix(url, "index.dic") {
+			body = "1\nknown\n"
+		}
+		if strings.HasSuffix(url, "license") {
+			body = "license\n"
+		}
+		return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	app := &terminalApp{view: viewSettings, settingIndex: 6}
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter) = false, want true")
+	}
+	if !notes.SpellDictionaryInstalled("en") {
+		t.Fatal("SpellDictionaryInstalled(en) = false, want true")
+	}
+	if !settings.Inst().NotesApp.SpellCheckEnabled {
+		t.Fatal("SpellCheckEnabled = false, want true")
+	}
+	if !app.settingsDirty {
+		t.Fatal("settingsDirty = false, want true")
+	}
+}
+
+func TestRenderSettingsShowsSpellDictionaryLoadFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	defer notes.ResetSpellTestHooksForTests()
+	notes.SetSpellNativeHooksForTests(func(string) (string, error) {
+		return "", errors.New("missing")
+	}, nil)
+	notes.SetSpellDownloadURLForTests(func(pkg string, file string) string {
+		return pkg + "/" + file
+	})
+	notes.SetSpellHTTPGetForTests(func(url string) (*http.Response, error) {
+		body := "SET UTF-8\n"
+		if strings.HasSuffix(url, "index.dic") {
+			body = "1\nknown/nm\n"
+		}
+		if strings.HasSuffix(url, "license") {
+			body = "license\n"
+		}
+		return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	if err := notes.InstallSpellDictionary("en"); err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewSettings}
+	got := app.renderSettings(20)
+	if !strings.Contains(got, "spell en (English): installed (fallback; install native checker: brew install nuspell)") {
+		t.Fatalf("renderSettings() = %q, want fallback load status", got)
+	}
+}
+
+func TestRenderSettingsShowsNativeSpellDictionaryBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	defer notes.ResetSpellTestHooksForTests()
+	notes.SetSpellDownloadURLForTests(func(pkg string, file string) string {
+		return pkg + "/" + file
+	})
+	notes.SetSpellHTTPGetForTests(func(url string) (*http.Response, error) {
+		body := "SET UTF-8\n"
+		if strings.HasSuffix(url, "index.dic") {
+			body = "1\nknown/nm\n"
+		}
+		if strings.HasSuffix(url, "license") {
+			body = "license\n"
+		}
+		return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	notes.SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(string, []string, string) (string, error) {
+		return "badwrd\n", nil
+	})
+	if err := notes.InstallSpellDictionary("en"); err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewSettings}
+	got := app.renderSettings(20)
+	if !strings.Contains(got, "spell en (English): installed (native: nuspell)") {
+		t.Fatalf("renderSettings() = %q, want native backend status", got)
 	}
 }
 

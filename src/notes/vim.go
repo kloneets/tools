@@ -1,6 +1,9 @@
 package notes
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+)
 
 type vimLineInfo struct {
 	start int
@@ -199,6 +202,108 @@ func vimLineRange(text string, startOffset int, endOffset int) (int, int) {
 		end++
 	}
 	return start, end
+}
+
+func vimLineIndexRange(text string, startOffset int, endOffset int) (int, int) {
+	lines := vimLineInfos(text)
+	if len(lines) == 0 {
+		return 0, 0
+	}
+	startIdx := vimLineIndexAtOffset(text, startOffset)
+	endIdx := vimLineIndexAtOffset(text, endOffset)
+	if startIdx > endIdx {
+		startIdx, endIdx = endIdx, startIdx
+	}
+	return startIdx, endIdx
+}
+
+func vimShiftLines(text string, cursor int, startOffset int, endOffset int, indentWidth int, right bool) (string, int, bool) {
+	updated, offsets, changed := vimShiftLinesAndOffsets(text, startOffset, endOffset, indentWidth, right, []int{cursor})
+	return updated, offsets[0], changed
+}
+
+func vimShiftLinesAndOffsets(text string, startOffset int, endOffset int, indentWidth int, right bool, offsets []int) (string, []int, bool) {
+	if indentWidth <= 0 {
+		indentWidth = 1
+	}
+	transformed := append([]int(nil), offsets...)
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return text, transformed, false
+	}
+	startIdx, endIdx := vimLineIndexRange(text, startOffset, endOffset)
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if endIdx >= len(lines) {
+		endIdx = len(lines) - 1
+	}
+	changed := false
+	lineDeltas := make([]int, len(lines))
+	for idx := startIdx; idx <= endIdx; idx++ {
+		if right {
+			lines[idx] = strings.Repeat(" ", indentWidth) + lines[idx]
+			lineDeltas[idx] = indentWidth
+			changed = true
+			continue
+		}
+		remove := removableIndentWidth(lines[idx], indentWidth)
+		if remove == 0 {
+			continue
+		}
+		lines[idx] = lines[idx][remove:]
+		lineDeltas[idx] = -remove
+		changed = true
+	}
+	if !changed {
+		return text, transformed, false
+	}
+	updated := strings.Join(lines, "\n")
+	for idx, offset := range offsets {
+		transformed[idx] = vimTransformOffsetAfterLineShifts(text, updated, offset, lineDeltas)
+	}
+	return updated, transformed, true
+}
+
+func vimTransformOffsetAfterLineShifts(original string, updated string, offset int, lineDeltas []int) int {
+	offset = vimClampOffset(original, offset)
+	lines := vimLineInfos(original)
+	if len(lines) == 0 {
+		return vimClampOffset(updated, offset)
+	}
+	lineIdx := vimLineIndexAtOffset(original, offset)
+	prefixShift := 0
+	for idx := 0; idx < lineIdx && idx < len(lineDeltas); idx++ {
+		prefixShift += lineDeltas[idx]
+	}
+	line := lines[lineIdx]
+	col := offset - line.start
+	lineDelta := 0
+	if lineIdx < len(lineDeltas) {
+		lineDelta = lineDeltas[lineIdx]
+	}
+	switch {
+	case lineDelta > 0:
+		offset = line.start + prefixShift + col + lineDelta
+	case lineDelta < 0:
+		removed := -lineDelta
+		if col <= removed {
+			offset = line.start + prefixShift
+		} else {
+			offset = line.start + prefixShift + col - removed
+		}
+	default:
+		offset += prefixShift
+	}
+	return vimClampOffset(updated, offset)
+}
+
+func removableIndentWidth(line string, maxWidth int) int {
+	remove := 0
+	for remove < len(line) && remove < maxWidth && line[remove] == ' ' {
+		remove++
+	}
+	return remove
 }
 
 func vimLineColumns(text string, startOffset int, endOffset int) (int, int, int, int) {

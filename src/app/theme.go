@@ -24,12 +24,17 @@ type appTheme struct {
 	SelectionFG   string
 	SelectionBG   string
 	StatusAccent  string
+	ErrorAccent   string
 	CommandAccent string
 	Syntax        map[string]string
 }
 
 func currentTheme() appTheme {
-	theme, ok := themesByName[settings.CurrentTheme()]
+	return themeByName(settings.CurrentTheme())
+}
+
+func themeByName(name string) appTheme {
+	theme, ok := themesByName[name]
 	if !ok {
 		return themesByName[settings.DefaultTheme]
 	}
@@ -79,6 +84,7 @@ var themesByName = map[string]appTheme{
 		SelectionFG:   "#c0caf5",
 		SelectionBG:   "#364a82",
 		StatusAccent:  "#9ece6a",
+		ErrorAccent:   "#f7768e",
 		CommandAccent: "#7dcfff",
 		Syntax: map[string]string{
 			helpers.ANSIRoleHeading1: "#7dcfff", helpers.ANSIRoleHeading2: "#bb9af7", helpers.ANSIRoleHeading3: "#e0af68",
@@ -104,6 +110,7 @@ var themesByName = map[string]appTheme{
 		SelectionFG:   "#cdd6f4",
 		SelectionBG:   "#45475a",
 		StatusAccent:  "#a6e3a1",
+		ErrorAccent:   "#f38ba8",
 		CommandAccent: "#89dceb",
 		Syntax: map[string]string{
 			helpers.ANSIRoleHeading1: "#89b4fa", helpers.ANSIRoleHeading2: "#cba6f7", helpers.ANSIRoleHeading3: "#f9e2af",
@@ -129,6 +136,7 @@ var themesByName = map[string]appTheme{
 		SelectionFG:   "#dcd7ba",
 		SelectionBG:   "#2d4f67",
 		StatusAccent:  "#98bb6c",
+		ErrorAccent:   "#e46876",
 		CommandAccent: "#7fb4ca",
 		Syntax: map[string]string{
 			helpers.ANSIRoleHeading1: "#7e9cd8", helpers.ANSIRoleHeading2: "#957fb8", helpers.ANSIRoleHeading3: "#e6c384",
@@ -154,6 +162,7 @@ var themesByName = map[string]appTheme{
 		SelectionFG:   "#ebdbb2",
 		SelectionBG:   "#504945",
 		StatusAccent:  "#b8bb26",
+		ErrorAccent:   "#fb4934",
 		CommandAccent: "#8ec07c",
 		Syntax: map[string]string{
 			helpers.ANSIRoleHeading1: "#83a598", helpers.ANSIRoleHeading2: "#d3869b", helpers.ANSIRoleHeading3: "#fabd2f",
@@ -179,6 +188,7 @@ var themesByName = map[string]appTheme{
 		SelectionFG:   "#e0def4",
 		SelectionBG:   "#403d52",
 		StatusAccent:  "#31748f",
+		ErrorAccent:   "#eb6f92",
 		CommandAccent: "#c4a7e7",
 		Syntax: map[string]string{
 			helpers.ANSIRoleHeading1: "#9ccfd8", helpers.ANSIRoleHeading2: "#c4a7e7", helpers.ANSIRoleHeading3: "#f6c177",
@@ -204,6 +214,7 @@ var themesByName = map[string]appTheme{
 		SelectionFG:   "#cecdc3",
 		SelectionBG:   "#343331",
 		StatusAccent:  "#66800b",
+		ErrorAccent:   "#d14d41",
 		CommandAccent: "#24837b",
 		Syntax: map[string]string{
 			helpers.ANSIRoleHeading1: "#4385be", helpers.ANSIRoleHeading2: "#8b7ec8", helpers.ANSIRoleHeading3: "#ad8301",

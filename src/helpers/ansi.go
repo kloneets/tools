@@ -99,4 +99,5 @@ const (
 	ANSIRoleVisualSelection = "\x1b[9019m"
 	ANSIRoleActiveTab       = "\x1b[9020m"
 	ANSIRoleSelection       = "\x1b[9021m"
+	ANSIRoleSpellError      = "\x1b[9022m"
 )

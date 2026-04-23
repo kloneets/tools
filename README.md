@@ -111,6 +111,7 @@ The Notes view is the main Markdown workspace. It supports:
 - Markdown syntax highlighting and code syntax highlighting.
 - Search and visual selection highlighting.
 - Quick highlight feedback after yanking words, lines, or visual selections. Word yanks highlight and copy only the word itself, without trailing spaces or punctuation.
+- Optional spell checking with installable Hunspell dictionaries, underline markers for misspellings, and one shared custom word file.
 - Multiple open note tabs.
 - Sidebar folder and note navigation.
 - Note rename, create, delete, save, and restore of open note session.
@@ -126,17 +127,20 @@ Useful normal-mode keys:
 - `n` / `N`: next or previous search match.
 - `u`: undo.
 - `v` / `V`: visual character or line selection.
+- `>` / `<`: indent or outdent the current line, or all selected lines in visual mode.
 - `ctrl+a`: switch focus between editor and sidebar.
 - `ctrl+a`, then `a`: switch between the two most recently accessed notes and return focus to the editor.
 - `ctrl+a`, then `1` through `9` or `0`: switch to that numbered open note and return focus to the editor.
+- `zg`: add the word under the cursor to the shared custom spell dictionary.
 - `[` / `]`: switch open note tabs.
 - `ctrl+s`: save local state.
 
 Useful command-mode commands:
 
-- `:w`: save the active note.
+- `:w`: save all local state.
 - `:q`: quit through the normal shutdown flow.
-- `:wq`: save the active note and close the app.
+- `:wq`: save all local state and close the app.
+- `:addword` or `:spelladd`: add the word under the cursor to the shared custom spell dictionary.
 - `:ol`: collect external links from the current note and show a confirmation prompt before opening them.
 - `:preview`: toggle the preview pane.
 - `:sidebar` or `:sb`: toggle sidebar focus.
@@ -146,6 +150,8 @@ Useful command-mode commands:
 - `:s/old/new/g`: replace matches on the current line.
 
 One-character command chaining is supported for commands such as `:wq`.
+
+Spell checking is configured from Settings. Dictionaries are downloaded only when selected in Settings, starting with English, Russian, and Latvian plus several additional Hunspell dictionaries. The app uses native `nuspell` when available, then native `hunspell`, then a basic `.dic` fallback. On macOS, install the preferred native checker with `brew install nuspell` for full Hunspell dictionary support. Settings shows whether each installed dictionary is using a native checker, fallback mode, or cannot load. Words are accepted if they exist in any loaded dictionary or in `.config/koko-tools/spell/custom.txt`.
 
 ## Files
 
@@ -246,6 +252,8 @@ Current settings include:
 - Vim mode.
 - Tab spaces.
 - Undo levels.
+- Spell checking.
+- Spell dictionary downloads.
 
 Built-in themes:
 

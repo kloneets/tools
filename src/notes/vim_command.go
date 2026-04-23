@@ -21,6 +21,7 @@ const (
 	vimCommandRedo      vimCommandKind = "redo"
 	vimCommandPreview   vimCommandKind = "preview"
 	vimCommandSidebar   vimCommandKind = "sidebar"
+	vimCommandAddWord   vimCommandKind = "add-word"
 	vimCommandQuit      vimCommandKind = "quit"
 	vimCommandSequence  vimCommandKind = "sequence"
 )
@@ -65,6 +66,8 @@ func parseVimCommand(raw string) (vimCommand, error) {
 		return vimCommand{Kind: vimCommandPreview}, nil
 	case "sidebar", "sb":
 		return vimCommand{Kind: vimCommandSidebar}, nil
+	case "addword", "spelladd":
+		return vimCommand{Kind: vimCommandAddWord}, nil
 	}
 
 	if chained, ok := parseOneCharCommandChain(cmd); ok {

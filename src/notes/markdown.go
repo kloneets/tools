@@ -33,6 +33,7 @@ const (
 	tagLink                  = "md-link"
 	tagVisualSelection       = "md-visual-selection"
 	tagYankHighlight         = "md-yank-highlight"
+	tagSpellError            = "md-spell-error"
 	markdownImagePlaceholder = "\uFFFC"
 )
 

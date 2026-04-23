@@ -472,6 +472,37 @@ func TestMouseClickLeavesEditorOutsideVisualMode(t *testing.T) {
 	}
 }
 
+func TestMoveEditorCursorByVisualRowsMovesCursorAndClearsSelection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 20,
+		EditorHeight:      4,
+		Tabs: []*Editor{{
+			Text:            "alpha beta gamma\ndelta\nepsilon",
+			Cursor:          0,
+			Mode:            ModeVisual,
+			SelectionMode:   vimSelectionChar,
+			SelectionMark:   0,
+			SelectionCursor: 5,
+		}},
+		CurrentTab: 0,
+	}
+	if !w.MoveEditorCursorByVisualRows(1) {
+		t.Fatal("MoveEditorCursorByVisualRows() = false, want true")
+	}
+	ed := w.ActiveEditor()
+	if ed.Cursor != len([]rune("alpha beta gamma\n")) {
+		t.Fatalf("cursor = %d, want next visual row at following line start", ed.Cursor)
+	}
+	if ed.SelectionMode != vimSelectionNone {
+		t.Fatalf("selection = %s, want cleared selection", ed.SelectionMode)
+	}
+	if got := ed.ScrollTop; got != 0 {
+		t.Fatalf("ScrollTop = %d, want unchanged", got)
+	}
+}
+
 func TestEnsureEditorVisibleUsesActualRenderWidthForWrappedRows(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1458,8 +1489,8 @@ func TestExecuteVimCommandChainSavesThenQueuesForcedQuit(t *testing.T) {
 		{Kind: vimCommandSave},
 		{Kind: vimCommandQuit, Force: true},
 	}})
-	if ed.Dirty {
-		t.Fatal("Dirty = true, want saved")
+	if !ws.TakePendingSaveAll() {
+		t.Fatal("TakePendingSaveAll() = false, want true")
 	}
 	quit, force := ws.TakePendingQuit()
 	if !quit || !force {
@@ -2051,6 +2082,98 @@ func TestVisualLineYankAndDelete(t *testing.T) {
 	}
 	if got := ed2.Text; got != "three" {
 		t.Fatalf("text = %q, want %q", got, "three")
+	}
+}
+
+func TestNormalModeShiftCurrentLineRightAndLeft(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.TabSpaces = 2
+	ed := &Editor{Text: "one\ntwo", Cursor: 5, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: ">", Rune: '>'}) {
+		t.Fatal("handleNormalMode(>) = false, want true")
+	}
+	if got := ed.Text; got != "one\n  two" {
+		t.Fatalf("text = %q, want indented current line", got)
+	}
+	if got := ed.Cursor; got != 7 {
+		t.Fatalf("cursor = %d, want shifted cursor", got)
+	}
+	if !ed.Dirty {
+		t.Fatal("Dirty = false, want true")
+	}
+	ed.Dirty = false
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "<", Rune: '<'}) {
+		t.Fatal("handleNormalMode(<) = false, want true")
+	}
+	if got := ed.Text; got != "one\ntwo" {
+		t.Fatalf("text = %q, want outdented current line", got)
+	}
+	if got := ed.Cursor; got != 5 {
+		t.Fatalf("cursor = %d, want restored cursor", got)
+	}
+	if !ed.Dirty {
+		t.Fatal("Dirty = false, want true after outdent")
+	}
+}
+
+func TestNormalModeShiftLeftNoopsWithoutIndent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.TabSpaces = 4
+	ed := &Editor{Text: "one", Cursor: 0, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "<", Rune: '<'}) {
+		t.Fatal("handleNormalMode(<) = false, want true")
+	}
+	if got := ed.Text; got != "one" {
+		t.Fatalf("text = %q, want unchanged", got)
+	}
+	if ed.Dirty {
+		t.Fatal("Dirty = true, want no-op outdent to remain clean")
+	}
+}
+
+func TestVisualModeShiftSelectionRightAndLeft(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.TabSpaces = 2
+	ed := &Editor{Text: "one\ntwo\nthree", Cursor: 0, Mode: ModeNormal}
+	startVisualSelection(ed, vimSelectionLine)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	if !handleVisualMode(ed, Key{Name: ">", Rune: '>'}) {
+		t.Fatal("handleVisualMode(>) = false, want true")
+	}
+	if got := ed.Text; got != "  one\n  two\nthree" {
+		t.Fatalf("text = %q, want selected lines indented", got)
+	}
+	if ed.Mode != ModeVisual || ed.SelectionMode != vimSelectionLine {
+		t.Fatalf("mode = %s selection = %s, want visual line selection", ed.Mode, ed.SelectionMode)
+	}
+	start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+	if got := ed.Text[start:end]; got != "  one\n  two\n" {
+		t.Fatalf("selected text = %q, want shifted visual selection", got)
+	}
+	if !ed.Dirty {
+		t.Fatal("Dirty = false, want true")
+	}
+
+	ed.Dirty = false
+	ed.Cursor = 2
+	startVisualSelection(ed, vimSelectionChar)
+	ed.Cursor = strings.Index(ed.Text, "two")
+	refreshVisualSelection(ed)
+	if !handleVisualMode(ed, Key{Name: "<", Rune: '<'}) {
+		t.Fatal("handleVisualMode(<) = false, want true")
+	}
+	if got := ed.Text; got != "one\ntwo\nthree" {
+		t.Fatalf("text = %q, want selected lines outdented", got)
+	}
+	if ed.Mode != ModeVisual || ed.SelectionMode != vimSelectionChar {
+		t.Fatalf("mode = %s selection = %s, want visual char selection", ed.Mode, ed.SelectionMode)
+	}
+	if !ed.Dirty {
+		t.Fatal("Dirty = false, want true after visual outdent")
 	}
 }
 

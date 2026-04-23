@@ -421,9 +421,9 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 		case "settings":
 			a.view = viewSettings
 		case ":w":
-			_ = a.notes.SaveCurrent()
+			_ = a.saveLocalState()
 		case ":wq":
-			_ = a.notes.SaveCurrent()
+			_ = a.saveLocalState()
 			a.stopTUI()
 			return nil
 		case "save":
@@ -636,6 +636,14 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 		}
 		a.notesMouseDragging = false
 		a.notes.MoveEditorCursorToVisualPosition(row, col)
+	case tview.MouseScrollUp:
+		a.notesMouseDragging = false
+		a.notesMouseMoved = false
+		a.notes.MoveEditorCursorByVisualRows(-3)
+	case tview.MouseScrollDown:
+		a.notesMouseDragging = false
+		a.notesMouseMoved = false
+		a.notes.MoveEditorCursorByVisualRows(3)
 	}
 	a.refresh()
 	return nil, action
@@ -1019,6 +1027,17 @@ func (a *terminalApp) consumePendingNoteActions() {
 		a.deleteNotePath = path
 		a.deleteNoteLabel = label
 		a.showDeleteNoteModal()
+		return
+	}
+	if a.notes.TakePendingSaveAll() {
+		if err := a.saveLocalState(); err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Save failed: " + err.Error())
+		} else {
+			if ed := a.notes.ActiveEditor(); ed != nil {
+				ed.Status = "saved"
+			}
+			helpers.StatusBarInst().UpdateStatusBar("Saved locally at " + formatTimestampOrNever(settings.Inst().GDrive.LastLocalSaveAt))
+		}
 		return
 	}
 	if quit, force := a.notes.TakePendingQuit(); quit {
@@ -1526,7 +1545,7 @@ func (a *terminalApp) syncItems() []actionItem {
 
 func (a *terminalApp) settingsItems() []actionItem {
 	cfg := settings.Inst()
-	return []actionItem{
+	items := []actionItem{
 		{Label: fmt.Sprintf("theme: %s", settings.CurrentTheme()), Apply: func() {
 			if cfg.UI == nil {
 				cfg.UI = &settings.UISettings{}
@@ -1561,6 +1580,68 @@ func (a *terminalApp) settingsItems() []actionItem {
 			a.settingsEditBuffer = strconv.Itoa(cfg.NotesApp.UndoLevels)
 		}},
 	}
+	items = append(items, a.spellSettingsItems()...)
+	return items
+}
+
+func (a *terminalApp) spellSettingsItems() []actionItem {
+	cfg := settings.Inst()
+	items := []actionItem{
+		{Label: fmt.Sprintf("spell checking: %t", cfg.NotesApp.SpellCheckEnabled), Apply: func() {
+			cfg.NotesApp.SpellCheckEnabled = !cfg.NotesApp.SpellCheckEnabled
+			a.settingsDirty = true
+		}},
+	}
+	for _, dict := range notes.SpellCatalog() {
+		d := dict
+		installed := notes.SpellDictionaryInstalled(d.Code)
+		state := "install"
+		if installed {
+			state = spellDictionarySettingsState(notes.SpellDictionaryStatus(d.Code))
+		}
+		label := fmt.Sprintf("spell %s (%s): %s", d.Code, d.Name, state)
+		items = append(items, actionItem{Label: label, Apply: func() {
+			if notes.SpellDictionaryInstalled(d.Code) {
+				if notes.EnableSpellDictionary(d.Code) {
+					cfg.NotesApp.SpellCheckEnabled = true
+					a.settingsDirty = true
+				}
+				helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Spell dictionary already installed: %s", d.Name))
+				return
+			}
+			helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Downloading spell dictionary: %s", d.Name))
+			if err := notes.InstallSpellDictionary(d.Code); err != nil {
+				helpers.StatusBarInst().UpdateStatusBar("Spell dictionary download failed: " + err.Error())
+				return
+			}
+			cfg.NotesApp.SpellCheckEnabled = true
+			a.settingsDirty = true
+			helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Installed spell dictionary: %s", d.Name))
+		}})
+	}
+	return items
+}
+
+func spellDictionarySettingsState(status notes.SpellDictionaryLoadStatus) string {
+	if !status.Installed {
+		return "install"
+	}
+	if status.Loaded {
+		if status.Backend == "nuspell" || status.Backend == "hunspell" {
+			return fmt.Sprintf("installed (native: %s)", status.Backend)
+		}
+		return "installed"
+	}
+	if status.Fallback {
+		if status.Action != "" {
+			return fmt.Sprintf("installed (fallback; install native checker: %s)", status.Action)
+		}
+		return "installed (fallback)"
+	}
+	if status.Error != "" {
+		return "cannot load (reinstall dictionary)"
+	}
+	return "cannot load (reinstall dictionary)"
 }
 
 func (a *terminalApp) refresh() {
@@ -1637,7 +1718,7 @@ func (a *terminalApp) refresh() {
 	case viewSync:
 		a.refreshSingle("Sync", a.renderSync(maxInt(3, a.height-10)))
 	case viewSettings:
-		a.refreshSingle("Settings", a.renderSettings(maxInt(3, a.height-10)))
+		a.refreshSingleMarkup("Settings", a.renderSettings(maxInt(3, a.height-10)))
 	}
 }
 
@@ -1876,6 +1957,14 @@ func (a *terminalApp) refreshSingle(title string, text string) {
 	a.body.AddItem(a.single, 0, 1, false)
 }
 
+func (a *terminalApp) refreshSingleMarkup(title string, text string) {
+	a.single.SetTitle(title)
+	a.single.SetWrap(title == "Sync")
+	a.single.SetWordWrap(title == "Sync")
+	a.single.SetText(text)
+	a.body.AddItem(a.single, 0, 1, false)
+}
+
 func (a *terminalApp) showCursor(screen tcell.Screen) {
 	if a.tabSelect {
 		screen.SetCursorStyle(tcell.CursorStyleDefault)
@@ -2031,6 +2120,7 @@ func ansiToTView(s string) string {
 		helpers.ANSIRoleVisualSelection, themeMarkupPair(theme.Syntax[helpers.ANSIRoleVisualSelection], theme.SelectionBG),
 		helpers.ANSIRoleActiveTab, themeMarkupPair(theme.ActiveTabFG, theme.ActiveTabBG),
 		helpers.ANSIRoleSelection, themeMarkupPair(theme.SelectionFG, theme.SelectionBG),
+		helpers.ANSIRoleSpellError, themeMarkupFGStyle(theme.ErrorAccent, "u"),
 		"\x1b[0m", "[-:-:-]",
 	)
 	return replacer.Replace(escaped)
@@ -2132,12 +2222,39 @@ func (a *terminalApp) renderSettings(height int) string {
 		if i == a.settingIndex {
 			prefix = "> "
 		}
-		lines = append(lines, prefix+item.Label)
+		lines = append(lines, tview.Escape(prefix)+a.renderSettingsItemLabel(i, item.Label))
 	}
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:height], "\n")
+}
+
+func (a *terminalApp) renderSettingsItemLabel(index int, label string) string {
+	escaped := tview.Escape(label)
+	if index != 0 {
+		return escaped
+	}
+	return escaped + "  " + renderThemePreview(themeByName(settings.CurrentTheme()))
+}
+
+func renderThemePreview(theme appTheme) string {
+	parts := []string{
+		themePreviewSwatch("txt", theme.Primary, theme.Panel),
+		themePreviewSwatch("sub", theme.Secondary, theme.Panel),
+		themePreviewSwatch("dim", theme.Dim, theme.Panel),
+		themePreviewSwatch("ttl", theme.Title, theme.Panel),
+		themePreviewSwatch("bg", theme.Primary, theme.Background),
+		themePreviewSwatch("tab", theme.ActiveTabFG, theme.ActiveTabBG),
+		themePreviewSwatch("sel", theme.SelectionFG, theme.SelectionBG),
+		themePreviewSwatch("cmd", theme.Background, theme.CommandAccent),
+		themePreviewSwatch("err", theme.Background, theme.ErrorAccent),
+	}
+	return strings.Join(parts, " ")
+}
+
+func themePreviewSwatch(label string, fg string, bg string) string {
+	return themeMarkupPair(fg, bg) + tview.Escape(" "+label+" ") + "[-:-:-]"
 }
 
 func (a *terminalApp) settingsUndoLevelsLabel(value int) string {
@@ -2352,6 +2469,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "p", desc: "paste register"},
 		{keys: ":, /", desc: "enter command or search"},
 		{keys: "n, N", desc: "next or previous search match"},
+		{keys: "zg", desc: "add word under cursor to the shared spell dictionary"},
 		{keys: "v, V, ctrl+v", desc: "start visual char, line, or block selection"},
 		{keys: "ctrl+s", desc: "save locally"},
 		{keys: "ctrl+n", desc: "new note"},

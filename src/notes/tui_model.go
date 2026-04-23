@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/kloneets/tools/src/helpers"
@@ -149,6 +150,7 @@ type Workspace struct {
 	pendingOpenLinks      []string
 	pendingQuit           bool
 	pendingQuitForce      bool
+	pendingSaveAll        bool
 	pendingDeletePath     string
 	pendingDeleteLabel    string
 }
@@ -835,7 +837,7 @@ func (w *Workspace) RenameCurrentNote(name string) error {
 
 func (w *Workspace) HandleKey(key Key) bool {
 	if key.Ctrl && key.Name == "s" {
-		_ = w.SaveCurrent()
+		w.pendingSaveAll = true
 		return true
 	}
 	if key.Ctrl && key.Name == "a" {
@@ -1449,6 +1451,14 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	if ed.PendingOp == "r" {
 		return handleReplacePending(ed, key)
 	}
+	if ed.PendingOp == "z" {
+		ed.PendingOp = ""
+		if key.Name == "g" {
+			ed.NormalCount = ""
+			w.AddWordUnderCursor()
+			return true
+		}
+	}
 	if consumeXMotionOverride(ed, key) {
 		return true
 	}
@@ -1581,6 +1591,10 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Mode = ModeCommand
 		ed.Command = "rename " + ed.Title
 		return true
+	case "z":
+		ed.NormalCount = ""
+		ed.PendingOp = "z"
+		return true
 	case "n":
 		ed.NormalCount = ""
 		repeatSearch(ed, true)
@@ -1595,6 +1609,12 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	case " ":
 		ed.NormalCount = ""
 		return toggleCheckboxAtCursor(ed)
+	case ">":
+		ed.NormalCount = ""
+		return shiftCurrentLine(ed, true)
+	case "<":
+		ed.NormalCount = ""
+		return shiftCurrentLine(ed, false)
 	case "tab":
 		ed.NormalCount = ""
 		w.FocusSidebar = true
@@ -1830,8 +1850,44 @@ func handleVisualMode(ed *Editor, key Key) bool {
 		yankVisualSelection(ed)
 		ed.Mode = ModeNormal
 		return true
+	case ">":
+		return shiftVisualSelection(ed, true)
+	case "<":
+		return shiftVisualSelection(ed, false)
 	}
 	return false
+}
+
+func shiftCurrentLine(ed *Editor, right bool) bool {
+	updated, cursor, changed := vimShiftLines(ed.Text, ed.Cursor, ed.Cursor, ed.Cursor, settings.Inst().NotesApp.TabSpaces, right)
+	if !changed {
+		return true
+	}
+	rememberUndoState(ed)
+	ed.Text = updated
+	ed.Cursor = cursor
+	ed.Dirty = true
+	return true
+}
+
+func shiftVisualSelection(ed *Editor, right bool) bool {
+	start := ed.SelectionMark
+	end := ed.SelectionCursor
+	updated, offsets, changed := vimShiftLinesAndOffsets(ed.Text, start, end, settings.Inst().NotesApp.TabSpaces, right, []int{
+		ed.Cursor,
+		ed.SelectionMark,
+		ed.SelectionCursor,
+	})
+	if changed {
+		rememberUndoState(ed)
+		ed.Text = updated
+		ed.Cursor = offsets[0]
+		ed.SelectionMark = offsets[1]
+		ed.SelectionCursor = offsets[2]
+		ed.Dirty = true
+	}
+	ed.Mode = ModeVisual
+	return true
 }
 
 func applyPendingOperator(ed *Editor, key string) bool {
@@ -2125,11 +2181,8 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 			}
 		}
 	case vimCommandSave:
-		if err := w.SaveCurrent(); err != nil {
-			ed.Status = err.Error()
-		} else {
-			ed.Status = "saved"
-		}
+		w.pendingSaveAll = true
+		ed.Status = "saved"
 	case vimCommandQuit:
 		w.pendingQuit = true
 		w.pendingQuitForce = cmd.Force
@@ -2196,7 +2249,36 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 		} else {
 			ed.Status = "editor focused"
 		}
+	case vimCommandAddWord:
+		w.AddWordUnderCursor()
 	}
+}
+
+func (w *Workspace) AddWordUnderCursor() bool {
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return false
+	}
+	word := WordAtOffsetForSpell(ed.Text, ed.Cursor)
+	if word == "" {
+		ed.Status = "no word under cursor"
+		return true
+	}
+	if service, err := currentSpellService(); err == nil && service != nil && service.correct(word) {
+		ed.Status = "word already known: " + word
+		return true
+	}
+	added, err := AddCustomWord(word)
+	if err != nil {
+		ed.Status = err.Error()
+		return true
+	}
+	if added {
+		ed.Status = "added word: " + word
+	} else {
+		ed.Status = "word already known: " + word
+	}
+	return true
 }
 
 func (w *Workspace) Render(width int, height int) string {
@@ -2251,9 +2333,9 @@ func (w *Workspace) HelpText() string {
 		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | sidebar/sb | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
-		return "notes/visual: h j k l move | V line | ctrl+v block | y yank | d/x delete | esc normal"
+		return "notes/visual: h j k l move | V line | >/< indent | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
+	return "notes/normal: i insert | u undo | >/< indent | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | zg add word | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -2273,6 +2355,14 @@ func (w *Workspace) TakePendingQuit() (bool, bool) {
 	w.pendingQuit = false
 	w.pendingQuitForce = false
 	return true, force
+}
+
+func (w *Workspace) TakePendingSaveAll() bool {
+	if w == nil || !w.pendingSaveAll {
+		return false
+	}
+	w.pendingSaveAll = false
+	return true
 }
 
 func (w *Workspace) HasActiveYankHighlight() bool {
@@ -2651,6 +2741,7 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 	searchSpans := groupSpansByLine(ed.Text, searchHighlightSpans(ed.Text, ed.LastSearch))
 	selectionSpans := groupSpansByLine(ed.Text, visualHighlightSpans(ed))
 	yankSpans := groupSpansByLine(ed.Text, yankHighlightSpans(ed))
+	spellSpans := groupSpansByLine(ed.Text, spellHighlightSpans(ed.Text))
 	gutterWidth := editorLineNumberWidth(lines, width)
 	contentWidth := max(1, width-gutterWidth)
 	rows := make([]string, 0, len(lines))
@@ -2665,6 +2756,8 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 			baseSpans = selectionSpans[lineIdx]
 		} else if lineIdx < len(yankSpans) && len(yankSpans[lineIdx]) > 0 {
 			baseSpans = yankSpans[lineIdx]
+		} else if lineIdx < len(spellSpans) && len(spellSpans[lineIdx]) > 0 {
+			baseSpans = overlayMarkdownSpans(baseSpans, spellSpans[lineIdx])
 		}
 		segments := wrapPlainLine(plainLine, contentWidth)
 		for segIdx, segment := range segments {
@@ -2680,6 +2773,40 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 		}
 	}
 	return rows
+}
+
+func overlayMarkdownSpans(base []markdownSpan, overlays []markdownSpan) []markdownSpan {
+	if len(overlays) == 0 {
+		return base
+	}
+	out := append([]markdownSpan(nil), base...)
+	for _, overlay := range overlays {
+		if overlay.End <= overlay.Start {
+			continue
+		}
+		next := make([]markdownSpan, 0, len(out)+1)
+		for _, span := range out {
+			if overlay.Start >= span.End || overlay.End <= span.Start {
+				next = append(next, span)
+				continue
+			}
+			if span.Start < overlay.Start {
+				next = append(next, markdownSpan{Tag: span.Tag, Start: span.Start, End: overlay.Start})
+			}
+			if overlay.End < span.End {
+				next = append(next, markdownSpan{Tag: span.Tag, Start: overlay.End, End: span.End})
+			}
+		}
+		next = append(next, overlay)
+		out = next
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Start == out[j].Start {
+			return out[i].End < out[j].End
+		}
+		return out[i].Start < out[j].Start
+	})
+	return out
 }
 
 func applySegmentMarkdown(text string, spans []markdownSpan, start int, end int) string {
@@ -2868,28 +2995,40 @@ func (w *Workspace) EditorOffsetAtVisualPosition(row int, col int) (int, bool) {
 		return 0, false
 	}
 	lines := strings.Split(ed.Text, "\n")
-	offsets := lineStartOffsets(ed.Text)
 	gutterWidth := editorLineNumberWidth(lines, w.editorRenderWidth())
-	contentWidth := max(1, w.editorRenderWidth()-gutterWidth)
 	targetRow := ed.ScrollTop + max(0, row)
+	cell := col - gutterWidth
+	if cell < 0 {
+		cell = 0
+	}
+	return editorOffsetAtAbsoluteVisualPosition(ed.Text, w.editorRenderWidth(), targetRow, cell), true
+}
+
+func editorOffsetAtAbsoluteVisualPosition(text string, width int, targetRow int, cell int) int {
+	lines := strings.Split(text, "\n")
+	offsets := lineStartOffsets(text)
+	gutterWidth := editorLineNumberWidth(lines, width)
+	contentWidth := max(1, width-gutterWidth)
+	if targetRow < 0 {
+		targetRow = 0
+	}
+	if cell < 0 {
+		cell = 0
+	}
 	visualRow := 0
 	for lineIdx, line := range lines {
 		segments := wrapPlainLine(line, contentWidth)
 		for _, segment := range segments {
 			if visualRow == targetRow {
-				cell := col - gutterWidth
-				if cell < 0 {
-					cell = 0
-				}
 				if cell > segment.displayWidth {
 					cell = segment.displayWidth
 				}
-				return offsets[lineIdx] + segmentRuneOffsetAtCell(segment, cell), true
+				return offsets[lineIdx] + segmentRuneOffsetAtCell(segment, cell)
 			}
 			visualRow++
 		}
 	}
-	return len([]rune(ed.Text)), true
+	return len([]rune(text))
 }
 
 func (w *Workspace) MoveEditorCursorToVisualPosition(row int, col int) bool {
@@ -2901,6 +3040,23 @@ func (w *Workspace) MoveEditorCursorToVisualPosition(row int, col int) bool {
 	if ed == nil {
 		return false
 	}
+	w.FocusSidebar = false
+	clearVisualSelection(ed)
+	ed.Cursor = vimClampOffset(ed.Text, offset)
+	w.ensureEditorVisible()
+	return true
+}
+
+func (w *Workspace) MoveEditorCursorByVisualRows(delta int) bool {
+	if w == nil {
+		return false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return false
+	}
+	currentRow, currentCol := editorVisualCursor(ed, w.editorRenderWidth())
+	offset := editorOffsetAtAbsoluteVisualPosition(ed.Text, w.editorRenderWidth(), currentRow+delta, currentCol)
 	w.FocusSidebar = false
 	clearVisualSelection(ed)
 	ed.Cursor = vimClampOffset(ed.Text, offset)
@@ -3139,11 +3295,27 @@ func styleForMarkdownTag(tag string, text string) string {
 		return helpers.ANSI(helpers.ANSIRoleVisualSelection, text)
 	case tagYankHighlight:
 		return helpers.ANSI(helpers.ANSIRoleSelection, text)
+	case tagSpellError:
+		return helpers.ANSI(helpers.ANSIRoleSpellError, underlinedText(text))
 	case tagCodeBlock:
 		return text
 	default:
 		return text
 	}
+}
+
+func underlinedText(text string) string {
+	if text == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range text {
+		b.WriteRune(r)
+		if !unicode.IsSpace(r) {
+			b.WriteRune('\u0332')
+		}
+	}
+	return b.String()
 }
 
 func yankHighlightSpans(ed *Editor) []markdownSpan {

@@ -45,14 +45,16 @@ type PasswordAppSettings struct {
 }
 
 type NotesAppSettings struct {
-	TabSpaces       int      `json:"tab_spaces"`
-	UndoLevels      int      `json:"undo_levels"`
-	EditorWidth     int      `json:"editor_width,omitempty"`
-	PreviewHidden   bool     `json:"preview_hidden,omitempty"`
-	OpenNotePaths   []string `json:"open_note_paths,omitempty"`
-	CurrentNotePath string   `json:"current_note_path,omitempty"`
-	SidebarVisible  bool     `json:"sidebar_visible"`
-	VimMode         bool     `json:"vim_mode"`
+	TabSpaces         int      `json:"tab_spaces"`
+	UndoLevels        int      `json:"undo_levels"`
+	EditorWidth       int      `json:"editor_width,omitempty"`
+	PreviewHidden     bool     `json:"preview_hidden,omitempty"`
+	OpenNotePaths     []string `json:"open_note_paths,omitempty"`
+	CurrentNotePath   string   `json:"current_note_path,omitempty"`
+	SidebarVisible    bool     `json:"sidebar_visible"`
+	VimMode           bool     `json:"vim_mode"`
+	SpellCheckEnabled bool     `json:"spell_check_enabled,omitempty"`
+	SpellDictionaries []string `json:"spell_dictionaries,omitempty"`
 }
 
 func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
@@ -262,6 +264,22 @@ func normalizeSettings(s *UserSettings) {
 		s.NotesApp.OpenNotePaths = normalized
 	}
 	s.NotesApp.CurrentNotePath = normalizeNoteSessionPath(s.NotesApp.CurrentNotePath)
+	if len(s.NotesApp.SpellDictionaries) > 0 {
+		normalized := make([]string, 0, len(s.NotesApp.SpellDictionaries))
+		seen := make(map[string]struct{}, len(s.NotesApp.SpellDictionaries))
+		for _, code := range s.NotesApp.SpellDictionaries {
+			code = strings.ToLower(strings.TrimSpace(code))
+			if code == "" {
+				continue
+			}
+			if _, ok := seen[code]; ok {
+				continue
+			}
+			seen[code] = struct{}{}
+			normalized = append(normalized, code)
+		}
+		s.NotesApp.SpellDictionaries = normalized
+	}
 	if s.NotesApp.TabSpaces == 4 && !s.NotesApp.VimMode && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
 	}

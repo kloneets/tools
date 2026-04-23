@@ -33,6 +33,12 @@ func TestDefaultSettings(t *testing.T) {
 	if !got.NotesApp.VimMode {
 		t.Fatal("VimMode = false, want true")
 	}
+	if got.NotesApp.SpellCheckEnabled {
+		t.Fatal("SpellCheckEnabled = true, want false")
+	}
+	if len(got.NotesApp.SpellDictionaries) != 0 {
+		t.Fatalf("SpellDictionaries = %v, want none", got.NotesApp.SpellDictionaries)
+	}
 	if got.UI == nil || got.UI.TransparentBackground {
 		t.Fatalf("TransparentBackground = %v, want false", got.UI != nil && got.UI.TransparentBackground)
 	}
@@ -61,6 +67,11 @@ func TestNormalizeSettings(t *testing.T) {
 	}
 	if !cfg.NotesApp.SidebarVisible {
 		t.Fatal("SidebarVisible = false, want true")
+	}
+	cfg.NotesApp.SpellDictionaries = []string{"EN", "lv", "en", " "}
+	normalizeSettings(cfg)
+	if got := cfg.NotesApp.SpellDictionaries; len(got) != 2 || got[0] != "en" || got[1] != "lv" {
+		t.Fatalf("SpellDictionaries = %v, want normalized unique codes", got)
 	}
 }
 
