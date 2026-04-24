@@ -78,6 +78,26 @@ func TestParseVimCommandOpenLinks(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandRecordKeys(t *testing.T) {
+	cmd, err := parseVimCommand("recordkeys")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandRecordKeys {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandRecordKeys)
+	}
+}
+
+func TestParseVimCommandSpell(t *testing.T) {
+	cmd, err := parseVimCommand("spell")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandSpell {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandSpell)
+	}
+}
+
 func TestParseVimCommandUndoRedo(t *testing.T) {
 	cmd, err := parseVimCommand("undo")
 	if err != nil {

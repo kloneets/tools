@@ -72,9 +72,33 @@ func readKeys(r io.Reader, out chan<- notes.Key) {
 		case 27:
 			out <- decodeEscapeSequence(reader)
 		default:
+			if key, ok := decodeCtrlByte(b); ok {
+				out <- key
+				continue
+			}
 			name := string([]byte{b})
 			out <- notes.Key{Name: name, Rune: rune(b)}
 		}
+	}
+}
+
+func decodeCtrlByte(b byte) (notes.Key, bool) {
+	switch b {
+	case 0:
+		return notes.Key{}, false
+	case 1, 2, 4, 5, 6, 7, 8, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26:
+		r := rune('a' + (b - 1))
+		return notes.Key{Ctrl: true, Name: string(r), Rune: r}, true
+	case 28:
+		return notes.Key{Ctrl: true, Name: "4"}, true
+	case 29:
+		return notes.Key{Ctrl: true, Name: "5"}, true
+	case 30:
+		return notes.Key{Ctrl: true, Name: "6"}, true
+	case 31:
+		return notes.Key{Ctrl: true, Name: "7"}, true
+	default:
+		return notes.Key{}, false
 	}
 }
 

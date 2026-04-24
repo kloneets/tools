@@ -37,9 +37,11 @@ const (
 	viewPassword
 	viewSync
 	viewSettings
+	viewRecorder
 )
 
 const manualSyncTimeout = 20 * time.Second
+const recorderDuration = 5 * time.Second
 
 type terminalApp struct {
 	view               view
@@ -87,6 +89,13 @@ type terminalApp struct {
 	openLinks          []string
 	deleteNotePath     string
 	deleteNoteLabel    string
+	recorderVisible    bool
+	recorderCapturing  bool
+	recorderStartedAt  time.Time
+	recorderEndsAt     time.Time
+	recorderEvents     []recordedKeyEvent
+	recorderLastEvent  recordedKeyEvent
+	recorderCaptureID  atomic.Int64
 	notesMouseDragging bool
 	notesMouseMoved    bool
 	notesMouseStartRow int
@@ -102,7 +111,16 @@ type appTab struct {
 	key   string
 }
 
-var appTabs = []appTab{
+type recordedKeyEvent struct {
+	At        time.Time
+	Source    string
+	KeyName   string
+	TCellKey  string
+	Rune      string
+	Modifiers string
+}
+
+var baseAppTabs = []appTab{
 	{"Notes", viewNotes, "1"},
 	{"Files", viewFiles, "2"},
 	{"Pages", viewPages, "3"},
@@ -148,6 +166,14 @@ func newTerminalApp() (*terminalApp, error) {
 		syncTimeout: manualSyncTimeout,
 	}
 	app.initWidgets()
+	notes.SetSpellRefreshHook(func() {
+		if app.tui == nil {
+			return
+		}
+		app.tui.QueueUpdateDraw(func() {
+			app.refresh()
+		})
+	})
 	return app, nil
 }
 
@@ -538,6 +564,15 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 	if a.consumeInputSequenceShortcut(event) {
 		return nil
 	}
+	if a.recorderCapturing {
+		if key, ok := mapTCellKey(event); ok {
+			a.recordRecorderKey(key, "tcell", recorderTCellKeyName(event.Key()))
+		} else {
+			a.recordRecorderKey(notes.Key{Name: "unknown"}, "tcell", recorderTCellKeyName(event.Key()))
+		}
+		a.refresh()
+		return nil
+	}
 	if key, ok := mapTCellKey(event); ok {
 		a.handleGlobalKey(key)
 		a.refresh()
@@ -676,6 +711,11 @@ func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
 	if key, ok := inputSequenceShortcuts[candidate]; ok {
 		a.clearInputSequenceLocked()
 		a.inputSeqMu.Unlock()
+		if a.recorderCapturing {
+			a.recordRecorderKey(key, "sequence", candidate)
+			a.refresh()
+			return true
+		}
 		a.handleGlobalKey(key)
 		a.refresh()
 		return true
@@ -688,6 +728,11 @@ func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
 	}
 	a.clearInputSequenceLocked()
 	a.inputSeqMu.Unlock()
+	if a.recorderCapturing {
+		a.recordRecorderKey(notes.Key{Name: "esc"}, "sequence", candidate)
+		a.refresh()
+		return true
+	}
 	a.handleGlobalKey(notes.Key{Name: "esc"})
 	a.refresh()
 	return false
@@ -747,6 +792,11 @@ func (a *terminalApp) flushInputSequence() bool {
 	}
 	a.clearInputSequenceLocked()
 	a.inputSeqMu.Unlock()
+	if a.recorderCapturing {
+		a.recordRecorderKey(notes.Key{Name: "esc"}, "sequence", "esc")
+		a.refresh()
+		return true
+	}
 	a.handleGlobalKey(notes.Key{Name: "esc"})
 	a.refresh()
 	return true
@@ -767,13 +817,28 @@ func pointInRect(x int, y int, rx int, ry int, width int, height int) bool {
 	return x >= rx && x < rx+width && y >= ry && y < ry+height
 }
 
-func appTabViewForKey(key string) (view, bool) {
-	for _, tab := range appTabs {
+func (a *terminalApp) visibleAppTabs() []appTab {
+	tabs := append([]appTab(nil), baseAppTabs...)
+	if a != nil && a.recorderVisible {
+		tabs = append(tabs, appTab{label: "Recorder", view: viewRecorder, key: "7"})
+	}
+	return tabs
+}
+
+func (a *terminalApp) appTabViewForKey(key string) (view, bool) {
+	for _, tab := range a.visibleAppTabs() {
 		if tab.key == key {
 			return tab.view, true
 		}
 	}
 	return viewNotes, false
+}
+
+func (a *terminalApp) appTabKeyHint() string {
+	if a != nil && a.recorderVisible {
+		return "1-7"
+	}
+	return "1-6"
 }
 
 func (a *terminalApp) switchAppTab(target view) {
@@ -786,7 +851,8 @@ func (a *terminalApp) appTabAtColumn(col int) (view, bool) {
 		return viewNotes, false
 	}
 	pos := 0
-	for i, tab := range appTabs {
+	tabs := a.visibleAppTabs()
+	for i, tab := range tabs {
 		labelName := tab.label
 		if a != nil && a.viewDirty(tab.view) {
 			labelName += "*"
@@ -797,7 +863,7 @@ func (a *terminalApp) appTabAtColumn(col int) (view, bool) {
 			return tab.view, true
 		}
 		pos = next
-		if i < len(appTabs)-1 {
+		if i < len(tabs)-1 {
 			if col == pos {
 				return viewNotes, false
 			}
@@ -816,6 +882,9 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 		}
 		return notes.Key{Name: string(r), Rune: r, Shift: event.Modifiers()&tcell.ModShift != 0, Alt: event.Modifiers()&tcell.ModAlt != 0}, true
 	case tcell.KeyEnter:
+		if event.Modifiers()&tcell.ModCtrl != 0 {
+			return notes.Key{Name: "enter", Ctrl: true}, true
+		}
 		return notes.Key{Name: "enter"}, true
 	case tcell.KeyTab:
 		if event.Modifiers()&tcell.ModCtrl != 0 {
@@ -875,8 +944,6 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 		return notes.Key{Name: "a", Ctrl: true}, true
 	case tcell.KeyCtrlV:
 		return notes.Key{Name: "v", Ctrl: true}, true
-	case tcell.KeyCtrlSpace:
-		return notes.Key{Name: "2", Ctrl: true}, true
 	case tcell.KeyCtrlBackslash:
 		return notes.Key{Name: "4", Ctrl: true}, true
 	case tcell.KeyCtrlRightSq:
@@ -884,12 +951,38 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 	case tcell.KeyCtrlCarat:
 		return notes.Key{Name: "6", Ctrl: true}, true
 	default:
+		return mapControlTCellKey(event)
+	}
+}
+
+func mapControlTCellKey(event *tcell.EventKey) (notes.Key, bool) {
+	if event == nil {
+		return notes.Key{}, false
+	}
+	switch key := event.Key(); {
+	case key >= tcell.KeyCtrlA && key <= tcell.KeyCtrlZ:
+		r := rune('a' + (key - tcell.KeyCtrlA))
+		return notes.Key{Name: string(r), Ctrl: true}, true
+	case key == tcell.KeyCtrlSpace:
+		return notes.Key{Name: "space", Ctrl: true}, true
+	case key == tcell.KeyCtrlBackslash:
+		return notes.Key{Name: "4", Ctrl: true}, true
+	case key == tcell.KeyCtrlRightSq:
+		return notes.Key{Name: "5", Ctrl: true}, true
+	case key == tcell.KeyCtrlCarat:
+		return notes.Key{Name: "6", Ctrl: true}, true
+	case key == tcell.KeyCtrlUnderscore:
+		return notes.Key{Name: "7", Ctrl: true}, true
+	default:
 		return notes.Key{}, false
 	}
 }
 
 func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 	if a.shuttingDown {
+		return true
+	}
+	if a.recorderCapturing {
 		return true
 	}
 	if key.Ctrl && key.Name == "s" {
@@ -908,8 +1001,8 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		case "t":
 			a.tabSelect = !a.tabSelect
 			return true
-		case "1", "2", "3", "4", "5", "6":
-			if target, ok := appTabViewForKey(key.Name); ok {
+		case "1", "2", "3", "4", "5", "6", "7":
+			if target, ok := a.appTabViewForKey(key.Name); ok {
 				a.switchAppTab(target)
 				return true
 			}
@@ -959,6 +1052,11 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		case "6":
 			a.switchAppTab(viewSettings)
 			return true
+		case "7":
+			if a.recorderVisible {
+				a.switchAppTab(viewRecorder)
+				return true
+			}
 		case "left":
 			a.view = a.prevView()
 			return true
@@ -1002,6 +1100,8 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		return a.handleSyncKey(key)
 	case viewSettings:
 		return a.handleSettingsKey(key)
+	case viewRecorder:
+		return false
 	default:
 		return false
 	}
@@ -1032,12 +1132,17 @@ func (a *terminalApp) consumePendingNoteActions() {
 	if a.notes.TakePendingSaveAll() {
 		if err := a.saveLocalState(); err != nil {
 			helpers.StatusBarInst().UpdateStatusBar("Save failed: " + err.Error())
+			a.notes.TakePendingQuit()
+			return
 		} else {
 			if ed := a.notes.ActiveEditor(); ed != nil {
 				ed.Status = "saved"
 			}
 			helpers.StatusBarInst().UpdateStatusBar("Saved locally at " + formatTimestampOrNever(settings.Inst().GDrive.LastLocalSaveAt))
 		}
+	}
+	if a.notes.TakePendingRecordKeys() {
+		a.startRecorderCapture()
 		return
 	}
 	if quit, force := a.notes.TakePendingQuit(); quit {
@@ -1068,6 +1173,47 @@ func (a *terminalApp) consumePendingNoteActions() {
 	}
 }
 
+func (a *terminalApp) startRecorderCapture() {
+	if a == nil {
+		return
+	}
+	captureID := a.recorderCaptureID.Add(1)
+	a.recorderVisible = true
+	a.view = viewRecorder
+	a.tabSelect = false
+	a.recorderCapturing = true
+	a.recorderStartedAt = time.Now()
+	a.recorderEndsAt = a.recorderStartedAt.Add(recorderDuration)
+	a.recorderEvents = nil
+	a.recorderLastEvent = recordedKeyEvent{}
+	helpers.StatusBarInst().UpdateStatusBar("Recording keys for 5 seconds")
+	time.AfterFunc(recorderDuration, func() {
+		if a.recorderCaptureID.Load() != captureID {
+			return
+		}
+		run := func() {
+			if a.recorderCaptureID.Load() != captureID {
+				return
+			}
+			a.stopRecorderCapture()
+			a.refresh()
+		}
+		if a.tui != nil {
+			a.tui.QueueUpdateDraw(run)
+			return
+		}
+		run()
+	})
+}
+
+func (a *terminalApp) stopRecorderCapture() {
+	if a == nil || !a.recorderCapturing {
+		return
+	}
+	a.recorderCapturing = false
+	helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Recorded %d key event(s)", len(a.recorderEvents)))
+}
+
 func (a *terminalApp) openAllPendingLinks() {
 	if a == nil || len(a.openLinks) == 0 {
 		return
@@ -1079,37 +1225,23 @@ func (a *terminalApp) openAllPendingLinks() {
 }
 
 func (a *terminalApp) nextView() view {
-	switch a.view {
-	case viewNotes:
-		return viewFiles
-	case viewFiles:
-		return viewPages
-	case viewPages:
-		return viewPassword
-	case viewPassword:
-		return viewSync
-	case viewSync:
-		return viewSettings
-	default:
-		return viewNotes
+	tabs := a.visibleAppTabs()
+	for i, tab := range tabs {
+		if tab.view == a.view {
+			return tabs[(i+1)%len(tabs)].view
+		}
 	}
+	return tabs[0].view
 }
 
 func (a *terminalApp) prevView() view {
-	switch a.view {
-	case viewSettings:
-		return viewSync
-	case viewSync:
-		return viewPassword
-	case viewPassword:
-		return viewPages
-	case viewPages:
-		return viewFiles
-	case viewFiles:
-		return viewNotes
-	default:
-		return viewSettings
+	tabs := a.visibleAppTabs()
+	for i, tab := range tabs {
+		if tab.view == a.view {
+			return tabs[(i+len(tabs)-1)%len(tabs)].view
+		}
 	}
+	return tabs[len(tabs)-1].view
 }
 
 func (a *terminalApp) wantsQuitOnQ() bool {
@@ -1719,12 +1851,15 @@ func (a *terminalApp) refresh() {
 		a.refreshSingle("Sync", a.renderSync(maxInt(3, a.height-10)))
 	case viewSettings:
 		a.refreshSingleMarkup("Settings", a.renderSettings(maxInt(3, a.height-10)))
+	case viewRecorder:
+		a.refreshSingleMarkup("Recorder", a.renderRecorder(maxInt(3, a.height-10)))
 	}
 }
 
 func (a *terminalApp) renderTabBar() string {
-	parts := make([]string, 0, len(appTabs))
-	for _, tab := range appTabs {
+	tabs := a.visibleAppTabs()
+	parts := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
 		labelName := tab.label
 		if a.viewDirty(tab.view) {
 			labelName += "*"
@@ -1755,6 +1890,8 @@ func (a *terminalApp) viewDirty(v view) bool {
 		return a.password != nil && a.password.Dirty
 	case viewSettings, viewSync:
 		return a.settingsDirty
+	case viewRecorder:
+		return false
 	default:
 		return false
 	}
@@ -1818,6 +1955,15 @@ func (a *terminalApp) watchStatus(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if a.recorderCapturing {
+				if time.Now().After(a.recorderEndsAt) {
+					a.stopRecorderCapture()
+				}
+				a.tui.QueueUpdateDraw(func() {
+					a.refresh()
+				})
+				continue
+			}
 			if settings.IsShuttingDown() {
 				continue
 			}
@@ -1963,6 +2109,107 @@ func (a *terminalApp) refreshSingleMarkup(title string, text string) {
 	a.single.SetWordWrap(title == "Sync")
 	a.single.SetText(text)
 	a.body.AddItem(a.single, 0, 1, false)
+}
+
+func (a *terminalApp) renderRecorder(height int) string {
+	lines := make([]string, 0, maxInt(8, height))
+	state := "idle"
+	if a.recorderCapturing {
+		state = "recording"
+	} else if len(a.recorderEvents) > 0 {
+		state = "finished"
+	}
+	lines = append(lines, fmt.Sprintf("State: %s", state))
+	if a.recorderCapturing {
+		remaining := time.Until(a.recorderEndsAt)
+		if remaining < 0 {
+			remaining = 0
+		}
+		lines = append(lines, fmt.Sprintf("Recording active: %.1fs remaining", remaining.Seconds()))
+		lines = append(lines, "All other key bindings are blocked while recording.")
+	} else {
+		lines = append(lines, "Run :recordkeys from Notes to start a 5-second key capture.")
+	}
+	lines = append(lines, fmt.Sprintf("Captured events: %d", len(a.recorderEvents)))
+	lines = append(lines, "")
+	lines = append(lines, "Latest key:")
+	if len(a.recorderEvents) == 0 {
+		lines = append(lines, "  none")
+	} else {
+		latest := a.recorderLastEvent
+		lines = append(lines, "  key: "+latest.KeyName)
+		lines = append(lines, "  source: "+latest.Source)
+		lines = append(lines, "  raw: "+latest.TCellKey)
+		lines = append(lines, "  rune: "+latest.Rune)
+		lines = append(lines, "  modifiers: "+latest.Modifiers)
+	}
+	lines = append(lines, "")
+	lines = append(lines, "Recent events:")
+	if len(a.recorderEvents) == 0 {
+		lines = append(lines, "  none")
+	} else {
+		start := maxInt(0, len(a.recorderEvents)-min(12, height/2))
+		for _, item := range a.recorderEvents[start:] {
+			lines = append(lines, fmt.Sprintf("  %s  %s  [%s]", item.At.Format("15:04:05.000"), item.KeyName, item.Modifiers))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (a *terminalApp) recordRecorderKey(key notes.Key, source string, rawKey string) {
+	if a == nil || !a.recorderCapturing {
+		return
+	}
+	event := recordedKeyEvent{
+		At:        time.Now(),
+		Source:    source,
+		KeyName:   key.Name,
+		TCellKey:  rawKey,
+		Rune:      recorderRuneText(key.Rune),
+		Modifiers: recorderModifierText(key),
+	}
+	if event.KeyName == "" {
+		event.KeyName = "unknown"
+	}
+	if event.TCellKey == "" {
+		event.TCellKey = "n/a"
+	}
+	a.recorderEvents = append(a.recorderEvents, event)
+	a.recorderLastEvent = event
+}
+
+func recorderRuneText(r rune) string {
+	if r == 0 {
+		return "none"
+	}
+	return strconv.QuoteRune(r)
+}
+
+func recorderModifierText(key notes.Key) string {
+	parts := make([]string, 0, 4)
+	if key.Ctrl {
+		parts = append(parts, "Ctrl")
+	}
+	if key.Alt {
+		parts = append(parts, "Alt")
+	}
+	if key.Meta {
+		parts = append(parts, "Meta")
+	}
+	if key.Shift {
+		parts = append(parts, "Shift")
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "+")
+}
+
+func recorderTCellKeyName(key tcell.Key) string {
+	if name, ok := tcell.KeyNames[key]; ok {
+		return name
+	}
+	return fmt.Sprintf("Key(%d)", key)
 }
 
 func (a *terminalApp) showCursor(screen tcell.Screen) {
@@ -2120,7 +2367,7 @@ func ansiToTView(s string) string {
 		helpers.ANSIRoleVisualSelection, themeMarkupPair(theme.Syntax[helpers.ANSIRoleVisualSelection], theme.SelectionBG),
 		helpers.ANSIRoleActiveTab, themeMarkupPair(theme.ActiveTabFG, theme.ActiveTabBG),
 		helpers.ANSIRoleSelection, themeMarkupPair(theme.SelectionFG, theme.SelectionBG),
-		helpers.ANSIRoleSpellError, themeMarkupFGStyle(theme.ErrorAccent, "u"),
+		helpers.ANSIRoleSpellError, themeMarkupFG(theme.ErrorAccent),
 		"\x1b[0m", "[-:-:-]",
 	)
 	return replacer.Replace(escaped)
@@ -2361,42 +2608,50 @@ func (a *terminalApp) helpText() string {
 	switch a.view {
 	case viewNotes:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return a.notes.HelpText() + " | ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs"
+		return a.notes.HelpText() + " | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
 	case viewFiles:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return "files: ctrl+tab next tab | ctrl+1-6 tabs | j/k move | / filter | a import into scope | f nested folder | F scope folder | D discard staged | i smart | I link | p image | o open | y copy md | Y copy path | M migrate | : command"
+		return "files: ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | j/k move | / filter | a import into scope | f nested folder | F scope folder | D discard staged | i smart | I link | p image | o open | y copy md | Y copy path | M migrate | : command"
 	case viewPages:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.pages != nil && a.pages.IsEditing() {
 			return "pages/edit: digits edit | backspace delete | enter apply | esc stop edit"
 		}
-		return "pages: q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | ctrl+s save | j/k move | e edit | r recalc"
+		return "pages: q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | e edit | r recalc"
 	case viewPassword:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return "password: ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | ctrl+s save | g generate | l/n/s toggle | +/- length"
+		return "password: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | g generate | l/n/s toggle | +/- length"
 	case viewSync:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return "sync: ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | j/k move | enter run action | save locally before upload"
+		return "sync: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | j/k move | enter run action | save locally before upload"
 	case viewSettings:
 		if a.tabSelect {
-			return "tab select: left/right move | 1-6 jump | ctrl+1-6 direct jump | enter confirm | esc cancel"
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.settingsEditMode {
 			return "settings/edit: digits edit | backspace delete | enter apply | esc cancel"
 		}
-		return "settings: ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs | ctrl+s save | j/k move | enter change option"
+		return "settings: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | enter change option"
+	case viewRecorder:
+		if a.tabSelect {
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+		}
+		if a.recorderCapturing {
+			return "recorder: capturing keys for 5s | all other key bindings blocked"
+		}
+		return "recorder: started by :recordkeys | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
 	default:
-		return "q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+1-6 tabs"
+		return "q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
 	}
 }
 
@@ -2431,8 +2686,8 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "q", desc: "quit when not editing"},
 		{keys: "ctrl+t", desc: "activate tab bar"},
 		{keys: "ctrl+tab", desc: "cycle to the next app tab"},
-		{keys: "ctrl+1-6", desc: "jump directly to an app tab"},
-		{keys: "1-6", desc: "jump to tab while tab bar is active"},
+		{keys: "ctrl+1-7", desc: "jump directly to an app tab when visible"},
+		{keys: "1-7", desc: "jump to tab while tab bar is active"},
 		{keys: "mouse click tab", desc: "jump directly to an app tab"},
 		{keys: "left/right", desc: "move tab selection while tab bar is active"},
 		{keys: "enter", desc: "confirm tab selection"},
@@ -2497,10 +2752,16 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "preview", desc: "toggle preview pane"},
 		{keys: "/text", desc: "search for text"},
 		{keys: "ol", desc: "review and open all unique external links"},
+		{keys: "recordkeys", desc: "open the on-demand recorder tab and capture keys for 5 seconds"},
 		{keys: "rename NAME", desc: "rename the current note"},
 		{keys: "%s/old/new/g", desc: "replace all matches"},
 		{keys: "enter", desc: "run command"},
 		{keys: "esc", desc: "cancel command"},
+	})...)
+	lines = append(lines, renderSection("Recorder:", []helpEntry{
+		{keys: ":recordkeys", desc: "open the recorder tab from Notes and start a timed capture"},
+		{keys: "5-second capture", desc: "record keys and block all other app key bindings while active"},
+		{keys: "status + history", desc: "show latest key details and recent captured events"},
 	})...)
 	lines = append(lines, renderSection("Files:", []helpEntry{
 		{keys: "j/k, arrows", desc: "move selection"},

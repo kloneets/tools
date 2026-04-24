@@ -1194,6 +1194,7 @@ func completeEditorPathReference(w *Workspace, ed *Editor) bool {
 		matches = ed.AutoCompleteMatches
 	}
 	replaceRunes(ed, ctx.Start, ctx.End, matches[matchIndex])
+	ed.AutoCompleteKind = autoCompletePath
 	ed.AutoCompletePrefix = ctx.Prefix
 	ed.AutoCompleteMatches = matches
 	ed.AutoCompleteIndex = matchIndex
@@ -1226,6 +1227,7 @@ func completeEditorPathReferenceBackward(w *Workspace, ed *Editor) bool {
 		matches = ed.AutoCompleteMatches
 	}
 	replaceRunes(ed, ctx.Start, ctx.End, matches[matchIndex])
+	ed.AutoCompleteKind = autoCompletePath
 	ed.AutoCompletePrefix = ctx.Prefix
 	ed.AutoCompleteMatches = matches
 	ed.AutoCompleteIndex = matchIndex

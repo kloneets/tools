@@ -42,6 +42,8 @@ var (
 	spellCacheMu     sync.Mutex
 	spellCacheKey    string
 	spellCache       *spellService
+	spellRefreshMu   sync.Mutex
+	spellRefreshHook func()
 	spellStatusMu    sync.Mutex
 	spellStatusCache = map[string]SpellDictionaryLoadStatus{}
 	spellHTTPGet     = http.Get
@@ -63,12 +65,14 @@ type SpellDictionaryLoadStatus struct {
 }
 
 type spellService struct {
-	dictionaries []*hunspell.Spell
-	native       []nativeSpellDictionary
-	custom       map[string]struct{}
-	fallback     map[string]struct{}
-	checked      map[string]bool
-	loadErrors   []error
+	mu              sync.Mutex
+	dictionaries    []*hunspell.Spell
+	native          []nativeSpellDictionary
+	custom          map[string]struct{}
+	fallback        map[string]struct{}
+	checked         map[string]bool
+	suggestionCache map[string][]string
+	loadErrors      []error
 }
 
 type nativeSpellDictionary struct {
@@ -215,7 +219,7 @@ func AddCustomWord(word string) (bool, error) {
 	if _, err := fmt.Fprintln(f, word); err != nil {
 		return false, err
 	}
-	invalidateSpellCache()
+	updateSpellCacheAfterCustomWord(word)
 	return true, nil
 }
 
@@ -224,8 +228,18 @@ func CustomSpellWordsPath() string {
 }
 
 func spellHighlightSpans(text string) []markdownSpan {
+	return spellHighlightSpansForEditor(nil, text)
+}
+
+func spellHighlightSpansForEditor(ed *Editor, text string) []markdownSpan {
 	if !settings.Inst().NotesApp.SpellCheckEnabled {
 		return nil
+	}
+	if ed != nil && ed.SpellCacheText == text {
+		return filterSpellSpansForActiveWord(ed, ed.SpellCacheSpans)
+	}
+	if reused, ok := reuseSpellSpansForActiveWordEdit(ed, text); ok {
+		return reused
 	}
 	service, err := currentSpellService()
 	if err != nil || service == nil || !service.ready() {
@@ -233,10 +247,50 @@ func spellHighlightSpans(text string) []markdownSpan {
 	}
 	ignored := spellIgnoredSpans(text)
 	tokens := spellTokens(text)
-	service.checkWords(spellTokenWords(tokens))
+	words := spellTokenWords(tokens)
+	if ed != nil && len(service.native) > 0 && len(service.pendingNativeWords(words)) > 0 {
+		scheduleEditorSpellCheck(ed, text, service, words, ignored, tokens)
+		return nil
+	}
+	service.checkWords(words)
+	spans := spellSpansFromCheckedService(ed, text, service, ignored, tokens)
+	if ed != nil {
+		ed.SpellCacheText = text
+		ed.SpellCacheSpans = append(ed.SpellCacheSpans[:0], spans...)
+	}
+	return spans
+}
+
+func scheduleEditorSpellCheck(ed *Editor, text string, service *spellService, words []string, ignored []markdownSpan, tokens []spellToken) {
+	if ed == nil || service == nil {
+		return
+	}
+	if ed.SpellAsyncRunning && ed.SpellAsyncText == text {
+		return
+	}
+	ed.SpellAsyncText = text
+	ed.SpellAsyncRunning = true
+	ed.SpellCacheText = text
+	ed.SpellCacheSpans = nil
+	go func() {
+		service.checkWords(words)
+		spans := spellSpansFromCheckedService(ed, text, service, ignored, tokens)
+		if ed.Text == text {
+			ed.SpellCacheText = text
+			ed.SpellCacheSpans = append(ed.SpellCacheSpans[:0], spans...)
+		}
+		ed.SpellAsyncRunning = false
+		triggerSpellRefresh()
+	}()
+}
+
+func spellSpansFromCheckedService(ed *Editor, text string, service *spellService, ignored []markdownSpan, tokens []spellToken) []markdownSpan {
 	spans := make([]markdownSpan, 0)
 	for _, token := range tokens {
 		if spellRangeOverlaps(token.start, token.end, ignored) {
+			continue
+		}
+		if spellTokenIsActiveInsertWord(ed, token) {
 			continue
 		}
 		if service.correct(token.word) {
@@ -245,6 +299,125 @@ func spellHighlightSpans(text string) []markdownSpan {
 		spans = append(spans, markdownSpan{Tag: tagSpellError, Start: token.start, End: token.end})
 	}
 	return spans
+}
+
+func SetSpellRefreshHook(hook func()) {
+	spellRefreshMu.Lock()
+	spellRefreshHook = hook
+	spellRefreshMu.Unlock()
+}
+
+func triggerSpellRefresh() {
+	spellRefreshMu.Lock()
+	hook := spellRefreshHook
+	spellRefreshMu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+func spellTokenIsActiveInsertWord(ed *Editor, token spellToken) bool {
+	start, end, ok := spellActiveWordRange(ed)
+	if !ok {
+		return false
+	}
+	return token.start < end && token.end > start
+}
+
+func spellActiveWordRange(ed *Editor) (int, int, bool) {
+	if ed == nil || ed.Mode != ModeInsert {
+		return 0, 0, false
+	}
+	runes := []rune(ed.Text)
+	if len(runes) == 0 {
+		return 0, 0, false
+	}
+	cursor := vimClampOffset(ed.Text, ed.Cursor)
+	anchor := -1
+	if cursor > 0 && cursor-1 < len(runes) && isSpellWordRune(runes[cursor-1]) {
+		anchor = cursor - 1
+	} else if cursor < len(runes) && isSpellWordRune(runes[cursor]) {
+		anchor = cursor
+	}
+	if anchor < 0 {
+		return 0, 0, false
+	}
+	start := anchor
+	for start > 0 && isSpellWordRune(runes[start-1]) {
+		start--
+	}
+	end := anchor + 1
+	for end < len(runes) && isSpellWordRune(runes[end]) {
+		end++
+	}
+	return start, end, true
+}
+
+func filterSpellSpansForActiveWord(ed *Editor, spans []markdownSpan) []markdownSpan {
+	start, end, ok := spellActiveWordRange(ed)
+	if !ok {
+		return spans
+	}
+	return filterSpellSpansOutsideRange(spans, start, end)
+}
+
+func filterSpellSpansOutsideRange(spans []markdownSpan, start int, end int) []markdownSpan {
+	if len(spans) == 0 {
+		return nil
+	}
+	out := make([]markdownSpan, 0, len(spans))
+	for _, span := range spans {
+		if span.Start < end && span.End > start {
+			continue
+		}
+		out = append(out, span)
+	}
+	return out
+}
+
+func reuseSpellSpansForActiveWordEdit(ed *Editor, text string) ([]markdownSpan, bool) {
+	if ed == nil || ed.SpellCacheText == "" {
+		return nil, false
+	}
+	activeStart, activeEnd, ok := spellActiveWordRange(ed)
+	if !ok {
+		return nil, false
+	}
+	current := []rune(text)
+	cached := []rune(ed.SpellCacheText)
+	if activeStart > len(current) || activeEnd > len(current) || activeStart > len(cached) {
+		return nil, false
+	}
+	delta := len(current) - len(cached)
+	cachedEnd := activeEnd - delta
+	if cachedEnd < activeStart || cachedEnd > len(cached) {
+		return nil, false
+	}
+	if string(current[:activeStart]) != string(cached[:activeStart]) {
+		return nil, false
+	}
+	if string(current[activeEnd:]) != string(cached[cachedEnd:]) {
+		return nil, false
+	}
+	return shiftSpellSpansOutsideRange(ed.SpellCacheSpans, activeStart, cachedEnd, delta), true
+}
+
+func shiftSpellSpansOutsideRange(spans []markdownSpan, start int, end int, delta int) []markdownSpan {
+	if len(spans) == 0 {
+		return nil
+	}
+	out := make([]markdownSpan, 0, len(spans))
+	for _, span := range spans {
+		if span.Start < end && span.End > start {
+			continue
+		}
+		if span.Start >= end {
+			span.Start += delta
+			span.End += delta
+		}
+		out = append(out, span)
+	}
+	return out
 }
 
 func WordAtOffsetForSpell(text string, offset int) string {
@@ -317,13 +490,18 @@ func downloadSpellFile(url string, target string) error {
 func currentSpellService() (*spellService, error) {
 	codes := append([]string(nil), settings.Inst().NotesApp.SpellDictionaries...)
 	sort.Strings(codes)
-	key := strings.Join(codes, ",") + "|" + nativeSpellAvailabilitySignature() + "|" + spellFilesSignature(codes) + "|" + customFileSignature()
+	key := spellCacheSignature(codes)
 	spellCacheMu.Lock()
 	defer spellCacheMu.Unlock()
 	if spellCache != nil && spellCacheKey == key {
 		return spellCache, nil
 	}
-	service := &spellService{custom: map[string]struct{}{}, fallback: map[string]struct{}{}, checked: map[string]bool{}}
+	service := &spellService{
+		custom:          map[string]struct{}{},
+		fallback:        map[string]struct{}{},
+		checked:         map[string]bool{},
+		suggestionCache: map[string][]string{},
+	}
 	custom, err := loadCustomWords()
 	if err != nil {
 		return nil, err
@@ -357,6 +535,44 @@ func currentSpellService() (*spellService, error) {
 	return service, nil
 }
 
+func spellCacheSignature(codes []string) string {
+	return strings.Join(codes, ",") + "|" + nativeSpellAvailabilitySignature() + "|" + spellFilesSignature(codes) + "|" + customFileSignature()
+}
+
+func updateSpellCacheAfterCustomWord(word string) {
+	key := strings.ToLower(normalizeSpellWord(word))
+	if key == "" {
+		return
+	}
+	spellCacheMu.Lock()
+	if spellCache != nil {
+		if spellCache.custom == nil {
+			spellCache.custom = map[string]struct{}{}
+		}
+		spellCache.custom[key] = struct{}{}
+		if spellCache.checked == nil {
+			spellCache.checked = map[string]bool{}
+		}
+		spellCache.checked[key] = true
+		if spellCache.suggestionCache != nil {
+			delete(spellCache.suggestionCache, key)
+		}
+		codes := append([]string(nil), settings.Inst().NotesApp.SpellDictionaries...)
+		sort.Strings(codes)
+		spellCacheKey = spellCacheSignature(codes)
+	}
+	spellCacheMu.Unlock()
+	if currentNote != nil {
+		for _, ed := range currentNote.Tabs {
+			if ed == nil {
+				continue
+			}
+			ed.SpellCacheText = ""
+			ed.SpellCacheSpans = nil
+		}
+	}
+}
+
 func loadSpellDictionary(affPath string, dicPath string) (*hunspell.Spell, error) {
 	return hunspell.Open(affPath, dicPath)
 }
@@ -370,15 +586,20 @@ func (s *spellService) correct(word string) bool {
 	if word == "" {
 		return true
 	}
+	s.mu.Lock()
 	if _, ok := s.custom[strings.ToLower(word)]; ok {
+		s.mu.Unlock()
 		return true
 	}
 	if correct, ok := s.checked[strings.ToLower(word)]; ok {
+		s.mu.Unlock()
 		return correct
 	}
 	if _, ok := s.fallback[strings.ToLower(word)]; ok {
+		s.mu.Unlock()
 		return true
 	}
+	s.mu.Unlock()
 	for _, dict := range s.dictionaries {
 		if dict.Spell(word) != nil || dict.Spell(strings.ToLower(word)) != nil {
 			return true
@@ -391,6 +612,26 @@ func (s *spellService) checkWords(words []string) {
 	if s == nil || len(s.native) == 0 || len(words) == 0 {
 		return
 	}
+	pending := s.pendingNativeWords(words)
+	if len(pending) == 0 {
+		return
+	}
+	for _, dict := range s.native {
+		misspelled, err := dict.misspelledWords(pending)
+		if err != nil {
+			s.loadErrors = append(s.loadErrors, fmt.Errorf("%s native check: %w", dict.backend, err))
+			continue
+		}
+		s.markNativeWordsChecked(pending, misspelled)
+	}
+}
+
+func (s *spellService) pendingNativeWords(words []string) []string {
+	if s == nil || len(s.native) == 0 || len(words) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	pending := make([]string, 0, len(words))
 	seen := make(map[string]struct{}, len(words))
 	for _, word := range words {
@@ -416,24 +657,66 @@ func (s *spellService) checkWords(words []string) {
 		}
 		pending = append(pending, word)
 	}
-	if len(pending) == 0 {
-		return
-	}
-	for _, dict := range s.native {
-		misspelled, err := dict.misspelledWords(pending)
-		if err != nil {
-			s.loadErrors = append(s.loadErrors, fmt.Errorf("%s native check: %w", dict.backend, err))
+	return pending
+}
+
+func (s *spellService) markNativeWordsChecked(words []string, misspelled map[string]struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, word := range words {
+		key := strings.ToLower(normalizeSpellWord(word))
+		if key == "" {
 			continue
 		}
-		for _, word := range pending {
-			key := strings.ToLower(word)
-			if _, known := s.checked[key]; known && s.checked[key] {
+		if _, known := s.checked[key]; known && s.checked[key] {
+			continue
+		}
+		_, wrong := misspelled[key]
+		s.checked[key] = !wrong
+	}
+}
+
+func (s *spellService) suggestions(word string) ([]string, error) {
+	if s == nil {
+		return nil, fmt.Errorf("spell service unavailable")
+	}
+	word = normalizeSpellWord(word)
+	if !shouldCheckSpellWord(word) {
+		return nil, nil
+	}
+	key := strings.ToLower(word)
+	if _, ok := s.custom[key]; ok {
+		return nil, nil
+	}
+	if suggestions, ok := s.suggestionCache[key]; ok {
+		return append([]string(nil), suggestions...), nil
+	}
+	if len(s.native) == 0 {
+		return nil, fmt.Errorf("native suggestions unavailable")
+	}
+	merged := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	for _, dict := range s.native {
+		suggestions, err := dict.suggestions(word)
+		if err != nil {
+			s.loadErrors = append(s.loadErrors, fmt.Errorf("%s native suggestions: %w", dict.backend, err))
+			continue
+		}
+		for _, suggestion := range suggestions {
+			suggestion = normalizeSpellWord(suggestion)
+			if !shouldCheckSpellWord(suggestion) {
 				continue
 			}
-			_, wrong := misspelled[key]
-			s.checked[key] = !wrong
+			lower := strings.ToLower(suggestion)
+			if _, ok := seen[lower]; ok {
+				continue
+			}
+			seen[lower] = struct{}{}
+			merged = append(merged, suggestion)
 		}
 	}
+	s.suggestionCache[key] = append([]string(nil), merged...)
+	return append([]string(nil), merged...), nil
 }
 
 func spellTokenWords(tokens []spellToken) []string {
@@ -493,6 +776,27 @@ func (d nativeSpellDictionary) misspelledWords(words []string) (map[string]struc
 	return misspelled, scanner.Err()
 }
 
+func (d nativeSpellDictionary) suggestions(word string) ([]string, error) {
+	out, err := d.runSuggestions(word)
+	if err != nil {
+		return nil, err
+	}
+	suggestions := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		for _, suggestion := range nativeSuggestionWords(scanner.Text()) {
+			key := strings.ToLower(suggestion)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			suggestions = append(suggestions, suggestion)
+		}
+	}
+	return suggestions, scanner.Err()
+}
+
 func nativeMisspelledWords(line string) []string {
 	line = strings.TrimSpace(line)
 	line = strings.TrimSpace(strings.TrimPrefix(line, "Enter some text:"))
@@ -526,6 +830,32 @@ func nativeMisspelledWords(line string) []string {
 	return nil
 }
 
+func nativeSuggestionWords(line string) []string {
+	line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Enter some text:"))
+	if line == "" || !strings.Contains(line, "How about:") {
+		return nil
+	}
+	idx := strings.Index(line, "How about:")
+	if idx < 0 {
+		return nil
+	}
+	rest := strings.TrimSpace(line[idx+len("How about:"):])
+	if rest == "" {
+		return nil
+	}
+	if cut := strings.Index(rest, "# Wrong:"); cut >= 0 {
+		rest = strings.TrimSpace(rest[:cut])
+	}
+	parts := strings.Split(rest, ",")
+	suggestions := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if word := normalizeSpellWord(part); word != "" {
+			suggestions = append(suggestions, word)
+		}
+	}
+	return suggestions
+}
+
 func (d nativeSpellDictionary) run(words []string) (string, error) {
 	input := strings.Join(words, "\n") + "\n"
 	switch d.backend {
@@ -534,6 +864,19 @@ func (d nativeSpellDictionary) run(words []string) (string, error) {
 	case "hunspell":
 		base := strings.TrimSuffix(d.affPath, filepath.Ext(d.affPath))
 		return spellRunCommand(d.command, []string{"-d", base, "-l"}, input)
+	default:
+		return "", fmt.Errorf("unknown native spell backend: %s", d.backend)
+	}
+}
+
+func (d nativeSpellDictionary) runSuggestions(word string) (string, error) {
+	input := word + "\n"
+	switch d.backend {
+	case "nuspell":
+		return spellRunCommand(d.command, []string{"-d", d.affPath}, input)
+	case "hunspell":
+		base := strings.TrimSuffix(d.affPath, filepath.Ext(d.affPath))
+		return spellRunCommand(d.command, []string{"-d", base}, input)
 	default:
 		return "", fmt.Errorf("unknown native spell backend: %s", d.backend)
 	}
@@ -818,12 +1161,22 @@ func invalidateSpellCache() {
 	spellStatusMu.Lock()
 	spellStatusCache = map[string]SpellDictionaryLoadStatus{}
 	spellStatusMu.Unlock()
+	if currentNote != nil {
+		for _, ed := range currentNote.Tabs {
+			if ed == nil {
+				continue
+			}
+			ed.SpellCacheText = ""
+			ed.SpellCacheSpans = nil
+		}
+	}
 }
 
 func resetSpellTestHooks() {
 	spellHTTPGet = http.Get
 	spellLookPath = exec.LookPath
 	spellRunCommand = runSpellCommand
+	SetSpellRefreshHook(nil)
 	spellDownloadURL = func(pkg string, file string) string {
 		return fmt.Sprintf("https://unpkg.com/%s/%s", pkg, file)
 	}

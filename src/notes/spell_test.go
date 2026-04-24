@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
@@ -42,9 +44,68 @@ func TestSpellHighlightSpansUsesCustomWordsAndIgnoresMarkdownCodeAndURLs(t *test
 	}
 }
 
+func TestRenderEditorPaneSchedulesNativeSpellCheckAsync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var startedCount atomic.Int32
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(_ string, _ []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "* kokotoolsspellprobe\n", nil
+		}
+		if startedCount.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return "& Wrong: badwrd. How about: bad\n", nil
+	})
+	ed := &Editor{Text: "known badwrd", Mode: ModeNormal}
+	go func() {
+		_ = renderEditorPane(ed, 40, 1)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		close(release)
+		t.Fatal("renderEditorPane blocked on native spellcheck")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("native spellcheck was not scheduled")
+	}
+	close(release)
+	deadline := time.After(time.Second)
+	for {
+		if ed.SpellCacheText == ed.Text && containsSpellSpanFor(ed.Text, ed.SpellCacheSpans, "badwrd") {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("spell cache = %q %#v, want async badwrd span", ed.SpellCacheText, ed.SpellCacheSpans)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 func TestAddWordUnderCursorPersistsSharedCustomWord(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
 	w := &Workspace{
 		Tabs:       []*Editor{{Text: "KokoTools", Cursor: 2, Mode: ModeNormal}},
 		CurrentTab: 0,
@@ -61,6 +122,54 @@ func TestAddWordUnderCursorPersistsSharedCustomWord(t *testing.T) {
 	}
 	if status := w.ActiveEditor().Status; !strings.Contains(status, "added word") {
 		t.Fatalf("status = %q, want added word", status)
+	}
+	got := strings.Join(renderEditorPane(w.ActiveEditor(), 40, 1), "\n")
+	if strings.Contains(got, helpers.ANSIRoleSpellError) {
+		t.Fatalf("renderEditorPane() = %q, want added word to stop being highlighted", got)
+	}
+}
+
+func TestAddCustomWordKeepsWarmNativeSpellCache(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	var probes atomic.Int32
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			probes.Add(1)
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		if strings.Contains(input, "badwrd") {
+			return "& Wrong: badwrd. How about: badword\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	_ = spellHighlightSpans("badwrd")
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("probe count after warmup = %d, want 1", got)
+	}
+	added, err := AddCustomWord("badwrd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !added {
+		t.Fatal("AddCustomWord(badwrd) = false, want true")
+	}
+	spans := spellHighlightSpans("badwrd")
+	if len(spans) != 0 {
+		t.Fatalf("spellHighlightSpans() = %#v, want custom word accepted without highlight", spans)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("probe count after AddCustomWord = %d, want cache preserved without reprobe", got)
 	}
 }
 
@@ -133,8 +242,8 @@ func TestRenderEditorPaneUsesSpellErrorRole(t *testing.T) {
 	if !strings.Contains(got, helpers.ANSIRoleSpellError) {
 		t.Fatalf("renderEditorPane() = %q, want spell error role", got)
 	}
-	if !strings.Contains(got, "\u0332") {
-		t.Fatalf("renderEditorPane() = %q, want straight underline marks", got)
+	if strings.Contains(got, "\u0332") {
+		t.Fatalf("renderEditorPane() = %q, want spell styling without injected underline runes", got)
 	}
 }
 
@@ -149,6 +258,27 @@ func TestRenderEditorPaneShowsSpellErrorInsideMarkdownSpan(t *testing.T) {
 	got := strings.Join(renderEditorPane(ed, 40, 1), "\n")
 	if !strings.Contains(got, helpers.ANSIRoleSpellError) {
 		t.Fatalf("renderEditorPane() = %q, want spell error role inside list span", got)
+	}
+}
+
+func TestRenderEditorPaneSkipsActiveWordSpellCheckWhileTyping(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	if _, err := AddCustomWord("known"); err != nil {
+		t.Fatal(err)
+	}
+	ed := &Editor{Text: "known badwrd", Cursor: len([]rune("known badwrd")), Mode: ModeInsert}
+	got := strings.Join(renderEditorPane(ed, 40, 1), "\n")
+	if strings.Contains(got, helpers.ANSIRoleSpellError) {
+		t.Fatalf("renderEditorPane() = %q, want active word to stay unchecked while typing", got)
+	}
+
+	ed.Text = "known badwrd "
+	ed.Cursor = len([]rune(ed.Text))
+	got = strings.Join(renderEditorPane(ed, 40, 1), "\n")
+	if !strings.Contains(got, helpers.ANSIRoleSpellError) {
+		t.Fatalf("renderEditorPane() = %q, want completed word checked after delimiter", got)
 	}
 }
 
@@ -290,6 +420,85 @@ func TestNativeSpellCheckHighlightsOnlyMisspelledWordsAndCachesResults(t *testin
 	}
 }
 
+func TestRenderEditorPaneReusesSpellCacheWhileTypingActiveWord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	runCount := 0
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		runCount++
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		return "INFO: Pointed dictionary /tmp/index.aff\nEnter some text: * OK\n& Wrong: badwrd. How about: backward\n", nil
+	})
+
+	ed := &Editor{Text: "known badwrd ", Cursor: len([]rune("known badwrd ")), Mode: ModeInsert}
+	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
+	firstRunCount := runCount
+
+	ed.Text = "known badwrdx"
+	ed.Cursor = len([]rune(ed.Text))
+	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
+	if runCount != firstRunCount {
+		t.Fatalf("native command runs = %d, want unchanged while typing active word (%d)", runCount, firstRunCount)
+	}
+
+	ed.Text += " "
+	ed.Cursor = len([]rune(ed.Text))
+	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
+	deadline := time.After(time.Second)
+	for runCount <= firstRunCount {
+		select {
+		case <-deadline:
+			t.Fatalf("native command runs = %d, want another check after finishing word", runCount)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestRenderEditorPaneDoesNotReuseStaleSpellSpanPositionsWhileTyping(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		if strings.Contains(input, "badwrd") {
+			return "& Wrong: badwrd. How about: backward\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	ed := &Editor{Text: "known badwrd ", Cursor: len([]rune("known badwrd ")), Mode: ModeInsert}
+	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
+
+	ed.Text = "known xbadwrd"
+	ed.Cursor = len([]rune("known x"))
+	got := strings.Join(renderEditorPane(ed, 40, 1), "\n")
+	if strings.Contains(got, helpers.ANSIRoleSpellError) {
+		t.Fatalf("renderEditorPane() = %q, want no stale underline while active word is being edited", got)
+	}
+}
+
 func TestNativeSpellCheckHighlightsTodoStyleMisspellings(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -343,6 +552,20 @@ func TestNativeMisspelledWordsParsesNuspellAndHunspellOutput(t *testing.T) {
 	for input, want := range cases {
 		if got := nativeMisspelledWords(input); strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("nativeMisspelledWords(%q) = %v, want %v", input, got, want)
+		}
+	}
+}
+
+func TestNativeSuggestionWordsParsesOutput(t *testing.T) {
+	cases := map[string][]string{
+		"& Wrong: collor. How about: color, collar":                                 {"color", "collar"},
+		"Enter some text: & Wrong: collor. How about: color, collar":                {"color", "collar"},
+		"# Wrong: chpjrsgdhodi. No suggestions.":                                    nil,
+		"& Wrong: collor. How about: color, collar # Wrong: abowe. No suggestions.": {"color", "collar"},
+	}
+	for input, want := range cases {
+		if got := nativeSuggestionWords(input); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("nativeSuggestionWords(%q) = %v, want %v", input, got, want)
 		}
 	}
 }

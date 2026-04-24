@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,6 +159,18 @@ func TestApplyANSIMarkdownPrefersTokenColorsOverCodeBlockSpan(t *testing.T) {
 	got := applyANSIMarkdown(line, spans)
 	if !strings.Contains(got, helpers.ANSIRoleKeyword) && !strings.Contains(got, helpers.ANSIRoleFunction) {
 		t.Fatalf("applyANSIMarkdown() = %q, want token styling inside code block", got)
+	}
+}
+
+func TestApplyANSIMarkdownPrefersInlineCodeInsideListSpan(t *testing.T) {
+	line := "- use `code` here"
+	spans := []markdownSpan{
+		{Tag: tagList, Start: 0, End: len([]rune(line))},
+		{Tag: tagCode, Start: 6, End: 12},
+	}
+	got := applyANSIMarkdown(line, spans)
+	if !strings.Contains(got, helpers.ANSIRoleCode) {
+		t.Fatalf("applyANSIMarkdown() = %q, want inline code styling inside list line", got)
 	}
 }
 
@@ -1036,6 +1049,265 @@ func TestInsertModeShiftTabCyclesActiveAutocompleteBackward(t *testing.T) {
 	}
 }
 
+func TestAutoCompleteStatusLineShowsSpellSuggestions(t *testing.T) {
+	ed := &Editor{
+		Mode:                ModeInsert,
+		AutoCompleteKind:    autoCompleteSpell,
+		AutoCompleteMatches: []string{"color", "collar"},
+		AutoCompleteIndex:   0,
+	}
+	got := autoCompleteStatusLine(ed, 120)
+	if got != "" {
+		t.Fatalf("autoCompleteStatusLine() = %q, want spell popup to hide command-line suggestion text", got)
+	}
+}
+
+func TestInsertModeCtrlGOpensSpellSuggestionsAndTabCycles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		if strings.Contains(input, "collor") {
+			return "& Wrong: collor. How about: color, collar\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	ed := &Editor{
+		Text:   "use collor ",
+		Cursor: len([]rune("use collor")),
+		Mode:   ModeInsert,
+	}
+	ws := &Workspace{Tabs: []*Editor{ed}}
+	if !ws.handleEditorKey(Key{Name: "g", Ctrl: true}) {
+		t.Fatal("handleEditorKey(ctrl+g) = false, want true")
+	}
+	if got := ed.Text; got != "use collor " {
+		t.Fatalf("text = %q, want original text preserved before approval", got)
+	}
+	if ed.AutoCompleteKind != autoCompleteSpell {
+		t.Fatalf("AutoCompleteKind = %q, want %q", ed.AutoCompleteKind, autoCompleteSpell)
+	}
+	if ed.Status != "spell suggestions ready" {
+		t.Fatalf("status = %q, want spell suggestion readiness", ed.Status)
+	}
+	if !ws.handleEditorKey(Key{Name: "down"}) {
+		t.Fatal("handleEditorKey(down) = false, want spell suggestion cycle")
+	}
+	if got := ed.Text; got != "use collor " {
+		t.Fatalf("text = %q, want text unchanged while cycling suggestions", got)
+	}
+	if ed.AutoCompleteIndex != 1 {
+		t.Fatalf("AutoCompleteIndex = %d, want 1 after cycling", ed.AutoCompleteIndex)
+	}
+	if !ws.handleEditorKey(Key{Name: "up"}) {
+		t.Fatal("handleEditorKey(up) = false, want reverse spell suggestion cycle")
+	}
+	if ed.AutoCompleteIndex != 0 {
+		t.Fatalf("AutoCompleteIndex = %d, want 0 after reverse cycle", ed.AutoCompleteIndex)
+	}
+	if !ws.handleEditorKey(Key{Name: "enter"}) {
+		t.Fatal("handleEditorKey(enter) = false, want spell suggestion accept")
+	}
+	if got := ed.Text; got != "use color " {
+		t.Fatalf("text = %q, want accepted spell suggestion", got)
+	}
+}
+
+func TestInsertModeCtrlGWithoutNativeSuggestionsShowsStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	SetSpellNativeHooksForTests(func(string) (string, error) {
+		return "", errors.New("missing")
+	}, nil)
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+
+	ed := &Editor{
+		Text:   "use collor ",
+		Cursor: len([]rune("use collor")),
+		Mode:   ModeInsert,
+	}
+	ws := &Workspace{Tabs: []*Editor{ed}}
+	if !ws.handleEditorKey(Key{Name: "g", Ctrl: true}) {
+		t.Fatal("handleEditorKey(ctrl+g) = false, want true")
+	}
+	if ed.Status != "no spelling suggestions available" {
+		t.Fatalf("status = %q, want no spelling suggestions available", ed.Status)
+	}
+}
+
+func TestHandleEditorKeyCtrlGOpensSpellSuggestionsOutsideInsertMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		if strings.Contains(input, "Naice") {
+			return "& Wrong: Naice. How about: Nice, Naive\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "Naice work",
+			Cursor: 2,
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	if !w.handleEditorKey(Key{Name: "g", Ctrl: true}) {
+		t.Fatal("handleEditorKey(ctrl+g) = false, want true")
+	}
+	if got := w.ActiveEditor().Text; got != "Naice work" {
+		t.Fatalf("text = %q, want original text preserved in normal mode", got)
+	}
+	if w.ActiveEditor().AutoCompleteKind != autoCompleteSpell {
+		t.Fatalf("AutoCompleteKind = %q, want %q", w.ActiveEditor().AutoCompleteKind, autoCompleteSpell)
+	}
+	if !w.handleEditorKey(Key{Name: "enter"}) {
+		t.Fatal("handleEditorKey(enter) = false, want spell suggestion accepted in normal mode")
+	}
+	if got := w.ActiveEditor().Text; got != "Nice work" {
+		t.Fatalf("text = %q, want accepted spell suggestion in normal mode", got)
+	}
+}
+
+func TestExecuteVimCommandSpellAppliesSuggestions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		if strings.Contains(input, "Naice") {
+			return "& Wrong: Naice. How about: Nice, Naive\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "Naice work",
+			Cursor: 2,
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandSpell})
+	if got := w.ActiveEditor().Text; got != "Naice work" {
+		t.Fatalf("text = %q, want spell command to keep text unchanged before approval", got)
+	}
+	if w.ActiveEditor().Status != "spell suggestions ready" {
+		t.Fatalf("status = %q, want spell suggestion readiness", w.ActiveEditor().Status)
+	}
+	if !w.handleEditorKey(Key{Name: "enter"}) {
+		t.Fatal("handleEditorKey(enter) = false, want spell suggestion accept after :spell")
+	}
+	if got := w.ActiveEditor().Text; got != "Nice work" {
+		t.Fatalf("text = %q, want accepted spell suggestion after :spell", got)
+	}
+}
+
+func TestOpenSpellSuggestionsIgnoresIdentitySuggestions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+		}
+		if strings.Contains(input, "Naice") {
+			return "& Wrong: Naice. How about: Naice, naice\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "Naice work",
+			Cursor: 2,
+			Mode:   ModeInsert,
+		}},
+		CurrentTab: 0,
+	}
+	if !w.handleEditorKey(Key{Name: "g", Ctrl: true}) {
+		t.Fatal("handleEditorKey(ctrl+g) = false, want true")
+	}
+	if got := w.ActiveEditor().Text; got != "Naice work" {
+		t.Fatalf("text = %q, want unchanged text when no proper suggestions exist", got)
+	}
+	if w.ActiveEditor().AutoCompleteKind != "" {
+		t.Fatalf("AutoCompleteKind = %q, want cleared autocomplete when no proper suggestions exist", w.ActiveEditor().AutoCompleteKind)
+	}
+	if w.ActiveEditor().Status != "no spelling suggestions available" {
+		t.Fatalf("status = %q, want no spelling suggestions available", w.ActiveEditor().Status)
+	}
+}
+
+func TestRenderEditorPaneShowsSpellSuggestionPopupUnderWord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:                "use collor here",
+		Cursor:              len([]rune("use collor")),
+		Mode:                ModeInsert,
+		AutoCompleteKind:    autoCompleteSpell,
+		AutoCompleteMatches: []string{"color", "collar"},
+		AutoCompleteIndex:   0,
+		AutoCompleteStart:   len([]rune("use ")),
+		AutoCompleteEnd:     len([]rune("use collor")),
+	}
+	got := strings.Join(renderEditorPane(ed, 40, 4), "\n")
+	if !strings.Contains(got, "> color") {
+		t.Fatalf("renderEditorPane() = %q, want active spell suggestion popup row", got)
+	}
+	if !strings.Contains(got, "  collar") {
+		t.Fatalf("renderEditorPane() = %q, want secondary spell suggestion popup row", got)
+	}
+}
+
 func TestReferenceForFileOverrides(t *testing.T) {
 	entry := &FileEntry{
 		Path:  "/tmp/diagram.png",
@@ -1115,6 +1387,65 @@ func TestHandleNormalModePSingleLineCharRegisterPastesInline(t *testing.T) {
 	}
 	if ed.Text != "onZZe" {
 		t.Fatalf("editor text = %q, want inline paste", ed.Text)
+	}
+}
+
+func TestWorkspaceRegisterSupportsPasteAcrossNotesWithoutClipboard(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error {
+		return os.ErrPermission
+	})
+	defer restoreWrite()
+	restoreRead := helpers.SetClipboardReaderForTesting(func() (string, error) {
+		return "", os.ErrPermission
+	})
+	defer restoreRead()
+
+	ws := &Workspace{
+		Tabs: []*Editor{
+			{Text: "alpha beta", Cursor: 0, Mode: ModeNormal},
+			{Text: "one", Cursor: 1, Mode: ModeNormal},
+		},
+		CurrentTab: 0,
+	}
+	if !handleNormalMode(ws, ws.Tabs[0], Key{Name: "y", Rune: 'y'}) {
+		t.Fatal("first y should arm yank")
+	}
+	if !handleNormalMode(ws, ws.Tabs[0], Key{Name: "w", Rune: 'w'}) {
+		t.Fatal("w after y should yank word")
+	}
+	ws.setCurrentTab(1)
+	if !handleNormalMode(ws, ws.Tabs[1], Key{Name: "p", Rune: 'p'}) {
+		t.Fatal("handleNormalMode(p) = false, want true")
+	}
+	if got := ws.Tabs[1].Text; got != "onalphae" {
+		t.Fatalf("text = %q, want pasted workspace register", got)
+	}
+}
+
+func TestWorkspaceRegisterOverridesStaleNoteRegisterOnPaste(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	restoreRead := helpers.SetClipboardReaderForTesting(func() (string, error) {
+		return "", os.ErrPermission
+	})
+	defer restoreRead()
+	ws := &Workspace{
+		Register: vimRegister{Kind: vimRegisterChar, Text: "fresh"},
+		Tabs: []*Editor{{
+			Text:     "one",
+			Cursor:   1,
+			Mode:     ModeNormal,
+			Register: vimRegister{Kind: vimRegisterChar, Text: "stale"},
+		}},
+		CurrentTab: 0,
+	}
+	if !handleNormalMode(ws, ws.Tabs[0], Key{Name: "p", Rune: 'p'}) {
+		t.Fatal("handleNormalMode(p) = false, want true")
+	}
+	if got := ws.Tabs[0].Text; got != "onfreshe" {
+		t.Fatalf("text = %q, want workspace register paste", got)
 	}
 }
 
@@ -1297,6 +1628,31 @@ func TestSwitchToTabAtColumnSwitchesClickedNoteAndFocusesEditor(t *testing.T) {
 	}
 }
 
+func TestSwitchingOpenTabsUpdatesSessionInMemoryWithoutWritingSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settings.Init()
+	first := filepath.Join(home, "first.md")
+	second := filepath.Join(home, "second.md")
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Path: first, Title: "first", Mode: ModeNormal},
+			{Path: second, Title: "second", Mode: ModeNormal},
+		},
+		CurrentTab: 0,
+	}
+	if !w.NextTab() {
+		t.Fatal("NextTab() = false, want true")
+	}
+	if got := settings.Inst().NotesApp.CurrentNotePath; got != filepath.ToSlash(second) {
+		t.Fatalf("CurrentNotePath = %q, want %q", got, filepath.ToSlash(second))
+	}
+	settingsPath := filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("settings file exists after pure tab switch, err = %v", err)
+	}
+}
+
 func TestNewWorkspaceRestoresOpenTabsSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1457,6 +1813,23 @@ func TestExecuteVimCommandOpenLinksQueuesPendingRequest(t *testing.T) {
 	}
 	if again := w.TakePendingOpenLinks(); len(again) != 0 {
 		t.Fatalf("TakePendingOpenLinks() should clear request, got %v", again)
+	}
+}
+
+func TestExecuteVimCommandRecordKeysQueuesPendingRequest(t *testing.T) {
+	w := &Workspace{
+		Tabs:       []*Editor{{Title: "Plan", Text: "x", Mode: ModeNormal}},
+		CurrentTab: 0,
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandRecordKeys})
+	if !w.TakePendingRecordKeys() {
+		t.Fatal("TakePendingRecordKeys() = false, want true")
+	}
+	if w.TakePendingRecordKeys() {
+		t.Fatal("TakePendingRecordKeys() should clear request")
+	}
+	if got := w.ActiveEditor().Status; got != "key recording requested" {
+		t.Fatalf("status = %q, want %q", got, "key recording requested")
 	}
 }
 
@@ -1800,6 +2173,84 @@ func TestHandleNormalModeDDollarDeletesToEndOfLine(t *testing.T) {
 	}
 }
 
+func TestHandleNormalModeDDownDeletesCurrentAndNextLine(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "one\ntwo\nthree\nfour", Cursor: len([]rune("one\n")), Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "down"}) {
+		t.Fatal("handleNormalMode(down) = false, want true after d")
+	}
+	if got := ed.Text; got != "one\nfour" {
+		t.Fatalf("text = %q, want current and next line deleted", got)
+	}
+	if got := ed.Cursor; got != len([]rune("one\n")) {
+		t.Fatalf("cursor = %d, want start of surviving line", got)
+	}
+}
+
+func TestHandleNormalModeDUpDeletesCurrentAndPreviousLine(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "one\ntwo\nthree\nfour", Cursor: len([]rune("one\ntwo\n")), Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "up"}) {
+		t.Fatal("handleNormalMode(up) = false, want true after d")
+	}
+	if got := ed.Text; got != "one\nfour" {
+		t.Fatalf("text = %q, want previous and current line deleted", got)
+	}
+	if got := ed.Cursor; got != len([]rune("one\n")) {
+		t.Fatalf("cursor = %d, want start of surviving current line", got)
+	}
+}
+
+func TestHandleNormalModeCountDDownDeletesLineSpan(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "one\ntwo\nthree\nfour\nfive", Cursor: len([]rune("one\n")), Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "2", Rune: '2'}) {
+		t.Fatal("handleNormalMode(2) = false, want true while pending d")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "down"}) {
+		t.Fatal("handleNormalMode(down) = false, want true after d2")
+	}
+	if got := ed.Text; got != "one\nfive" {
+		t.Fatalf("text = %q, want current plus two lines below deleted", got)
+	}
+	if ed.NormalCount != "" || ed.PendingOp != "" {
+		t.Fatalf("NormalCount/PendingOp = %q/%q, want cleared", ed.NormalCount, ed.PendingOp)
+	}
+}
+
+func TestHandleNormalModeCountDUpDeletesLineSpan(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "one\ntwo\nthree\nfour\nfive", Cursor: len([]rune("one\ntwo\nthree\n")), Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "2", Rune: '2'}) {
+		t.Fatal("handleNormalMode(2) = false, want true while pending d")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "up"}) {
+		t.Fatal("handleNormalMode(up) = false, want true after d2")
+	}
+	if got := ed.Text; got != "one\nfive" {
+		t.Fatalf("text = %q, want current plus two lines above deleted", got)
+	}
+	if got := ed.Cursor; got != len([]rune("one\n")) {
+		t.Fatalf("cursor = %d, want start of surviving current line", got)
+	}
+}
+
 func TestHandleNormalModeUUndoesLastEdit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -2066,7 +2517,7 @@ func TestVisualLineYankAndDelete(t *testing.T) {
 	}
 	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 	refreshVisualSelection(ed)
-	if !handleVisualMode(ed, Key{Name: "y", Rune: 'y'}) {
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: "y", Rune: 'y'}) {
 		t.Fatal("y in visual line mode should succeed")
 	}
 	if ed.Register.Kind != vimRegisterLine || ed.Register.Text != "one\ntwo\n" {
@@ -2077,7 +2528,7 @@ func TestVisualLineYankAndDelete(t *testing.T) {
 	startVisualSelection(ed2, vimSelectionLine)
 	ed2.Cursor = vimVerticalMoveOffset(ed2.Text, ed2.Cursor, 1)
 	refreshVisualSelection(ed2)
-	if !handleVisualMode(ed2, Key{Name: "d", Rune: 'd'}) {
+	if !handleVisualMode(&Workspace{}, ed2, Key{Name: "d", Rune: 'd'}) {
 		t.Fatal("d in visual line mode should succeed")
 	}
 	if got := ed2.Text; got != "three" {
@@ -2141,7 +2592,7 @@ func TestVisualModeShiftSelectionRightAndLeft(t *testing.T) {
 	startVisualSelection(ed, vimSelectionLine)
 	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 	refreshVisualSelection(ed)
-	if !handleVisualMode(ed, Key{Name: ">", Rune: '>'}) {
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: ">", Rune: '>'}) {
 		t.Fatal("handleVisualMode(>) = false, want true")
 	}
 	if got := ed.Text; got != "  one\n  two\nthree" {
@@ -2163,7 +2614,7 @@ func TestVisualModeShiftSelectionRightAndLeft(t *testing.T) {
 	startVisualSelection(ed, vimSelectionChar)
 	ed.Cursor = strings.Index(ed.Text, "two")
 	refreshVisualSelection(ed)
-	if !handleVisualMode(ed, Key{Name: "<", Rune: '<'}) {
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: "<", Rune: '<'}) {
 		t.Fatal("handleVisualMode(<) = false, want true")
 	}
 	if got := ed.Text; got != "one\ntwo\nthree" {
@@ -2187,7 +2638,7 @@ func TestVisualBlockYankAndDelete(t *testing.T) {
 	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 	ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
 	refreshVisualSelection(ed)
-	if !handleVisualMode(ed, Key{Name: "y", Rune: 'y'}) {
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: "y", Rune: 'y'}) {
 		t.Fatal("y in visual block mode should succeed")
 	}
 	if ed.Register.Kind != vimRegisterBlock || len(ed.Register.Lines) != 2 || ed.Register.Lines[0] != "bc" || ed.Register.Lines[1] != "xy" {
@@ -2199,7 +2650,7 @@ func TestVisualBlockYankAndDelete(t *testing.T) {
 	ed2.Cursor = vimVerticalMoveOffset(ed2.Text, ed2.Cursor, 1)
 	ed2.Cursor = vimClampOffset(ed2.Text, ed2.Cursor+1)
 	refreshVisualSelection(ed2)
-	if !handleVisualMode(ed2, Key{Name: "d", Rune: 'd'}) {
+	if !handleVisualMode(&Workspace{}, ed2, Key{Name: "d", Rune: 'd'}) {
 		t.Fatal("d in visual block mode should succeed")
 	}
 	if got := ed2.Text; got != "ad\nwz" {
@@ -2220,7 +2671,7 @@ func TestVisualBlockDeleteThenPPastesDeletedBlock(t *testing.T) {
 	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 	ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
 	refreshVisualSelection(ed)
-	if !handleVisualMode(ed, Key{Name: "d", Rune: 'd'}) {
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
 		t.Fatal("d in visual block mode should succeed")
 	}
 	if got := ed.Text; got != "ad\nwz" {
@@ -2328,6 +2779,8 @@ func TestHandleNormalModePPasteReportsClipboardFailure(t *testing.T) {
 }
 
 func TestHandleNormalModeSpaceTogglesCheckbox(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
 	ed := &Editor{Text: "- [ ] task", Cursor: 4, Mode: ModeNormal}
 	if !handleNormalMode(&Workspace{}, ed, Key{Name: " ", Rune: ' '}) {
 		t.Fatal("handleNormalMode(space) = false, want true")
@@ -2343,6 +2796,224 @@ func TestHandleNormalModeSpaceTogglesCheckbox(t *testing.T) {
 	}
 }
 
+func TestHandleNormalModeSpaceTogglesCheckboxAfterWrappedLineAtClickedCursor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 12,
+		Tabs: []*Editor{{
+			Text: "alpha beta gamma\n- [ ] one\n- [ ] two",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	// First line wraps into two visual rows at this width, so the third logical line starts on visual row 3.
+	if !w.MoveEditorCursorToVisualPosition(3, 4) {
+		t.Fatal("MoveEditorCursorToVisualPosition() = false, want true")
+	}
+	if !handleNormalMode(w, ed, Key{Name: " ", Rune: ' '}) {
+		t.Fatal("handleNormalMode(space) = false, want true")
+	}
+	if got := ed.Text; got != "alpha beta gamma\n- [ ] one\n- [x] two" {
+		t.Fatalf("text = %q, want only the clicked checkbox line toggled", got)
+	}
+}
+
+func TestNormalModeDownMovesByVisualRowsBeforeCheckboxToggle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 12,
+		Tabs: []*Editor{{
+			Text: "alpha beta gamma\n- [ ] one\n- [ ] two",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	rows := renderEditorPane(w.ActiveEditor(), 12, 5)
+	firstCheckboxRow := -1
+	for i, row := range rows {
+		if strings.Contains(helpers.StripANSI(row), "- [ ] one") {
+			firstCheckboxRow = i
+			break
+		}
+	}
+	if firstCheckboxRow < 2 {
+		t.Fatalf("first checkbox visual row = %d, want below wrapped line in %#v", firstCheckboxRow, rows)
+	}
+	for i := 0; i < firstCheckboxRow; i++ {
+		if !handleNormalMode(w, w.ActiveEditor(), Key{Name: "down"}) {
+			t.Fatalf("handleNormalMode(down #%d) = false, want true", i+1)
+		}
+	}
+	if !handleNormalMode(w, w.ActiveEditor(), Key{Name: " ", Rune: ' '}) {
+		t.Fatal("handleNormalMode(space) = false, want true")
+	}
+	if got := w.ActiveEditor().Text; got != "alpha beta gamma\n- [x] one\n- [ ] two" {
+		t.Fatalf("text = %q, want first checkbox toggled after visual-row movement", got)
+	}
+}
+
+func TestHandleNormalModeSpaceTogglesWrappedChecklistFromContinuationRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 14,
+		Tabs: []*Editor{{
+			Text: "intro line\n- [ ] task that wraps widely",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	if !w.MoveEditorCursorToVisualPosition(2, 6) {
+		t.Fatal("MoveEditorCursorToVisualPosition() = false, want true on wrapped continuation row")
+	}
+	if !handleNormalMode(w, ed, Key{Name: " ", Rune: ' '}) {
+		t.Fatal("handleNormalMode(space) = false, want wrapped checklist toggled")
+	}
+	if got := ed.Text; got != "intro line\n- [x] task that wraps widely" {
+		t.Fatalf("text = %q, want wrapped checklist toggled on current logical line", got)
+	}
+}
+
+func TestEditorOffsetAtVisualPositionIgnoresSpellPopupOverlayRows(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 20,
+		Tabs: []*Editor{{
+			Text:                "Naice\n- [ ] one\n- [ ] two",
+			Mode:                ModeInsert,
+			AutoCompleteKind:    autoCompleteSpell,
+			AutoCompleteMatches: []string{"Nice", "Naive"},
+			AutoCompleteIndex:   0,
+			AutoCompleteStart:   0,
+			AutoCompleteEnd:     len([]rune("Naice")),
+		}},
+		CurrentTab: 0,
+	}
+	offset, ok := w.EditorOffsetAtVisualPosition(2, 4)
+	if !ok {
+		t.Fatal("EditorOffsetAtVisualPosition() ok = false, want true")
+	}
+	want := len([]rune("Naice\n- [ ] one\n")) + 2
+	if offset != want {
+		t.Fatalf("offset = %d, want %d with spell popup overlay active", offset, want)
+	}
+}
+
+func TestCheckboxToggleNearLineStartBelowSpellHighlightUsesCurrentLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	if _, err := AddCustomWord("known"); err != nil {
+		t.Fatal(err)
+	}
+	w := &Workspace{
+		EditorRenderWidth: 24,
+		Tabs: []*Editor{{
+			Text: "known badwrd\n- [ ] first\n- [ ] second",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	_ = renderEditorPane(w.ActiveEditor(), 24, 4)
+	if !w.MoveEditorCursorToVisualPosition(2, 3) {
+		t.Fatal("MoveEditorCursorToVisualPosition() = false, want true")
+	}
+	if !handleNormalMode(w, w.ActiveEditor(), Key{Name: " ", Rune: ' '}) {
+		t.Fatal("handleNormalMode(space) = false, want true")
+	}
+	if got := w.ActiveEditor().Text; got != "known badwrd\n- [ ] first\n- [x] second" {
+		t.Fatalf("text = %q, want second checkbox toggled", got)
+	}
+}
+
+func TestCheckboxToggleExactWrappedChecklistScenarioUsesVisibleLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	if _, err := AddCustomWord("ask"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("Dmitrijs"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("about"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("ownership"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("Read"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("Lusine"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("document"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("transition"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("LemFi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddCustomWord("EU"); err != nil {
+		t.Fatal(err)
+	}
+	w := &Workspace{
+		EditorRenderWidth: 50,
+		Tabs: []*Editor{{
+			Text: "- [ ] ask Dmitrijs about Simetric ownership\n- [ ] Read Lusine document about transition to LemFi EU",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	rows := renderEditorPane(w.ActiveEditor(), 50, 5)
+	secondLineRow := -1
+	for i, row := range rows {
+		if strings.Contains(helpers.StripANSI(row), "- [ ] Read") {
+			secondLineRow = i
+			break
+		}
+	}
+	if secondLineRow < 0 {
+		t.Fatalf("could not find second checklist row in %#v", rows)
+	}
+	for _, col := range []int{0, 2, 6, 10} {
+		w.ActiveEditor().Text = "- [ ] ask Dmitrijs about Simetric ownership\n- [ ] Read Lusine document about transition to LemFi EU"
+		if !w.MoveEditorCursorToVisualPosition(secondLineRow, col) {
+			t.Fatalf("MoveEditorCursorToVisualPosition(row=%d, col=%d) = false, want true", secondLineRow, col)
+		}
+		if !handleNormalMode(w, w.ActiveEditor(), Key{Name: " ", Rune: ' '}) {
+			t.Fatalf("handleNormalMode(space) = false at col %d, want true", col)
+		}
+		if got := w.ActiveEditor().Text; got != "- [ ] ask Dmitrijs about Simetric ownership\n- [x] Read Lusine document about transition to LemFi EU" {
+			t.Fatalf("col %d text = %q, want second checkbox toggled", col, got)
+		}
+	}
+}
+
+func TestCheckboxToggleAtLineBoundaryKeepsCurrentChecklistLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:   "- [ ] ask Dmitrijs about Simetric ownership\n- [ ] Read Lusine document about transition to LemFi EU",
+		Cursor: len([]rune("- [ ] ask Dmitrijs about Simetric ownership")),
+		Mode:   ModeNormal,
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: " ", Rune: ' '}) {
+		t.Fatal("handleNormalMode(space) = false, want true")
+	}
+	if got := ed.Text; got != "- [x] ask Dmitrijs about Simetric ownership\n- [ ] Read Lusine document about transition to LemFi EU" {
+		t.Fatalf("text = %q, want current checklist line toggled at boundary", got)
+	}
+}
+
 func TestVisualBlockYankCopiesJoinedTextToClipboard(t *testing.T) {
 	var copied string
 	restore := helpers.SetClipboardWriterForTesting(func(text string) error {
@@ -2355,7 +3026,7 @@ func TestVisualBlockYankCopiesJoinedTextToClipboard(t *testing.T) {
 	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 	ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
 	refreshVisualSelection(ed)
-	if !handleVisualMode(ed, Key{Name: "y", Rune: 'y'}) {
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: "y", Rune: 'y'}) {
 		t.Fatal("y in visual block mode should succeed")
 	}
 	if copied != "bc\nxy" {

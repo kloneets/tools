@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/kloneets/tools/src/helpers"
@@ -115,10 +114,15 @@ type Editor struct {
 	LastXCursor         int
 	LastXArmed          bool
 	AutoCompletePrefix  string
+	AutoCompleteKind    string
 	AutoCompleteMatches []string
 	AutoCompleteIndex   int
 	AutoCompleteStart   int
 	AutoCompleteEnd     int
+	SpellCacheText      string
+	SpellCacheSpans     []markdownSpan
+	SpellAsyncText      string
+	SpellAsyncRunning   bool
 	UndoStack           []editorSnapshot
 	RedoStack           []editorSnapshot
 }
@@ -137,6 +141,7 @@ type Workspace struct {
 	FilesDirty            bool
 	PendingMigrationCount int
 	Tabs                  []*Editor
+	Register              vimRegister
 	CurrentTab            int
 	LastAccessedTab       int
 	FocusSidebar          bool
@@ -148,6 +153,7 @@ type Workspace struct {
 	SelectedFolder        string
 	PreviewHidden         bool
 	pendingOpenLinks      []string
+	pendingRecordKeys     bool
 	pendingQuit           bool
 	pendingQuitForce      bool
 	pendingSaveAll        bool
@@ -340,7 +346,7 @@ func (w *Workspace) Open(path string) error {
 	for i, tab := range w.Tabs {
 		if tab.Path == path {
 			w.setCurrentTab(i)
-			w.persistSession()
+			w.updateSession()
 			return nil
 		}
 	}
@@ -364,8 +370,18 @@ func defaultEditorMode() Mode {
 }
 
 func (w *Workspace) persistSession() {
+	paths, current := w.sessionState()
+	settings.SaveNotesSession(paths, current)
+}
+
+func (w *Workspace) updateSession() {
+	paths, current := w.sessionState()
+	settings.UpdateNotesSession(paths, current)
+}
+
+func (w *Workspace) sessionState() ([]string, string) {
 	if w == nil {
-		return
+		return nil, ""
 	}
 	paths := make([]string, 0, len(w.Tabs))
 	current := ""
@@ -378,7 +394,7 @@ func (w *Workspace) persistSession() {
 			current = tab.Path
 		}
 	}
-	settings.SaveNotesSession(paths, current)
+	return paths, current
 }
 
 func (w *Workspace) restoreOpenTabs(files []noteFile) bool {
@@ -638,7 +654,7 @@ func (w *Workspace) NextTab() bool {
 		return false
 	}
 	w.setCurrentTab((w.CurrentTab + 1) % len(w.Tabs))
-	w.persistSession()
+	w.updateSession()
 	return true
 }
 
@@ -651,7 +667,7 @@ func (w *Workspace) PrevTab() bool {
 		next = len(w.Tabs) - 1
 	}
 	w.setCurrentTab(next)
-	w.persistSession()
+	w.updateSession()
 	return true
 }
 
@@ -662,7 +678,7 @@ func (w *Workspace) SwitchToLastAccessedTab() bool {
 	w.setCurrentTab(w.LastAccessedTab)
 	w.FocusSidebar = false
 	w.ensureEditorVisible()
-	w.persistSession()
+	w.updateSession()
 	return true
 }
 
@@ -674,7 +690,7 @@ func (w *Workspace) SwitchToTabShortcut(shortcut string) bool {
 	w.setCurrentTab(index)
 	w.FocusSidebar = false
 	w.ensureEditorVisible()
-	w.persistSession()
+	w.updateSession()
 	return true
 }
 
@@ -686,7 +702,7 @@ func (w *Workspace) SwitchToTabAtColumn(col int) bool {
 	w.setCurrentTab(index)
 	w.FocusSidebar = false
 	w.ensureEditorVisible()
-	w.persistSession()
+	w.updateSession()
 	return true
 }
 
@@ -1073,6 +1089,26 @@ func (w *Workspace) handleEditorKey(key Key) bool {
 	if ed == nil {
 		return false
 	}
+	if autoCompleteActive(ed, autoCompleteSpell) {
+		switch key.Name {
+		case "down":
+			return cycleSpellSuggestions(ed, 1)
+		case "up":
+			return cycleSpellSuggestions(ed, -1)
+		case "enter":
+			return acceptSpellSuggestion(ed)
+		case "esc":
+			clearAutoComplete(ed)
+			ed.Status = "spelling suggestion cancelled"
+			if settings.Inst().NotesApp.VimMode && ed.Mode == ModeInsert {
+				ed.Mode = ModeNormal
+			}
+			return true
+		}
+	}
+	if key.Ctrl && key.Name == "g" && ed.Mode != ModeCommand {
+		return openSpellSuggestions(w, ed)
+	}
 	if (key.Meta || key.Ctrl) && (key.Name == "left" || key.Name == "right") {
 		if key.Name == "left" {
 			ed.Cursor = vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
@@ -1103,7 +1139,7 @@ func (w *Workspace) handleEditorKey(key Key) bool {
 		return handleInsertMode(w, ed, key)
 	}
 	if ed.Mode == ModeVisual {
-		return handleVisualMode(ed, key)
+		return handleVisualMode(w, ed, key)
 	}
 	return handleNormalMode(w, ed, key)
 }
@@ -1167,10 +1203,16 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 		return insertNewline(ed)
 	case "tab":
 		if key.Shift {
-			if len(ed.AutoCompleteMatches) > 0 {
+			if autoCompleteActive(ed, autoCompleteSpell) {
+				return cycleSpellSuggestions(ed, -1)
+			}
+			if autoCompleteActive(ed, autoCompletePath) {
 				return completeEditorPathReferenceBackward(w, ed)
 			}
 			return outdentListItem(ed)
+		}
+		if autoCompleteActive(ed, autoCompleteSpell) {
+			return cycleSpellSuggestions(ed, 1)
 		}
 		if completeEditorPathReference(w, ed) {
 			return true
@@ -1200,11 +1242,11 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	case "up":
 		clearAutoComplete(ed)
-		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, -1)
+		moveEditorCursorVertical(w, ed, -1)
 		return true
 	case "down":
 		clearAutoComplete(ed)
-		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+		moveEditorCursorVertical(w, ed, 1)
 		return true
 	case "pageup":
 		clearAutoComplete(ed)
@@ -1408,6 +1450,7 @@ func clearAutoComplete(ed *Editor) {
 		return
 	}
 	ed.AutoCompletePrefix = ""
+	ed.AutoCompleteKind = ""
 	ed.AutoCompleteMatches = nil
 	ed.AutoCompleteIndex = 0
 	ed.AutoCompleteStart = 0
@@ -1419,9 +1462,13 @@ func autoCompleteStatusLine(ed *Editor, width int) string {
 		return ""
 	}
 	if len(ed.AutoCompleteMatches) > 0 {
+		if ed.AutoCompleteKind == autoCompleteSpell {
+			return ""
+		}
 		current := ed.AutoCompleteMatches[ed.AutoCompleteIndex%len(ed.AutoCompleteMatches)]
 		extra := len(ed.AutoCompleteMatches) - 1
-		line := "path complete: " + current
+		label := "path complete: "
+		line := label + current
 		if extra > 0 {
 			line += fmt.Sprintf(" (+%d more, tab cycles)", extra)
 		}
@@ -1447,6 +1494,169 @@ func autoCompleteStatusLine(ed *Editor, width int) string {
 	return helpers.TruncateANSI(line, width)
 }
 
+const (
+	autoCompletePath  = "path"
+	autoCompleteSpell = "spell"
+)
+
+func autoCompleteActive(ed *Editor, kind string) bool {
+	return ed != nil && ed.AutoCompleteKind == kind && len(ed.AutoCompleteMatches) > 0
+}
+
+func openSpellSuggestions(w *Workspace, ed *Editor) bool {
+	if ed == nil {
+		return false
+	}
+	word, start, end, ok := spellSuggestionTarget(ed)
+	if !ok {
+		clearAutoComplete(ed)
+		ed.Status = "no spelling suggestions available"
+		return true
+	}
+	service, err := currentSpellService()
+	if err != nil || service == nil || !service.ready() {
+		clearAutoComplete(ed)
+		ed.Status = "no spelling suggestions available"
+		return true
+	}
+	if service.correct(word) {
+		clearAutoComplete(ed)
+		ed.Status = "word is correct: " + word
+		return true
+	}
+	suggestions, err := service.suggestions(word)
+	if err != nil {
+		clearAutoComplete(ed)
+		ed.Status = "no spelling suggestions available"
+		return true
+	}
+	suggestions = filterSpellSuggestions(word, suggestions)
+	if len(suggestions) == 0 {
+		clearAutoComplete(ed)
+		ed.Status = "no spelling suggestions available"
+		return true
+	}
+	ed.AutoCompleteKind = autoCompleteSpell
+	ed.AutoCompletePrefix = word
+	ed.AutoCompleteMatches = suggestions
+	ed.AutoCompleteIndex = 0
+	ed.AutoCompleteStart = start
+	ed.AutoCompleteEnd = end
+	ed.Status = spellSuggestionsStatus(suggestions)
+	_ = w
+	return true
+}
+
+func cycleSpellSuggestions(ed *Editor, delta int) bool {
+	if !autoCompleteActive(ed, autoCompleteSpell) {
+		return false
+	}
+	count := len(ed.AutoCompleteMatches)
+	if count == 0 {
+		return false
+	}
+	index := ed.AutoCompleteIndex + delta
+	for index < 0 {
+		index += count
+	}
+	index %= count
+	ed.AutoCompleteIndex = index
+	ed.Status = spellSuggestionsStatus(ed.AutoCompleteMatches)
+	return true
+}
+
+func spellSuggestionsStatus(suggestions []string) string {
+	if len(suggestions) == 0 {
+		return "no spelling suggestions available"
+	}
+	show := suggestions
+	if len(show) > 4 {
+		show = show[:4]
+	}
+	status := "spell suggestions ready"
+	if len(suggestions) > len(show) {
+		status += fmt.Sprintf(" (+%d more)", len(suggestions)-len(show))
+	}
+	return status
+}
+
+func acceptSpellSuggestion(ed *Editor) bool {
+	if !autoCompleteActive(ed, autoCompleteSpell) {
+		return false
+	}
+	index := ed.AutoCompleteIndex
+	if index < 0 || index >= len(ed.AutoCompleteMatches) {
+		return false
+	}
+	replacement := ed.AutoCompleteMatches[index]
+	replaceRunes(ed, ed.AutoCompleteStart, ed.AutoCompleteEnd, replacement)
+	ed.AutoCompleteEnd = ed.AutoCompleteStart + len([]rune(replacement))
+	ed.Dirty = true
+	ed.Status = "spelling applied: " + replacement
+	ed.SpellCacheText = ""
+	ed.SpellCacheSpans = nil
+	clearAutoComplete(ed)
+	return true
+}
+
+func filterSpellSuggestions(word string, suggestions []string) []string {
+	if len(suggestions) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(suggestions))
+	filtered := make([]string, 0, len(suggestions))
+	normalizedWord := normalizeSpellWord(word)
+	for _, suggestion := range suggestions {
+		trimmed := strings.TrimSpace(suggestion)
+		if trimmed == "" {
+			continue
+		}
+		normalized := normalizeSpellWord(trimmed)
+		if normalized == "" || normalized == normalizedWord {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		filtered = append(filtered, trimmed)
+	}
+	return filtered
+}
+
+func spellSuggestionTarget(ed *Editor) (string, int, int, bool) {
+	if ed == nil {
+		return "", 0, 0, false
+	}
+	runes := []rune(ed.Text)
+	if len(runes) == 0 {
+		return "", 0, 0, false
+	}
+	cursor := vimClampOffset(ed.Text, ed.Cursor)
+	anchor := -1
+	if cursor > 0 && cursor-1 < len(runes) && isSpellWordRune(runes[cursor-1]) {
+		anchor = cursor - 1
+	} else if cursor < len(runes) && isSpellWordRune(runes[cursor]) {
+		anchor = cursor
+	}
+	if anchor < 0 {
+		return "", 0, 0, false
+	}
+	start := anchor
+	for start > 0 && isSpellWordRune(runes[start-1]) {
+		start--
+	}
+	end := anchor + 1
+	for end < len(runes) && isSpellWordRune(runes[end]) {
+		end++
+	}
+	word := normalizeSpellWord(string(runes[start:end]))
+	if !shouldCheckSpellWord(word) {
+		return "", 0, 0, false
+	}
+	return word, start, end, true
+}
+
 func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	if ed.PendingOp == "r" {
 		return handleReplacePending(ed, key)
@@ -1459,15 +1669,18 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 			return true
 		}
 	}
-	if consumeXMotionOverride(ed, key) {
+	if consumeXMotionOverride(w, ed, key) {
+		return true
+	}
+	if key.Name >= "0" && key.Name <= "9" && len([]rune(key.Name)) == 1 && ed.PendingOp != "" {
+		ed.NormalCount += key.Name
 		return true
 	}
 	if ed.PendingOp != "" && key.Name != ed.PendingOp {
-		handled := applyPendingOperator(ed, key.Name)
+		handled := applyPendingOperator(w, ed, key.Name)
 		if handled {
 			return true
 		}
-		ed.PendingOp = ""
 	}
 	if key.Name >= "0" && key.Name <= "9" && len([]rune(key.Name)) == 1 {
 		if key.Name == "0" && ed.NormalCount == "" {
@@ -1514,11 +1727,11 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	case "j", "down":
 		ed.NormalCount = ""
-		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+		moveEditorCursorVertical(w, ed, 1)
 		return true
 	case "k", "up":
 		ed.NormalCount = ""
-		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, -1)
+		moveEditorCursorVertical(w, ed, -1)
 		return true
 	case "home":
 		ed.NormalCount = ""
@@ -1559,7 +1772,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.LastXCursor = ed.Cursor
 		ed.LastXArmed = true
 		ed.Register = vimYankChar(ed.Text, ed.Cursor, ed.Cursor)
-		updateClipboardForRegister(ed, "deleted char")
+		updateClipboardForRegister(w, ed, "deleted char")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
@@ -1567,7 +1780,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	case "delete":
 		ed.NormalCount = ""
 		ed.Register = vimYankChar(ed.Text, ed.Cursor, ed.Cursor)
-		updateClipboardForRegister(ed, "deleted char")
+		updateClipboardForRegister(w, ed, "deleted char")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteChar(ed.Text, ed.Cursor)
 		ed.Dirty = true
@@ -1632,7 +1845,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		if ed.PendingOp == key.Name {
 			if key.Name == "d" || key.Name == "c" {
 				ed.Register = vimYankLine(ed.Text, ed.Cursor, ed.Cursor)
-				updateClipboardForRegister(ed, "deleted line")
+				updateClipboardForRegister(w, ed, "deleted line")
 				rememberUndoState(ed)
 				ed.Text, ed.Cursor = vimDeleteLine(ed.Text, ed.Cursor)
 				ed.Dirty = true
@@ -1640,7 +1853,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 			if key.Name == "y" {
 				start, end := vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
 				ed.Register = vimYankLine(ed.Text, ed.Cursor, ed.Cursor)
-				updateClipboardForRegister(ed, "yanked line")
+				updateClipboardForRegister(w, ed, "yanked line")
 				flashYankRange(ed, start, end)
 			}
 			if key.Name == "c" {
@@ -1653,7 +1866,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	case "p":
 		ed.NormalCount = ""
-		reg, err := pasteRegister(ed)
+		reg, err := pasteRegister(w, ed)
 		if err != nil {
 			ed.Status = "clipboard paste failed: " + err.Error()
 			return true
@@ -1710,7 +1923,10 @@ func normalizePasteRegister(reg vimRegister) vimRegister {
 	return reg
 }
 
-func pasteRegister(ed *Editor) (vimRegister, error) {
+func pasteRegister(w *Workspace, ed *Editor) (vimRegister, error) {
+	if w != nil && registerHasContent(w.Register) {
+		return normalizePasteRegister(w.Register), nil
+	}
 	if ed != nil && registerHasContent(ed.Register) {
 		return normalizePasteRegister(ed.Register), nil
 	}
@@ -1743,7 +1959,7 @@ func handleReplacePending(ed *Editor, key Key) bool {
 	return true
 }
 
-func consumeXMotionOverride(ed *Editor, key Key) bool {
+func consumeXMotionOverride(w *Workspace, ed *Editor, key Key) bool {
 	if !ed.LastXArmed {
 		return false
 	}
@@ -1760,7 +1976,7 @@ func consumeXMotionOverride(ed *Editor, key Key) bool {
 			return false
 		}
 		ed.Register = vimYankChar(ed.LastXText, start, end-1)
-		updateClipboardForRegister(ed, "deleted word")
+		updateClipboardForRegister(w, ed, "deleted word")
 		ed.Text, ed.Cursor = vimDeleteRange(ed.LastXText, start, end-1)
 		ed.Dirty = true
 		return true
@@ -1771,7 +1987,7 @@ func consumeXMotionOverride(ed *Editor, key Key) bool {
 			return false
 		}
 		ed.Register = vimYankChar(ed.LastXText, start, end-1)
-		updateClipboardForRegister(ed, "deleted to end of line")
+		updateClipboardForRegister(w, ed, "deleted to end of line")
 		ed.Text, ed.Cursor = vimDeleteRange(ed.LastXText, start, end-1)
 		ed.Dirty = true
 		return true
@@ -1780,7 +1996,7 @@ func consumeXMotionOverride(ed *Editor, key Key) bool {
 	}
 }
 
-func handleVisualMode(ed *Editor, key Key) bool {
+func handleVisualMode(w *Workspace, ed *Editor, key Key) bool {
 	switch key.Name {
 	case "esc":
 		clearVisualSelection(ed)
@@ -1795,11 +2011,11 @@ func handleVisualMode(ed *Editor, key Key) bool {
 		refreshVisualSelection(ed)
 		return true
 	case "j", "down":
-		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+		moveEditorCursorVertical(w, ed, 1)
 		refreshVisualSelection(ed)
 		return true
 	case "k", "up":
-		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, -1)
+		moveEditorCursorVertical(w, ed, -1)
 		refreshVisualSelection(ed)
 		return true
 	case "w":
@@ -1843,11 +2059,11 @@ func handleVisualMode(ed *Editor, key Key) bool {
 		startVisualSelection(ed, vimSelectionChar)
 		return true
 	case "d", "x":
-		deleteVisualSelection(ed)
+		deleteVisualSelection(w, ed)
 		ed.Mode = ModeNormal
 		return true
 	case "y":
-		yankVisualSelection(ed)
+		yankVisualSelection(w, ed)
 		ed.Mode = ModeNormal
 		return true
 	case ">":
@@ -1890,10 +2106,10 @@ func shiftVisualSelection(ed *Editor, right bool) bool {
 	return true
 }
 
-func applyPendingOperator(ed *Editor, key string) bool {
+func applyPendingOperator(w *Workspace, ed *Editor, key string) bool {
 	if ed.PendingOp == "d" && key == "w" {
 		ed.Register = vimYankWord(ed.Text, ed.Cursor)
-		updateClipboardForRegister(ed, "deleted word")
+		updateClipboardForRegister(w, ed, "deleted word")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteWord(ed.Text, ed.Cursor)
 		ed.Dirty = true
@@ -1908,11 +2124,33 @@ func applyPendingOperator(ed *Editor, key string) bool {
 			return true
 		}
 		ed.Register = vimYankChar(ed.Text, start, end-1)
-		updateClipboardForRegister(ed, "deleted to end of line")
+		updateClipboardForRegister(w, ed, "deleted to end of line")
 		rememberUndoState(ed)
 		ed.Text, ed.Cursor = vimDeleteToLineEnd(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		ed.PendingOp = ""
+		return true
+	}
+	if ed.PendingOp == "d" && (key == "up" || key == "down") {
+		delta := 1
+		if count := normalModeCount(ed); count > 0 {
+			delta = count
+		}
+		if key == "up" {
+			delta = -delta
+		}
+		updated, cursor, reg, changed := vimDeleteLineSpan(ed.Text, ed.Cursor, delta)
+		ed.NormalCount = ""
+		ed.PendingOp = ""
+		if !changed {
+			return true
+		}
+		ed.Register = reg
+		updateClipboardForRegister(w, ed, "deleted lines")
+		rememberUndoState(ed)
+		ed.Text = updated
+		ed.Cursor = cursor
+		ed.Dirty = true
 		return true
 	}
 	start := ed.Cursor
@@ -1934,7 +2172,7 @@ func applyPendingOperator(ed *Editor, key string) bool {
 			yankStart, yankEnd = vimStrictWordRange(ed.Text, ed.Cursor)
 		}
 		ed.Register = vimYankChar(ed.Text, yankStart, max(yankStart, yankEnd-1))
-		updateClipboardForRegister(ed, "yanked text")
+		updateClipboardForRegister(w, ed, "yanked text")
 		flashYankRange(ed, min(yankStart, yankEnd), max(yankStart, yankEnd))
 		ed.PendingOp = ""
 		return true
@@ -1948,7 +2186,7 @@ func applyPendingOperator(ed *Editor, key string) bool {
 	}
 	deleted := string(runes[start:end])
 	ed.Register = vimRegister{Kind: vimRegisterChar, Text: deleted}
-	updateClipboardForRegister(ed, "deleted text")
+	updateClipboardForRegister(w, ed, "deleted text")
 	rememberUndoState(ed)
 	ed.Text = string(append(runes[:start], runes[end:]...))
 	ed.Cursor = start
@@ -1967,6 +2205,10 @@ func toggleCheckboxAtCursor(ed *Editor) bool {
 	}
 	lineStart := vimLineBoundaryOffset(ed.Text, ed.Cursor, false)
 	lineEnd := vimLineBoundaryOffset(ed.Text, ed.Cursor, true)
+	return toggleCheckboxLineRange(ed, lineStart, lineEnd)
+}
+
+func toggleCheckboxLineRange(ed *Editor, lineStart int, lineEnd int) bool {
 	runes := []rune(ed.Text)
 	if lineStart > len(runes) {
 		return false
@@ -1975,24 +2217,19 @@ func toggleCheckboxAtCursor(ed *Editor) bool {
 		lineEnd = len(runes)
 	}
 	line := string(runes[lineStart:lineEnd])
-	idx := strings.Index(line, "[ ]")
-	if idx < 0 {
-		idx = strings.Index(strings.ToLower(line), "[x]")
-	}
-	if idx < 0 {
-		return false
-	}
-	absStart := lineStart + idx
-	absEnd := absStart + 3
-	if ed.Cursor < absStart || ed.Cursor > absEnd {
+	if !lineHasCheckbox(line) {
 		return false
 	}
 	rememberUndoState(ed)
-	updated, _, _ := toggleChecklist(ed.Text, ed.Cursor, ed.Cursor)
+	updated, _, _ := toggleChecklist(ed.Text, lineStart, lineStart)
 	ed.Text = updated
 	ed.Dirty = true
 	ed.Status = "checkbox toggled"
 	return true
+}
+
+func lineHasCheckbox(line string) bool {
+	return strings.Contains(line, "[ ]") || strings.Contains(strings.ToLower(line), "[x]")
 }
 
 func moveWordForward(text string, offset int) int {
@@ -2028,6 +2265,18 @@ func isWordRune(r rune) bool {
 
 func vimPageMoveOffset(text string, offset int, delta int) int {
 	return vimVerticalMoveOffset(text, offset, delta)
+}
+
+func moveEditorCursorVertical(w *Workspace, ed *Editor, delta int) {
+	if ed == nil {
+		return
+	}
+	if w == nil {
+		ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, delta)
+		return
+	}
+	row, col := editorVisualCursor(ed, w.editorRenderWidth())
+	ed.Cursor = vimClampOffset(ed.Text, editorOffsetAtAbsoluteVisualPosition(ed.Text, w.editorRenderWidth(), row+delta, col))
 }
 
 func repeatSearch(ed *Editor, forward bool) {
@@ -2076,20 +2325,20 @@ func clearVisualSelection(ed *Editor) {
 	ed.SelectionCursor = 0
 }
 
-func yankVisualSelection(ed *Editor) {
+func yankVisualSelection(w *Workspace, ed *Editor) {
 	switch ed.SelectionMode {
 	case vimSelectionChar:
 		ed.Register = vimYankChar(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		updateClipboardForRegister(ed, "yanked selection")
+		updateClipboardForRegister(w, ed, "yanked selection")
 		flashYankRange(ed, min(ed.SelectionMark, ed.SelectionCursor), max(ed.SelectionMark, ed.SelectionCursor)+1)
 	case vimSelectionLine:
 		start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		ed.Register = vimYankLine(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		updateClipboardForRegister(ed, "yanked lines")
+		updateClipboardForRegister(w, ed, "yanked lines")
 		flashYankRange(ed, start, end)
 	case vimSelectionBlock:
 		ed.Register = vimYankBlock(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		updateClipboardForRegister(ed, "yanked block")
+		updateClipboardForRegister(w, ed, "yanked block")
 	}
 	clearVisualSelection(ed)
 }
@@ -2128,7 +2377,10 @@ func clipboardPasteRegister() (vimRegister, error) {
 	return normalizePasteRegister(reg), nil
 }
 
-func updateClipboardForRegister(ed *Editor, success string) {
+func updateClipboardForRegister(w *Workspace, ed *Editor, success string) {
+	if w != nil {
+		w.Register = ed.Register
+	}
 	text := serializeRegisterForClipboard(ed.Register)
 	if err := helpers.CopyToClipboard(text); err != nil {
 		ed.Status = success + "; clipboard copy failed: " + err.Error()
@@ -2146,23 +2398,23 @@ func serializeRegisterForClipboard(reg vimRegister) string {
 	}
 }
 
-func deleteVisualSelection(ed *Editor) {
+func deleteVisualSelection(w *Workspace, ed *Editor) {
 	rememberUndoState(ed)
 	switch ed.SelectionMode {
 	case vimSelectionChar:
 		ed.Register = vimYankChar(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		updateClipboardForRegister(ed, "deleted selection")
+		updateClipboardForRegister(w, ed, "deleted selection")
 		ed.Text, ed.Cursor = vimDeleteRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 	case vimSelectionLine:
 		ed.Register = vimYankLine(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		updateClipboardForRegister(ed, "deleted lines")
+		updateClipboardForRegister(w, ed, "deleted lines")
 		start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		ed.Text, ed.Cursor = vimDeleteRange(ed.Text, start, max(start, end-1))
 	case vimSelectionBlock:
 		var reg vimRegister
 		ed.Text, ed.Cursor, reg = vimDeleteBlockRegister(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		ed.Register = reg
-		updateClipboardForRegister(ed, "deleted block")
+		updateClipboardForRegister(w, ed, "deleted block")
 	default:
 		return
 	}
@@ -2251,6 +2503,11 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 		}
 	case vimCommandAddWord:
 		w.AddWordUnderCursor()
+	case vimCommandSpell:
+		openSpellSuggestions(w, ed)
+	case vimCommandRecordKeys:
+		w.pendingRecordKeys = true
+		ed.Status = "key recording requested"
 	}
 }
 
@@ -2264,15 +2521,14 @@ func (w *Workspace) AddWordUnderCursor() bool {
 		ed.Status = "no word under cursor"
 		return true
 	}
-	if service, err := currentSpellService(); err == nil && service != nil && service.correct(word) {
-		ed.Status = "word already known: " + word
-		return true
-	}
 	added, err := AddCustomWord(word)
 	if err != nil {
 		ed.Status = err.Error()
 		return true
 	}
+	ed.SpellCacheText = ""
+	ed.SpellCacheSpans = nil
+	clearAutoComplete(ed)
 	if added {
 		ed.Status = "added word: " + word
 	} else {
@@ -2327,10 +2583,10 @@ func (w *Workspace) HelpText() string {
 		return "notes: i insert | ctrl+a sidebar | ctrl+n new | ctrl+d delete | R rename | [/] tabs | ctrl+s save"
 	}
 	if ed.Mode == ModeInsert {
-		return "notes/insert: tab complete or spaces | shift+tab reverse complete | esc normal | ctrl+s save | ctrl+a sidebar"
+		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | sidebar/sb | undo redo preview | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
 		return "notes/visual: h j k l move | V line | >/< indent | y yank | d/x delete | esc normal"
@@ -2345,6 +2601,14 @@ func (w *Workspace) TakePendingOpenLinks() []string {
 	links := append([]string(nil), w.pendingOpenLinks...)
 	w.pendingOpenLinks = nil
 	return links
+}
+
+func (w *Workspace) TakePendingRecordKeys() bool {
+	if w == nil || !w.pendingRecordKeys {
+		return false
+	}
+	w.pendingRecordKeys = false
+	return true
 }
 
 func (w *Workspace) TakePendingQuit() (bool, bool) {
@@ -2682,6 +2946,7 @@ func renderEditorPane(ed *Editor, width int, height int) []string {
 		}
 		out = append(out, rows[rowIdx])
 	}
+	overlaySpellSuggestionPopup(out, ed, width, ed.ScrollTop)
 	return out
 }
 
@@ -2741,7 +3006,7 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 	searchSpans := groupSpansByLine(ed.Text, searchHighlightSpans(ed.Text, ed.LastSearch))
 	selectionSpans := groupSpansByLine(ed.Text, visualHighlightSpans(ed))
 	yankSpans := groupSpansByLine(ed.Text, yankHighlightSpans(ed))
-	spellSpans := groupSpansByLine(ed.Text, spellHighlightSpans(ed.Text))
+	spellSpans := groupSpansByLine(ed.Text, spellHighlightSpansForEditor(ed, ed.Text))
 	gutterWidth := editorLineNumberWidth(lines, width)
 	contentWidth := max(1, width-gutterWidth)
 	rows := make([]string, 0, len(lines))
@@ -2773,6 +3038,81 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 		}
 	}
 	return rows
+}
+
+func spellSuggestionPopupRows(ed *Editor, width int, anchorCol int) []string {
+	if ed == nil || !autoCompleteActive(ed, autoCompleteSpell) || width <= 0 {
+		return nil
+	}
+	lines := strings.Split(ed.Text, "\n")
+	gutterWidth := editorLineNumberWidth(lines, width)
+	contentWidth := max(1, width-gutterWidth)
+	indent := anchorCol
+	if indent > contentWidth-8 {
+		indent = max(0, contentWidth-8)
+	}
+	if indent < 0 {
+		indent = 0
+	}
+	maxItems := min(4, len(ed.AutoCompleteMatches))
+	rows := make([]string, 0, maxItems)
+	for i := 0; i < maxItems; i++ {
+		prefix := "  "
+		lineStyle := helpers.ANSIDim
+		if i == ed.AutoCompleteIndex {
+			prefix = "> "
+			lineStyle = helpers.ANSIReverse
+		}
+		label := helpers.SanitizeSingleLine(ed.AutoCompleteMatches[i])
+		text := prefix + label
+		if helpers.VisibleRuneCount(text) > contentWidth-indent {
+			text = helpers.TruncateANSI(text, max(1, contentWidth-indent))
+		}
+		line := strings.Repeat(" ", gutterWidth+indent) + helpers.ANSI(lineStyle, text)
+		rows = append(rows, line)
+	}
+	return rows
+}
+
+func overlaySpellSuggestionPopup(rows []string, ed *Editor, width int, scrollTop int) {
+	if ed == nil || len(rows) == 0 {
+		return
+	}
+	anchorRow, anchorCol := editorVisualPosition(ed.Text, width, ed.AutoCompleteStart)
+	popup := spellSuggestionPopupRows(ed, width, anchorCol)
+	if len(popup) == 0 {
+		return
+	}
+	start := anchorRow + 1 - max(0, scrollTop)
+	for i, line := range popup {
+		target := start + i
+		if target < 0 || target >= len(rows) {
+			continue
+		}
+		rows[target] = line
+	}
+}
+
+func editorVisualPosition(text string, width int, offset int) (int, int) {
+	lines := strings.Split(text, "\n")
+	targetLine, targetCol := cursorLineCol(text, offset)
+	gutterWidth := editorLineNumberWidth(lines, width)
+	contentWidth := max(1, width-gutterWidth)
+	rowOffset := 0
+	for idx, line := range lines {
+		segments := wrapPlainLine(line, contentWidth)
+		if idx == targetLine {
+			for segIdx, segment := range segments {
+				if targetCol < segment.end || (segIdx == len(segments)-1 && targetCol <= segment.end) {
+					return rowOffset + segIdx, segmentCellWidthUntil(segment, targetCol)
+				}
+			}
+			last := segments[len(segments)-1]
+			return rowOffset + len(segments) - 1, min(last.displayWidth, segmentCellWidthUntil(last, targetCol))
+		}
+		rowOffset += len(segments)
+	}
+	return 0, 0
 }
 
 func overlayMarkdownSpans(base []markdownSpan, overlays []markdownSpan) []markdownSpan {
@@ -3216,6 +3556,7 @@ func applyANSIMarkdown(line string, spans []markdownSpan) string {
 	if len(spans) == 0 || line == "" {
 		return line
 	}
+	spans = resolvedMarkdownSpans(spans)
 	sort.SliceStable(spans, func(i, j int) bool {
 		if spans[i].Start == spans[j].Start {
 			return spans[i].End < spans[j].End
@@ -3249,6 +3590,32 @@ func applyANSIMarkdown(line string, spans []markdownSpan) string {
 		b.WriteString(string(runes[pos:]))
 	}
 	return b.String()
+}
+
+func resolvedMarkdownSpans(spans []markdownSpan) []markdownSpan {
+	if len(spans) <= 1 {
+		return spans
+	}
+	ordered := append([]markdownSpan(nil), spans...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		leftLen := ordered[i].End - ordered[i].Start
+		rightLen := ordered[j].End - ordered[j].Start
+		if leftLen == rightLen {
+			if ordered[i].Start == ordered[j].Start {
+				return ordered[i].End < ordered[j].End
+			}
+			return ordered[i].Start < ordered[j].Start
+		}
+		return leftLen > rightLen
+	})
+	out := make([]markdownSpan, 0, len(ordered))
+	for _, span := range ordered {
+		if span.End <= span.Start {
+			continue
+		}
+		out = overlayMarkdownSpans(out, []markdownSpan{span})
+	}
+	return out
 }
 
 func styleForMarkdownTag(tag string, text string) string {
@@ -3296,26 +3663,12 @@ func styleForMarkdownTag(tag string, text string) string {
 	case tagYankHighlight:
 		return helpers.ANSI(helpers.ANSIRoleSelection, text)
 	case tagSpellError:
-		return helpers.ANSI(helpers.ANSIRoleSpellError, underlinedText(text))
+		return helpers.ANSI(helpers.ANSIRoleSpellError, text)
 	case tagCodeBlock:
 		return text
 	default:
 		return text
 	}
-}
-
-func underlinedText(text string) string {
-	if text == "" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range text {
-		b.WriteRune(r)
-		if !unicode.IsSpace(r) {
-			b.WriteRune('\u0332')
-		}
-	}
-	return b.String()
 }
 
 func yankHighlightSpans(ed *Editor) []markdownSpan {

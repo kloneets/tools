@@ -65,6 +65,14 @@ func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 	}
 }
 
+func TestRenderTabBarShowsRecorderWhenVisible(t *testing.T) {
+	app := &terminalApp{view: viewRecorder, recorderVisible: true}
+	got := app.renderTabBar()
+	if !strings.Contains(got, "7:Recorder") {
+		t.Fatalf("renderTabBar() = %q, want recorder tab label", got)
+	}
+}
+
 func TestRefreshNotesBodyKeepsActiveNoteTabHighlight(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -100,9 +108,11 @@ func TestMapTCellKey(t *testing.T) {
 		{tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModCtrl), notes.Key{Name: "tab", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl), notes.Key{Name: "a", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModCtrl), notes.Key{Name: "v", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyCtrlG, 0, tcell.ModCtrl), notes.Key{Name: "g", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyCtrlR, 0, tcell.ModCtrl), notes.Key{Name: "r", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModCtrl), notes.Key{Name: "t", Ctrl: true, Rune: 't'}},
 		{tcell.NewEventKey(tcell.KeyRune, '1', tcell.ModCtrl), notes.Key{Name: "1", Ctrl: true, Rune: '1'}},
-		{tcell.NewEventKey(tcell.KeyRune, 0, tcell.ModNone), notes.Key{Name: "2", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyRune, 'g', tcell.ModCtrl), notes.Key{Name: "g", Ctrl: true, Rune: 'g'}},
 		{tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModCtrl), notes.Key{Name: "3", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 0x1c, tcell.ModNone), notes.Key{Name: "4", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 0x1d, tcell.ModNone), notes.Key{Name: "5", Ctrl: true}},
@@ -290,6 +300,36 @@ func TestNotesVimWriteRequestsSaveAllState(t *testing.T) {
 	}
 }
 
+func TestNotesVimWriteQuitSavesAndConsumesQuitImmediately(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	helpers.InitStatusBar()
+	settings.Init()
+	notePath := filepath.Join(home, "note.md")
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Path:    notePath,
+			Title:   "note",
+			Text:    "saved by wq",
+			Dirty:   true,
+			Mode:    notes.ModeCommand,
+			Command: "wq",
+		}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	if !app.handleGlobalKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleGlobalKey(enter) = false, want command handling")
+	}
+	assertFileContent(t, notePath, "saved by wq")
+	if ws.ActiveEditor().Dirty {
+		t.Fatal("Dirty = true, want false after :wq save")
+	}
+	if quit, _ := ws.TakePendingQuit(); quit {
+		t.Fatal("pending quit remains after :wq, want consumed in same input")
+	}
+}
+
 func assertFileContent(t *testing.T, path string, want string) {
 	t.Helper()
 	got, err := os.ReadFile(path)
@@ -438,6 +478,16 @@ func TestHandleGlobalKeyCtrlNumberSwitchesTabDirectly(t *testing.T) {
 	}
 }
 
+func TestHandleGlobalKeyCtrlNumberSwitchesRecorderTabWhenVisible(t *testing.T) {
+	app := &terminalApp{view: viewNotes, recorderVisible: true}
+	if !app.handleGlobalKey(notes.Key{Name: "7", Rune: '7', Ctrl: true}) {
+		t.Fatal("handleGlobalKey() = false, want true for ctrl+7")
+	}
+	if app.view != viewRecorder {
+		t.Fatalf("view = %v, want %v", app.view, viewRecorder)
+	}
+}
+
 func TestHandleGlobalKeyCtrlTabCyclesAppTabs(t *testing.T) {
 	app := &terminalApp{view: viewSettings, tabSelect: true}
 	if !app.handleGlobalKey(notes.Key{Name: "tab", Ctrl: true}) {
@@ -505,6 +555,50 @@ func TestCaptureInputCtrlTabCSIuCyclesAppTabs(t *testing.T) {
 	}
 	if app.view != viewFiles {
 		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	}
+}
+
+func TestConsumePendingNoteActionsStartsRecorderCapture(t *testing.T) {
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Title:   "Plan",
+			Text:    "x",
+			Mode:    notes.ModeCommand,
+			Command: "recordkeys",
+		}},
+		CurrentTab: 0,
+	}
+	if !ws.HandleKey(notes.Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want recordkeys command handled")
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	app.consumePendingNoteActions()
+	if !app.recorderVisible || !app.recorderCapturing {
+		t.Fatal("recorderVisible/recorderCapturing = false, want active recorder")
+	}
+	if app.view != viewRecorder {
+		t.Fatalf("view = %v, want %v", app.view, viewRecorder)
+	}
+}
+
+func TestCaptureInputRecordsKeysAndBlocksOtherBindingsDuringRecorderCapture(t *testing.T) {
+	ws := &notes.Workspace{
+		Tabs:       []*notes.Editor{{Text: "alpha", Mode: notes.ModeNormal}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewRecorder, notes: ws, recorderVisible: true}
+	app.startRecorderCapture()
+	if got := app.captureInput(tcell.NewEventKey(tcell.KeyCtrlT, 0, tcell.ModCtrl)); got != nil {
+		t.Fatal("captureInput(ctrl+t) returned event, want consumed during recording")
+	}
+	if app.view != viewRecorder {
+		t.Fatalf("view = %v, want recorder to remain active", app.view)
+	}
+	if len(app.recorderEvents) == 0 {
+		t.Fatal("recorderEvents = 0, want captured key")
+	}
+	if app.recorderLastEvent.KeyName != "t" {
+		t.Fatalf("last key = %q, want %q", app.recorderLastEvent.KeyName, "t")
 	}
 }
 
@@ -578,6 +672,16 @@ func TestCaptureMouseScrollMovesNoteCursor(t *testing.T) {
 	}
 	if got := ws.ActiveEditor().Cursor; got == 0 {
 		t.Fatal("cursor = 0, want moved by scroll")
+	}
+}
+
+func TestAnsiToTViewSpellErrorUsesStableForegroundOnly(t *testing.T) {
+	got := ansiToTView(helpers.ANSI(helpers.ANSIRoleSpellError, "badwrd"))
+	if !strings.Contains(got, themeMarkupFG(currentTheme().ErrorAccent)+"badwrd") {
+		t.Fatalf("ansiToTView(spell error) = %q, want error foreground styling", got)
+	}
+	if strings.Contains(got, "::u") {
+		t.Fatalf("ansiToTView(spell error) = %q, want no underline style tag", got)
 	}
 }
 

@@ -413,8 +413,14 @@ func SaveNotesPreviewHidden(hidden bool) {
 }
 
 func SaveNotesSession(paths []string, currentPath string) {
+	if UpdateNotesSession(paths, currentPath) {
+		writeSettingsToDisk(false)
+	}
+}
+
+func UpdateNotesSession(paths []string, currentPath string) bool {
 	if settingsInstance == nil {
-		return
+		return false
 	}
 	normalized := make([]string, 0, len(paths))
 	seen := make(map[string]struct{}, len(paths))
@@ -431,11 +437,11 @@ func SaveNotesSession(paths []string, currentPath string) {
 	}
 	currentPath = normalizeNoteSessionPath(currentPath)
 	if slicesEqual(settingsInstance.NotesApp.OpenNotePaths, normalized) && settingsInstance.NotesApp.CurrentNotePath == currentPath {
-		return
+		return false
 	}
 	settingsInstance.NotesApp.OpenNotePaths = normalized
 	settingsInstance.NotesApp.CurrentNotePath = currentPath
-	writeSettingsToDisk(false)
+	return true
 }
 
 func normalizeNoteSessionPath(path string) string {

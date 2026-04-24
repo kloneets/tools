@@ -147,6 +147,46 @@ func vimDeleteLine(text string, offset int) (string, int) {
 	return updated, vimLineBoundaryOffset(updated, newOffset, false)
 }
 
+func vimDeleteLineSpan(text string, offset int, deltaLines int) (string, int, vimRegister, bool) {
+	lines := vimLineInfos(text)
+	if len(lines) == 0 {
+		return text, 0, vimRegister{}, false
+	}
+	currentIdx := vimLineIndexAtOffset(text, offset)
+	startIdx := currentIdx
+	endIdx := currentIdx + deltaLines
+	if endIdx < startIdx {
+		startIdx, endIdx = endIdx, startIdx
+	}
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if endIdx >= len(lines) {
+		endIdx = len(lines) - 1
+	}
+	start := lines[startIdx].start
+	end := lines[endIdx].end
+	if endIdx < len(lines)-1 {
+		end++
+	} else if startIdx > 0 && start > 0 {
+		start--
+	}
+	reg := vimYankLine(text, lines[startIdx].start, lines[endIdx].start)
+	runes := []rune(text)
+	if start >= len(runes) {
+		return text, vimClampOffset(text, start), reg, false
+	}
+	updated := string(append(runes[:start], runes[end:]...))
+	if len(updated) == 0 {
+		return "", 0, reg, true
+	}
+	newOffset := start
+	if startIdx >= len(vimLineInfos(updated)) {
+		newOffset = len([]rune(updated))
+	}
+	return updated, vimLineBoundaryOffset(updated, newOffset, false), reg, true
+}
+
 func vimDeleteToLineEnd(text string, offset int) (string, int) {
 	runes := []rune(text)
 	start := vimClampOffset(text, offset)

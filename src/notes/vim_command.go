@@ -12,18 +12,20 @@ import (
 type vimCommandKind string
 
 const (
-	vimCommandSave      vimCommandKind = "save"
-	vimCommandSearch    vimCommandKind = "search"
-	vimCommandReplace   vimCommandKind = "replace"
-	vimCommandRename    vimCommandKind = "rename"
-	vimCommandOpenLinks vimCommandKind = "open-links"
-	vimCommandUndo      vimCommandKind = "undo"
-	vimCommandRedo      vimCommandKind = "redo"
-	vimCommandPreview   vimCommandKind = "preview"
-	vimCommandSidebar   vimCommandKind = "sidebar"
-	vimCommandAddWord   vimCommandKind = "add-word"
-	vimCommandQuit      vimCommandKind = "quit"
-	vimCommandSequence  vimCommandKind = "sequence"
+	vimCommandSave       vimCommandKind = "save"
+	vimCommandSearch     vimCommandKind = "search"
+	vimCommandReplace    vimCommandKind = "replace"
+	vimCommandRename     vimCommandKind = "rename"
+	vimCommandOpenLinks  vimCommandKind = "open-links"
+	vimCommandUndo       vimCommandKind = "undo"
+	vimCommandRedo       vimCommandKind = "redo"
+	vimCommandPreview    vimCommandKind = "preview"
+	vimCommandSidebar    vimCommandKind = "sidebar"
+	vimCommandAddWord    vimCommandKind = "add-word"
+	vimCommandSpell      vimCommandKind = "spell"
+	vimCommandRecordKeys vimCommandKind = "record-keys"
+	vimCommandQuit       vimCommandKind = "quit"
+	vimCommandSequence   vimCommandKind = "sequence"
 )
 
 type vimCommand struct {
@@ -68,6 +70,10 @@ func parseVimCommand(raw string) (vimCommand, error) {
 		return vimCommand{Kind: vimCommandSidebar}, nil
 	case "addword", "spelladd":
 		return vimCommand{Kind: vimCommandAddWord}, nil
+	case "spell":
+		return vimCommand{Kind: vimCommandSpell}, nil
+	case "recordkeys":
+		return vimCommand{Kind: vimCommandRecordKeys}, nil
 	}
 
 	if chained, ok := parseOneCharCommandChain(cmd); ok {
