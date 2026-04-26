@@ -69,6 +69,7 @@ type terminalApp struct {
 	quitModal          *tview.Modal
 	discardFilesModal  *tview.Modal
 	deleteNoteModal    *tview.Modal
+	deleteNoteFolder   bool
 	openLinksModal     *tview.Modal
 	root               *tview.Flex
 	lastStatus         string
@@ -272,14 +273,27 @@ func (a *terminalApp) initWidgets() {
 			if target == "" {
 				target = a.notes.FocusedNoteDeleteLabel()
 			}
-			if err := a.notes.DeleteNoteByPath(a.deleteNotePath); err == nil {
-				helpers.StatusBarInst().UpdateStatusBar("Deleted note: " + target)
+			var err error
+			if a.deleteNoteFolder {
+				err = a.notes.DeleteFolderByRel(a.deleteNotePath)
+			} else {
+				err = a.notes.DeleteNoteByPath(a.deleteNotePath)
+			}
+			if err == nil {
+				if a.deleteNoteFolder {
+					helpers.StatusBarInst().UpdateStatusBar("Deleted folder: " + target)
+				} else {
+					helpers.StatusBarInst().UpdateStatusBar("Deleted note: " + target)
+				}
+			} else if a.deleteNoteFolder {
+				helpers.StatusBarInst().UpdateStatusBar("Delete folder failed")
 			} else {
 				helpers.StatusBarInst().UpdateStatusBar("Delete note failed")
 			}
 		}
 		a.deleteNotePath = ""
 		a.deleteNoteLabel = ""
+		a.deleteNoteFolder = false
 		if a.pagesRoot != nil {
 			a.pagesRoot.HidePage("delete-note")
 		}
@@ -602,7 +616,7 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	if a.view != viewNotes || a.notes == nil || a.showHelp {
 		return event, action
 	}
-	if settings.Inst().NotesApp.SidebarVisible && a.sidebar != nil {
+	if !a.notes.SidebarBrowsing && settings.Inst().NotesApp.SidebarVisible && a.sidebar != nil {
 		sx, sy, sw, sh := a.sidebar.GetInnerRect()
 		if pointInRect(x, y, sx, sy, sw, sh) {
 			row := y - sy
@@ -621,6 +635,21 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 		return event, action
 	}
 	ex, ey, ew, eh := a.editor.GetInnerRect()
+	if a.notes.SidebarBrowsing {
+		if !pointInRect(x, y, ex, ey, ew, eh) {
+			return event, action
+		}
+		row := y - ey
+		switch action {
+		case tview.MouseLeftClick, tview.MouseLeftDown:
+			a.notes.SelectSidebarRow(row, false)
+		case tview.MouseLeftDoubleClick:
+			a.notes.SelectSidebarRow(row, true)
+			a.consumePendingNoteActions()
+		}
+		a.refresh()
+		return nil, action
+	}
 	if !pointInRect(x, y, ex, ey, ew, eh) && !a.notesMouseDragging {
 		return event, action
 	}
@@ -1123,9 +1152,10 @@ func (a *terminalApp) consumePendingNoteActions() {
 	if a == nil || a.notes == nil {
 		return
 	}
-	if path, label, ok := a.notes.TakePendingDeleteNote(); ok {
+	if path, label, folder, ok := a.notes.TakePendingDeleteTarget(); ok {
 		a.deleteNotePath = path
 		a.deleteNoteLabel = label
+		a.deleteNoteFolder = folder
 		a.showDeleteNoteModal()
 		return
 	}
@@ -1568,17 +1598,34 @@ func (a *terminalApp) shutdownAndStop() {
 }
 
 func (a *terminalApp) showDeleteNoteModal() {
-	if a == nil || a.notes == nil || !a.notes.CanDeleteFocusedNote() {
+	if a == nil || a.notes == nil {
 		return
 	}
-	a.deleteNotePath = a.notes.FocusedNoteDeletePath()
-	label := a.notes.FocusedNoteDeleteLabel()
+	if a.deleteNotePath == "" {
+		if !a.notes.CanDeleteFocusedNote() {
+			return
+		}
+		a.deleteNotePath = a.notes.FocusedNoteDeletePath()
+		a.deleteNoteFolder = false
+	}
+	label := a.deleteNoteLabel
 	if strings.TrimSpace(label) == "" {
-		label = "current note"
+		label = a.notes.FocusedNoteDeleteLabel()
+	}
+	if strings.TrimSpace(label) == "" {
+		if a.deleteNoteFolder {
+			label = "selected folder"
+		} else {
+			label = "current note"
+		}
 	}
 	a.deleteNoteLabel = label
 	if a.deleteNoteModal != nil {
-		a.deleteNoteModal.SetText(fmt.Sprintf("Delete note %q?", label))
+		if a.deleteNoteFolder {
+			a.deleteNoteModal.SetText(fmt.Sprintf("Delete folder %q and all notes inside?", label))
+		} else {
+			a.deleteNoteModal.SetText(fmt.Sprintf("Delete note %q?", label))
+		}
 	}
 	if a.pagesRoot != nil {
 		a.pagesRoot.ShowPage("delete-note")
@@ -1995,6 +2042,21 @@ func (a *terminalApp) refreshNotesBody() {
 	contentHeight := maxInt(1, bodyHeight-3)
 	editorInnerHeight := maxInt(1, contentHeight-2)
 
+	if a.notes.SidebarBrowsing {
+		browserWidth := maxInt(10, a.width-4)
+		a.editor.SetTitle("Notes Browser")
+		a.editor.SetText(joinTViewLines(a.notes.BrowserRows(browserWidth, editorInnerHeight)))
+		a.commandBar.SetText(joinTViewLines([]string{a.notes.CommandLineText(maxInt(10, a.width-6))}))
+
+		content := tview.NewFlex().SetDirection(tview.FlexColumn)
+		content.AddItem(a.editor, 0, 1, false)
+
+		a.body.SetDirection(tview.FlexRow)
+		a.body.AddItem(content, 0, 1, false)
+		a.body.AddItem(a.commandBar, 3, 0, false)
+		return
+	}
+
 	a.sidebar.SetTitle(a.notesSidebarTitle())
 	a.sidebar.SetText(joinTViewLines(a.notes.SidebarRows(editorInnerHeight)))
 	a.editor.SetTitle(a.notesEditorTitle(editorWidth - 2))
@@ -2277,16 +2339,6 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 	} else {
 		screen.SetCursorStyle(tcell.CursorStyleSteadyBlock)
 	}
-	if settings.Inst().NotesApp.SidebarVisible && a.notes.FocusSidebar {
-		row, col, ok := a.notes.SidebarCursor()
-		if !ok {
-			screen.HideCursor()
-			return
-		}
-		x, y, _, _ := a.sidebar.GetInnerRect()
-		screen.ShowCursor(x+col, y+row)
-		return
-	}
 	if col, ok := a.notes.CommandCursor(); ok {
 		x, y, width, _ := a.commandBar.GetInnerRect()
 		if col >= width {
@@ -2295,7 +2347,28 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 		if col < 0 {
 			col = 0
 		}
+		screen.SetCursorStyle(tcell.CursorStyleSteadyBar)
 		screen.ShowCursor(x+col, y)
+		return
+	}
+	if a.notes.SidebarBrowsing && a.notes.FocusSidebar {
+		row, col, ok := a.notes.SidebarCursor()
+		if !ok {
+			screen.HideCursor()
+			return
+		}
+		x, y, _, _ := a.editor.GetInnerRect()
+		screen.ShowCursor(x+col, y+row)
+		return
+	}
+	if settings.Inst().NotesApp.SidebarVisible && a.notes.FocusSidebar {
+		row, col, ok := a.notes.SidebarCursor()
+		if !ok {
+			screen.HideCursor()
+			return
+		}
+		x, y, _, _ := a.sidebar.GetInnerRect()
+		screen.ShowCursor(x+col, y+row)
 		return
 	}
 	row, col, ok := a.notes.EditorCursor()
@@ -2698,10 +2771,12 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	lines = append(lines, renderSection("Notes sidebar:", []helpEntry{
 		{keys: "ctrl+a, :sidebar, :sb", desc: "toggle sidebar/editor focus"},
 		{keys: "j/k, arrows", desc: "move selection"},
-		{keys: "enter, l", desc: "open note or toggle folder"},
+		{keys: "enter, l", desc: "focus selected open note or open selected browser note"},
+		{keys: "e", desc: "toggle the full note browser while the sidebar is focused"},
 		{keys: "h", desc: "return to editor"},
 		{keys: "a", desc: "switch to last accessed note and return to editor"},
 		{keys: "1-9, 0", desc: "switch to numbered open note and return to editor"},
+		{keys: "x", desc: "close selected open note without deleting its file"},
 		{keys: "n", desc: "new note"},
 		{keys: "f", desc: "new folder"},
 		{keys: "d", desc: "delete selected note"},

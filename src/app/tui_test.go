@@ -93,6 +93,47 @@ func TestRefreshNotesBodyKeepsActiveNoteTabHighlight(t *testing.T) {
 	}
 }
 
+func TestHandleGlobalKeySidebarETogglesFullNotesBrowser(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := notes.NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPath, err := ws.CreateNote("Closed Note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ws.CloseNoteByPath(closedPath) {
+		t.Fatal("CloseNoteByPath() = false, want closed note for browser-only assertion")
+	}
+	ws.FocusSidebar = true
+	app := &terminalApp{view: viewNotes, notes: ws, width: 120, height: 36}
+	app.initWidgets()
+	if !app.handleGlobalKey(notes.Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("handleGlobalKey(e) = false, want true")
+	}
+	app.refreshNotesBody()
+	if !ws.SidebarBrowsing {
+		t.Fatal("SidebarBrowsing = false, want true")
+	}
+	if got := app.editor.GetTitle(); got != "Notes Browser" {
+		t.Fatalf("editor title = %q, want browser title", got)
+	}
+	if got := app.sidebar.GetTitle(); got != "Notes" {
+		t.Fatalf("sidebar title = %q, want normal notes title", got)
+	}
+	if got := app.editor.GetText(false); !strings.Contains(got, "Notes Browser") || !strings.Contains(got, "Closed Note") {
+		t.Fatalf("editor text = %q, want full browser contents including closed note", got)
+	}
+	if got := app.sidebar.GetText(false); strings.Contains(got, "Closed Note") {
+		t.Fatalf("sidebar text = %q, want closed note outside normal sidebar", got)
+	}
+	if got := app.commandBar.GetText(false); !strings.Contains(got, "notes/browser") {
+		t.Fatalf("command bar = %q, want browser help", got)
+	}
+}
+
 func TestMapTCellKey(t *testing.T) {
 	cases := []struct {
 		event *tcell.EventKey
@@ -1437,10 +1478,46 @@ func TestHandleGlobalKeySidebarDShowsNoteDeleteConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws.FocusSidebar = true
+	ws.Selection = 0
 	app := &terminalApp{view: viewNotes, notes: ws}
 	app.initWidgets()
 	if !app.handleGlobalKey(notes.Key{Name: "d", Rune: 'd'}) {
 		t.Fatal("handleGlobalKey(d) = false, want true")
+	}
+	front, _ := app.pagesRoot.GetFrontPage()
+	if front != "delete-note" {
+		t.Fatalf("front page = %q, want delete-note", front)
+	}
+}
+
+func TestHandleGlobalKeyBrowserDShowsFolderDeleteConfirmation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws, err := notes.NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	ws.FocusSidebar = true
+	ws.SidebarBrowsing = true
+	for i, entry := range ws.BrowserTree {
+		if entry.Label == "Projects" {
+			ws.BrowserSelection = i
+			break
+		}
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	app.initWidgets()
+	if !app.handleGlobalKey(notes.Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleGlobalKey(d) = false, want true")
+	}
+	if !app.deleteNoteFolder {
+		t.Fatal("deleteNoteFolder = false, want true")
+	}
+	if app.deleteNotePath != "Projects" || app.deleteNoteLabel != "Projects" {
+		t.Fatalf("delete target path=%q label=%q, want Projects folder", app.deleteNotePath, app.deleteNoteLabel)
 	}
 	front, _ := app.pagesRoot.GetFrontPage()
 	if front != "delete-note" {

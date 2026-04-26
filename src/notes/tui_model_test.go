@@ -109,6 +109,411 @@ func TestHelpTextIncludesNavigation(t *testing.T) {
 	}
 }
 
+func findTreeEntryIndex(t *testing.T, entries []TreeEntry, kind treeEntryKind, path string, label string) int {
+	t.Helper()
+	for i, entry := range entries {
+		if entry.Kind != kind {
+			continue
+		}
+		if path != "" && entry.Path != path {
+			continue
+		}
+		if label != "" && entry.Label != label {
+			continue
+		}
+		return i
+	}
+	t.Fatalf("could not find tree entry kind=%d path=%q label=%q", kind, path, label)
+	return -1
+}
+
+func typeWorkspaceText(t *testing.T, w *Workspace, text string) {
+	t.Helper()
+	for _, r := range text {
+		if !w.HandleKey(Key{Name: string(r), Rune: r}) {
+			t.Fatalf("HandleKey(%q) = false, want true", string(r))
+		}
+	}
+}
+
+func TestSidebarRowsShowOnlyOpenNotesByDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := w.ActiveEditor().Path
+	rows := strings.Join(w.SidebarRows(12), "\n")
+	if strings.Contains(rows, "All notes") || strings.Contains(rows, "Open notes") {
+		t.Fatalf("SidebarRows() = %q, want no split sidebar sections", rows)
+	}
+	if findTreeEntryIndex(t, w.Tree, treeOpenNote, path, "") < 0 {
+		t.Fatal("expected open-note entry in sidebar")
+	}
+	if strings.Contains(rows, noteTitleFromPath(path)) == false {
+		t.Fatalf("SidebarRows() = %q, want open note visible", rows)
+	}
+}
+
+func TestBrowserRowsScrollToSelection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		if !w.NewNote() {
+			t.Fatalf("NewNote() #%d = false, want true", i+1)
+		}
+	}
+	lastPath := w.ActiveEditor().Path
+	w.FocusSidebar = true
+	w.toggleSidebarBrowser()
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, lastPath, "")
+	w.LastHeight = 6
+	rows := strings.Join(w.BrowserRows(80, 5), "\n")
+	if !strings.Contains(rows, noteTitleFromPath(lastPath)) {
+		t.Fatalf("SidebarRows() = %q, want selected note visible", rows)
+	}
+	row, _, ok := w.SidebarCursor()
+	if !ok {
+		t.Fatal("SidebarCursor() ok = false, want true")
+	}
+	if row <= 0 || row >= 5 {
+		t.Fatalf("SidebarCursor() row = %d, want visible sidebar row", row)
+	}
+}
+
+func TestSidebarETogglesBrowserScreen(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	if !w.HandleKey(Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("HandleKey(e) = false, want true")
+	}
+	if !w.SidebarBrowsing {
+		t.Fatal("SidebarBrowsing = false, want browser open")
+	}
+	browserRows := strings.Join(w.BrowserRows(80, 8), "\n")
+	if !strings.Contains(browserRows, "Notes Browser") {
+		t.Fatalf("BrowserRows() = %q, want browser title", browserRows)
+	}
+	sidebarRows := strings.Join(w.SidebarRows(8), "\n")
+	if strings.Contains(sidebarRows, "Notes Browser") {
+		t.Fatalf("SidebarRows() = %q, want normal open-note sidebar", sidebarRows)
+	}
+	if !w.HandleKey(Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("HandleKey(e) second = false, want true")
+	}
+	if w.SidebarBrowsing {
+		t.Fatal("SidebarBrowsing = true, want browser closed")
+	}
+}
+
+func TestBrowserCommandCreatesNoteAndReturnsToEditor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	if !w.HandleKey(Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("HandleKey(e) = false, want browser open")
+	}
+	if !w.HandleKey(Key{Name: "n", Rune: 'n'}) {
+		t.Fatal("HandleKey(n) = false, want browser command")
+	}
+	if !w.BrowserCommandMode || w.BrowserCommand != "new " {
+		t.Fatalf("browser command mode=%t command=%q, want new prompt", w.BrowserCommandMode, w.BrowserCommand)
+	}
+	typeWorkspaceText(t, w, "Plan")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want create note")
+	}
+	if w.SidebarBrowsing || w.FocusSidebar {
+		t.Fatalf("browser/focus = %t/%t, want editor after note create", w.SidebarBrowsing, w.FocusSidebar)
+	}
+	if got := w.ActiveEditor(); got == nil || got.Title != "Plan" {
+		t.Fatalf("active editor = %#v, want Plan note", got)
+	}
+	if _, err := os.Stat(filepath.Join(notesDir(), "Plan.md")); err != nil {
+		t.Fatalf("created note missing: %v", err)
+	}
+}
+
+func TestBrowserCommandTrailingSlashCreatesFolder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	if !w.HandleKey(Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("HandleKey(e) = false, want browser open")
+	}
+	if !w.HandleKey(Key{Name: "f", Rune: 'f'}) {
+		t.Fatal("HandleKey(f) = false, want browser command")
+	}
+	typeWorkspaceText(t, w, "Projects/")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want create folder")
+	}
+	if !w.SidebarBrowsing || !w.FocusSidebar {
+		t.Fatalf("browser/focus = %t/%t, want stay in browser", w.SidebarBrowsing, w.FocusSidebar)
+	}
+	if _, err := os.Stat(noteFolderPath("Projects")); err != nil {
+		t.Fatalf("created folder missing: %v", err)
+	}
+	if got := w.selectedBrowserEntry(); got == nil || got.Kind != treeFolder || got.Folder != "Projects" {
+		t.Fatalf("selected browser entry = %#v, want Projects folder", got)
+	}
+}
+
+func TestBrowserCommandCreatesRelativeAndRootTargets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	if !w.HandleKey(Key{Name: "n", Rune: 'n'}) {
+		t.Fatal("HandleKey(n) = false, want browser command")
+	}
+	typeWorkspaceText(t, w, "Plan")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want create relative note")
+	}
+	if _, err := os.Stat(filepath.Join(noteFolderPath("Projects"), "Plan.md")); err != nil {
+		t.Fatalf("relative note missing: %v", err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	if !w.HandleKey(Key{Name: "n", Rune: 'n'}) {
+		t.Fatal("HandleKey(n root) = false, want browser command")
+	}
+	typeWorkspaceText(t, w, "/Root")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter root) = false, want create root note")
+	}
+	if _, err := os.Stat(filepath.Join(notesDir(), "Root.md")); err != nil {
+		t.Fatalf("root note missing: %v", err)
+	}
+}
+
+func TestBrowserDeleteQueuesNoteAndFolderTargets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	notePath := w.ActiveEditor().Path
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, notePath, "")
+	if !w.HandleKey(Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("HandleKey(d note) = false, want pending delete")
+	}
+	path, label, folder, ok := w.TakePendingDeleteTarget()
+	if !ok || folder || path != notePath || label != noteTitleFromPath(notePath) {
+		t.Fatalf("pending note delete = path:%q label:%q folder:%t ok:%t", path, label, folder, ok)
+	}
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	if !w.HandleKey(Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("HandleKey(d folder) = false, want pending delete")
+	}
+	path, label, folder, ok = w.TakePendingDeleteTarget()
+	if !ok || !folder || path != "Projects" || label != "Projects" {
+		t.Fatalf("pending folder delete = path:%q label:%q folder:%t ok:%t", path, label, folder, ok)
+	}
+}
+
+func TestDeleteFolderByRelRemovesFolderAndOpenTabs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	created, err := w.CreateNote("Plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relativeNoteFolder(created) != "Projects" {
+		t.Fatalf("created folder = %q, want Projects", relativeNoteFolder(created))
+	}
+	if err := w.DeleteFolderByRel("Projects"); err != nil {
+		t.Fatalf("DeleteFolderByRel() error = %v", err)
+	}
+	if _, err := os.Stat(noteFolderPath("Projects")); !os.IsNotExist(err) {
+		t.Fatalf("Projects folder stat err = %v, want not exist", err)
+	}
+	for _, tab := range w.Tabs {
+		if strings.HasPrefix(relativeNoteFolder(tab.Path), "Projects") {
+			t.Fatalf("tab under deleted folder still open: %#v", tab)
+		}
+	}
+}
+
+func TestBrowserRenameNoteRenamesFileAssetsAndOpenTab(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath := w.ActiveEditor().Path
+	oldAssets := noteAssetsPath(oldPath)
+	if err := os.MkdirAll(oldAssets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, oldPath, "")
+	if !w.HandleKey(Key{Name: "r", Rune: 'r'}) {
+		t.Fatal("HandleKey(r) = false, want rename command")
+	}
+	if !strings.HasPrefix(w.BrowserCommand, "rename ") {
+		t.Fatalf("BrowserCommand = %q, want rename prompt", w.BrowserCommand)
+	}
+	for !strings.HasSuffix(w.BrowserCommand, "rename ") {
+		if !w.HandleKey(Key{Name: "backspace"}) {
+			t.Fatal("HandleKey(backspace) = false, want edit rename command")
+		}
+	}
+	typeWorkspaceText(t, w, "Renamed")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want rename")
+	}
+	newPath := filepath.Join(notesDir(), "Renamed.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("renamed note missing: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old note stat err = %v, want missing", err)
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != newPath || got.Title != "Renamed" {
+		t.Fatalf("active editor = %#v, want renamed note", got)
+	}
+	if _, err := os.Stat(noteAssetsPath(newPath)); err != nil {
+		t.Fatalf("renamed assets missing: %v", err)
+	}
+}
+
+func TestBrowserRenameFolderUpdatesOpenTabs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	created, err := w.CreateNote("Plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relativeNoteFolder(created) != "Projects" {
+		t.Fatalf("created folder = %q, want Projects", relativeNoteFolder(created))
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	if err := w.RenameBrowserEntry("Archive"); err != nil {
+		t.Fatalf("RenameBrowserEntry() error = %v", err)
+	}
+	newPath := filepath.Join(noteFolderPath("Archive"), "Plan.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("renamed folder note missing: %v", err)
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != newPath {
+		t.Fatalf("active editor = %#v, want path %q", got, newPath)
+	}
+	if got := w.selectedBrowserEntry(); got == nil || got.Kind != treeFolder || got.Folder != "Archive" {
+		t.Fatalf("selected browser entry = %#v, want Archive folder", got)
+	}
+}
+
+func TestBrowserRowsShowManagedFilesUnderNote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	notePath := w.ActiveEditor().Path
+	assetDir := noteAssetsPath(notePath)
+	if err := os.MkdirAll(filepath.Join(assetDir, "Images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDir, "Images", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.refreshTree()
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	rows := strings.Join(w.BrowserRows(120, 20), "\n")
+	if !strings.Contains(rows, "Images") || !strings.Contains(rows, "diagram.png") {
+		t.Fatalf("BrowserRows() = %q, want managed folder and asset", rows)
+	}
+}
+
+func TestBrowserEnterTogglesManagedFolder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assetDir := noteAssetsPath(w.ActiveEditor().Path)
+	if err := os.MkdirAll(filepath.Join(assetDir, "Images"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDir, "Images", "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.refreshTree()
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeManagedFolder, filepath.Join(assetDir, "Images"), "")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want toggle managed folder")
+	}
+	rows := strings.Join(w.BrowserRows(120, 20), "\n")
+	if strings.Contains(rows, "diagram.png") {
+		t.Fatalf("BrowserRows() = %q, want collapsed managed asset hidden", rows)
+	}
+}
+
 func TestCommandLineTextReflectsCommandAndSearch(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1501,11 +1906,103 @@ func TestWorkspaceTabNavigationAndCurrentNoteActions(t *testing.T) {
 	if !w.DeleteCurrentNote() {
 		t.Fatal("DeleteCurrentNote() = false, want true")
 	}
-	if len(w.Tabs) == 0 {
-		t.Fatal("DeleteCurrentNote() should keep at least one note open")
+	if len(w.Tabs) != 1 {
+		t.Fatalf("tab count after delete = %d, want 1", len(w.Tabs))
 	}
 	if _, err := os.Stat(secondPath); !os.IsNotExist(err) {
 		t.Fatalf("deleted note should be gone, stat err = %v", err)
+	}
+}
+
+func TestCloseSidebarNoteRemovesItFromOpenSessionOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := w.ActiveEditor().Path
+	w.FocusSidebar = true
+	w.Selection = findTreeEntryIndex(t, w.Tree, treeOpenNote, path, "")
+	if !w.HandleKey(Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("HandleKey(x) = false, want true")
+	}
+	if len(w.Tabs) != 0 {
+		t.Fatalf("tab count = %d, want 0 after closing last open note", len(w.Tabs))
+	}
+	if w.CurrentTab != -1 {
+		t.Fatalf("CurrentTab = %d, want -1", w.CurrentTab)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("closed note file missing: %v", err)
+	}
+	if got := settings.Inst().NotesApp.OpenNotePaths; len(got) != 0 {
+		t.Fatalf("OpenNotePaths = %v, want empty", got)
+	}
+	if got := settings.Inst().NotesApp.CurrentNotePath; got != "" {
+		t.Fatalf("CurrentNotePath = %q, want empty", got)
+	}
+	if findTreeEntryIndex(t, w.BrowserTree, treeNote, path, "") < 0 {
+		t.Fatal("expected closed note to remain in browser tree")
+	}
+}
+
+func TestSidebarBrowserEnterReopensClosedNote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := w.ActiveEditor().Path
+	w.FocusSidebar = true
+	w.Selection = findTreeEntryIndex(t, w.Tree, treeOpenNote, path, "")
+	if !w.HandleKey(Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("HandleKey(x) = false, want true")
+	}
+	w.FocusSidebar = true
+	w.toggleSidebarBrowser()
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, path, "")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want true")
+	}
+	if len(w.Tabs) != 1 {
+		t.Fatalf("tab count = %d, want 1 after reopen", len(w.Tabs))
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != path {
+		t.Fatalf("active editor = %#v, want path %q", got, path)
+	}
+	if settings.Inst().NotesApp.CurrentNotePath != "Note 1.md" {
+		t.Fatalf("CurrentNotePath = %q, want Note 1.md", settings.Inst().NotesApp.CurrentNotePath)
+	}
+}
+
+func TestSidebarBrowserEnterFocusesAlreadyOpenNoteWithoutDuplicatingTab(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := w.ActiveEditor().Path
+	if !w.NewNote() {
+		t.Fatal("NewNote() = false, want true")
+	}
+	secondPath := w.ActiveEditor().Path
+	w.FocusSidebar = true
+	w.toggleSidebarBrowser()
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, firstPath, "")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want true")
+	}
+	if len(w.Tabs) != 2 {
+		t.Fatalf("tab count = %d, want 2", len(w.Tabs))
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != firstPath {
+		t.Fatalf("active editor = %#v, want first path %q", got, firstPath)
+	}
+	if w.LastAccessedTab < 0 || w.Tabs[w.LastAccessedTab].Path != secondPath {
+		t.Fatalf("LastAccessedTab = %d, want second note remembered", w.LastAccessedTab)
 	}
 }
 
@@ -1697,9 +2194,11 @@ func TestNewWorkspaceRestoresPortableSnapshotSessionPaths(t *testing.T) {
 	if err := w.CreateFolder("Projects"); err != nil {
 		t.Fatalf("CreateFolder() error = %v", err)
 	}
-	for i, entry := range w.Tree {
+	w.FocusSidebar = true
+	w.toggleSidebarBrowser()
+	for i, entry := range w.BrowserTree {
 		if entry.Kind == treeFolder && entry.Folder == "Projects" {
-			w.Selection = i
+			w.BrowserSelection = i
 			break
 		}
 	}
@@ -1940,10 +2439,11 @@ func TestCanDeleteFocusedNoteDistinguishesSidebarFolders(t *testing.T) {
 	if err := w.CreateFolder("Projects"); err != nil {
 		t.Fatal(err)
 	}
-	for i, entry := range w.Tree {
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	for i, entry := range w.BrowserTree {
 		if entry.Kind == treeFolder && entry.Label == "Projects" {
-			w.Selection = i
-			w.FocusSidebar = true
+			w.BrowserSelection = i
 			break
 		}
 	}
@@ -1955,13 +2455,31 @@ func TestCanDeleteFocusedNoteDistinguishesSidebarFolders(t *testing.T) {
 func TestHandleSidebarKeyEscReturnsFocusToEditor(t *testing.T) {
 	w := &Workspace{
 		FocusSidebar: true,
-		Tree:         []TreeEntry{{Kind: treeNote, Label: "Plan"}},
+		Tree:         []TreeEntry{{Kind: treeOpenNote, Label: "Plan"}},
 	}
 	if !w.handleSidebarKey(Key{Name: "esc"}) {
 		t.Fatal("handleSidebarKey(esc) = false, want true")
 	}
 	if w.FocusSidebar {
 		t.Fatal("FocusSidebar = true, want false")
+	}
+}
+
+func TestHandleSidebarKeyEscClosesBrowserBeforeLeavingSidebar(t *testing.T) {
+	w := &Workspace{
+		FocusSidebar:     true,
+		SidebarBrowsing:  true,
+		BrowserTree:      []TreeEntry{{Kind: treeNote, Label: "Plan"}},
+		BrowserSelection: 0,
+	}
+	if !w.handleSidebarKey(Key{Name: "esc"}) {
+		t.Fatal("handleSidebarKey(esc) = false, want true")
+	}
+	if !w.FocusSidebar {
+		t.Fatal("FocusSidebar = false, want sidebar to remain focused")
+	}
+	if w.SidebarBrowsing {
+		t.Fatal("SidebarBrowsing = true, want browser closed")
 	}
 }
 
@@ -1983,7 +2501,7 @@ func TestDeleteFocusedNoteOnlyDeletesSelectedSidebarNote(t *testing.T) {
 	w.FocusSidebar = true
 	found := false
 	for i, entry := range w.Tree {
-		if entry.Kind == treeNote && entry.Path == secondPath {
+		if entry.Kind == treeOpenNote && entry.Path == secondPath {
 			w.Selection = i
 			found = true
 			break
@@ -2007,6 +2525,50 @@ func TestDeleteFocusedNoteOnlyDeletesSelectedSidebarNote(t *testing.T) {
 	}
 	if len(files) != 1 || files[0].Path != firstPath {
 		t.Fatalf("remaining files = %#v, want only %q", files, firstPath)
+	}
+}
+
+func TestNoOpenNoteStateRendersAndAllowsSidebarCreation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := w.ActiveEditor().Path
+	w.FocusSidebar = true
+	w.Selection = findTreeEntryIndex(t, w.Tree, treeOpenNote, path, "")
+	if !w.HandleKey(Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("HandleKey(x) = false, want true")
+	}
+	w.FocusSidebar = false
+	if got := w.HelpText(); !strings.Contains(got, "no note open") {
+		t.Fatalf("HelpText() = %q, want no-open-note hint", got)
+	}
+	if got := w.CommandLineText(80); !strings.Contains(got, "no note open") {
+		t.Fatalf("CommandLineText() = %q, want no-open-note hint", got)
+	}
+	if got := strings.Join(w.EditorRows(20, 3), "\n"); !strings.Contains(got, "No note open") {
+		t.Fatalf("EditorRows() = %q, want empty editor state", got)
+	}
+	if err := w.SaveCurrent(); err != nil {
+		t.Fatalf("SaveCurrent() error = %v, want nil when no note is open", err)
+	}
+	w.FocusSidebar = true
+	if !w.HandleKey(Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("HandleKey(e) = false, want browser open with no active note")
+	}
+	if !w.SidebarBrowsing {
+		t.Fatal("SidebarBrowsing = false, want browser open")
+	}
+	if !w.HandleKey(Key{Name: "e", Rune: 'e'}) {
+		t.Fatal("HandleKey(e) second = false, want browser close")
+	}
+	if !w.HandleKey(Key{Name: "n", Rune: 'n'}) {
+		t.Fatal("HandleKey(n) = false, want create note from sidebar")
+	}
+	if len(w.Tabs) != 1 {
+		t.Fatalf("tab count = %d, want 1 after creating note", len(w.Tabs))
 	}
 }
 
@@ -2050,7 +2612,7 @@ func TestHandleSidebarKeyDQueuesDeleteConfirmation(t *testing.T) {
 	w.FocusSidebar = true
 	found := false
 	for i, entry := range w.Tree {
-		if entry.Kind == treeNote && entry.Path == secondPath {
+		if entry.Kind == treeOpenNote && entry.Path == secondPath {
 			w.Selection = i
 			found = true
 			break
@@ -2074,7 +2636,7 @@ func TestHandleSidebarKeyDQueuesDeleteConfirmation(t *testing.T) {
 	}
 }
 
-func TestFocusedNoteDeletePathUsesSidebarSelection(t *testing.T) {
+func TestFocusedNoteDeletePathUsesActiveNoteWhenSidebarSelectionIsStale(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	w, err := NewWorkspace()
@@ -2086,18 +2648,62 @@ func TestFocusedNoteDeletePathUsesSidebarSelection(t *testing.T) {
 		t.Fatal("NewNote() = false, want true")
 	}
 	secondPath := w.ActiveEditor().Path
-	w.FocusSidebar = true
 	for i, entry := range w.Tree {
-		if entry.Kind == treeNote && entry.Path == firstPath {
+		if entry.Kind == treeOpenNote && entry.Path == firstPath {
 			w.Selection = i
 			break
 		}
 	}
-	if got := w.FocusedNoteDeletePath(); got != firstPath {
-		t.Fatalf("FocusedNoteDeletePath() = %q, want %q", got, firstPath)
-	}
+	w.FocusSidebar = false
 	if got := w.ActiveEditor().Path; got != secondPath {
 		t.Fatalf("active editor path = %q, want %q", got, secondPath)
+	}
+	if !w.HandleKey(Key{Name: "a", Ctrl: true}) {
+		t.Fatal("HandleKey(ctrl+a) = false, want sidebar focus")
+	}
+	if got := w.FocusedNoteDeletePath(); got != secondPath {
+		t.Fatalf("FocusedNoteDeletePath() = %q, want active path %q after sidebar focus", got, secondPath)
+	}
+	if !w.HandleKey(Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("HandleKey(d) = false, want delete request for active note")
+	}
+	path, _, ok := w.TakePendingDeleteNote()
+	if !ok {
+		t.Fatal("TakePendingDeleteNote() ok = false, want true")
+	}
+	if path != secondPath {
+		t.Fatalf("pending delete path = %q, want active path %q", path, secondPath)
+	}
+}
+
+func TestSidebarCloseUsesActiveNoteAfterTabSwitch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPath := w.ActiveEditor().Path
+	if !w.NewNote() {
+		t.Fatal("NewNote() = false, want true")
+	}
+	secondPath := w.ActiveEditor().Path
+	w.Selection = findTreeEntryIndex(t, w.Tree, treeOpenNote, firstPath, "")
+	w.FocusSidebar = false
+	if !w.HandleKey(Key{Name: "a", Ctrl: true}) {
+		t.Fatal("HandleKey(ctrl+a) = false, want sidebar focus")
+	}
+	if !w.HandleKey(Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("HandleKey(x) = false, want close active note")
+	}
+	if len(w.Tabs) != 1 {
+		t.Fatalf("tab count = %d, want 1", len(w.Tabs))
+	}
+	if got := w.Tabs[0].Path; got != firstPath {
+		t.Fatalf("remaining tab = %q, want first note %q", got, firstPath)
+	}
+	if _, err := os.Stat(secondPath); err != nil {
+		t.Fatalf("closed active note file should remain: %v", err)
 	}
 }
 

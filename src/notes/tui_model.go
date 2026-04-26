@@ -48,8 +48,12 @@ type noteFile struct {
 type treeEntryKind int
 
 const (
-	treeFolder treeEntryKind = iota
+	treeSectionHeader treeEntryKind = iota
+	treeOpenNote
+	treeFolder
 	treeNote
+	treeManagedFolder
+	treeManagedAsset
 )
 
 type fileEntryKind int
@@ -67,6 +71,9 @@ type TreeEntry struct {
 	Depth     int
 	Collapsed bool
 	Folder    string
+	Scope     string
+	AssetRel  string
+	Image     bool
 }
 
 type FileEntry struct {
@@ -130,6 +137,8 @@ type Editor struct {
 type Workspace struct {
 	Tree                  []TreeEntry
 	Selection             int
+	BrowserTree           []TreeEntry
+	BrowserSelection      int
 	FileTree              []FileEntry
 	FileSelection         int
 	FileCommand           string
@@ -145,7 +154,11 @@ type Workspace struct {
 	CurrentTab            int
 	LastAccessedTab       int
 	FocusSidebar          bool
+	SidebarBrowsing       bool
+	BrowserCommandMode    bool
+	BrowserCommand        string
 	SidebarWidth          int
+	SidebarRenderHeight   int
 	PreviewWidth          int
 	EditorRenderWidth     int
 	LastHeight            int
@@ -159,6 +172,7 @@ type Workspace struct {
 	pendingSaveAll        bool
 	pendingDeletePath     string
 	pendingDeleteLabel    string
+	pendingDeleteFolder   bool
 }
 
 var currentNote *Workspace
@@ -220,19 +234,57 @@ func (w *Workspace) setCurrentTab(index int) bool {
 		w.LastAccessedTab = w.CurrentTab
 	}
 	w.CurrentTab = index
+	w.syncOpenSelectionToActive()
 	return true
 }
 
 func (w *Workspace) refreshTree() {
+	selectedPath := ""
+	if entry := w.selectedOpenEntry(); entry != nil {
+		selectedPath = entry.Path
+	}
+	entries := make([]TreeEntry, 0, len(w.Tabs))
+	for _, tab := range w.Tabs {
+		if tab == nil || strings.TrimSpace(tab.Path) == "" {
+			continue
+		}
+		entries = append(entries, TreeEntry{
+			Kind:   treeOpenNote,
+			Path:   tab.Path,
+			Label:  tab.Title,
+			Folder: relativeNoteFolder(tab.Path),
+		})
+	}
+	w.Tree = entries
+	w.Selection = clampSidebarSelectionByPath(w.Tree, w.Selection, selectedPath)
+	w.refreshBrowserTree()
+}
+
+func (w *Workspace) refreshBrowserTree() {
 	files, _ := listNoteFiles()
 	folders, _ := listNoteFolders()
+	managedEntries, _ := listManagedFiles()
+	selectedKind := treeSectionHeader
+	selectedPath := ""
+	selectedFolder := ""
+	selectedLabel := ""
+	if entry := w.selectedBrowserEntry(); entry != nil {
+		selectedKind = entry.Kind
+		selectedPath = entry.Path
+		selectedFolder = entry.Folder
+		selectedLabel = entry.Label
+	}
 	collapsed := make(map[string]bool)
-	for _, entry := range w.Tree {
+	managedCollapsed := make(map[string]bool)
+	for _, entry := range w.BrowserTree {
 		if entry.Kind == treeFolder && entry.Collapsed {
 			collapsed[entry.Folder] = true
 		}
+		if entry.Kind == treeManagedFolder && entry.Collapsed {
+			managedCollapsed[entry.Path] = true
+		}
 	}
-	entries := make([]TreeEntry, 0, len(files)+len(folders))
+	baseEntries := make([]TreeEntry, 0, len(files)+len(folders))
 	folderSet := make(map[string]struct{}, len(folders))
 	for _, folder := range folders {
 		folderSet[folder] = struct{}{}
@@ -243,26 +295,131 @@ func (w *Workspace) refreshTree() {
 	}
 	sort.Slice(folderList, func(i, j int) bool { return filepath.ToSlash(folderList[i]) < filepath.ToSlash(folderList[j]) })
 	for _, folder := range folderList {
-		entries = append(entries, TreeEntry{Kind: treeFolder, Path: noteFolderPath(folder), Label: filepath.Base(folder), Depth: strings.Count(filepath.ToSlash(folder), "/"), Folder: folder, Collapsed: collapsed[folder]})
+		baseEntries = append(baseEntries, TreeEntry{Kind: treeFolder, Path: noteFolderPath(folder), Label: filepath.Base(folder), Depth: strings.Count(filepath.ToSlash(folder), "/"), Folder: folder, Collapsed: collapsed[folder]})
 	}
 	for _, file := range files {
 		if isHiddenByCollapsed(file.Folder, collapsed) {
 			continue
 		}
-		entries = append(entries, TreeEntry{Kind: treeNote, Path: file.Path, Label: file.Title, Depth: folderDepth(file.Folder), Folder: file.Folder})
+		baseEntries = append(baseEntries, TreeEntry{Kind: treeNote, Path: file.Path, Label: file.Title, Depth: folderDepth(file.Folder), Folder: file.Folder})
 	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		left := treeSortKey(entries[i])
-		right := treeSortKey(entries[j])
+	sort.SliceStable(baseEntries, func(i, j int) bool {
+		left := treeSortKey(baseEntries[i])
+		right := treeSortKey(baseEntries[j])
 		return left < right
 	})
-	w.Tree = entries
-	if w.Selection >= len(w.Tree) {
-		w.Selection = len(w.Tree) - 1
+	managedByScope := browserManagedEntriesByScope(managedEntries, managedCollapsed)
+	entries := make([]TreeEntry, 0, len(baseEntries)+len(managedEntries))
+	for _, entry := range baseEntries {
+		entries = append(entries, entry)
+		if entry.Kind != treeNote {
+			continue
+		}
+		entries = append(entries, managedByScope[noteRelPath(entry.Path)]...)
 	}
-	if w.Selection < 0 {
-		w.Selection = 0
+	w.BrowserTree = entries
+	for i, entry := range w.BrowserTree {
+		if entry.Kind != selectedKind {
+			continue
+		}
+		switch {
+		case selectedPath != "" && entry.Path == selectedPath:
+			w.BrowserSelection = i
+		case selectedFolder != "" && entry.Folder == selectedFolder && entry.Path == selectedPath:
+			w.BrowserSelection = i
+		case selectedPath == "" && selectedFolder == "" && selectedLabel != "" && entry.Label == selectedLabel:
+			w.BrowserSelection = i
+		default:
+			continue
+		}
+		break
 	}
+	if w.BrowserSelection >= len(w.BrowserTree) {
+		w.BrowserSelection = len(w.BrowserTree) - 1
+	}
+	if w.BrowserSelection < 0 {
+		w.BrowserSelection = 0
+	}
+}
+
+func clampSidebarSelectionByPath(entries []TreeEntry, selection int, path string) int {
+	if len(entries) == 0 {
+		return 0
+	}
+	if path != "" {
+		for i, entry := range entries {
+			if entry.Path == path {
+				return i
+			}
+		}
+	}
+	if selection >= len(entries) {
+		selection = len(entries) - 1
+	}
+	if selection < 0 {
+		selection = 0
+	}
+	return selection
+}
+
+func clampBrowserSelectionByFolder(entries []TreeEntry, selection int, folder string) int {
+	if len(entries) == 0 {
+		return 0
+	}
+	if folder != "" {
+		for i, entry := range entries {
+			if entry.Kind == treeFolder && entry.Folder == folder {
+				return i
+			}
+		}
+	}
+	if selection >= len(entries) {
+		selection = len(entries) - 1
+	}
+	if selection < 0 {
+		selection = 0
+	}
+	return selection
+}
+
+func browserManagedEntriesByScope(files []FileEntry, collapsed map[string]bool) map[string][]TreeEntry {
+	byScope := make(map[string][]TreeEntry)
+	for _, file := range files {
+		if file.Kind == fileEntryScope {
+			continue
+		}
+		if isManagedHiddenByCollapsed(file.Path, collapsed) {
+			continue
+		}
+		depth := folderDepth(file.Scope) + 1 + strings.Count(filepath.ToSlash(file.AssetRel), "/")
+		kind := treeManagedAsset
+		if file.Kind == fileEntryFolder {
+			kind = treeManagedFolder
+		}
+		byScope[file.Scope] = append(byScope[file.Scope], TreeEntry{
+			Kind:      kind,
+			Path:      file.Path,
+			Label:     file.Label,
+			Depth:     depth,
+			Collapsed: collapsed[file.Path],
+			Scope:     file.Scope,
+			AssetRel:  file.AssetRel,
+			Image:     file.Image,
+		})
+	}
+	return byScope
+}
+
+func isManagedHiddenByCollapsed(path string, collapsed map[string]bool) bool {
+	for parent, isCollapsed := range collapsed {
+		if !isCollapsed || parent == path {
+			continue
+		}
+		if strings.HasPrefix(path, parent+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Workspace) refreshFiles() {
@@ -346,6 +503,9 @@ func (w *Workspace) Open(path string) error {
 	for i, tab := range w.Tabs {
 		if tab.Path == path {
 			w.setCurrentTab(i)
+			w.SelectedFolder = relativeNoteFolder(path)
+			w.refreshTree()
+			w.syncOpenSelectionToActive()
 			w.updateSession()
 			return nil
 		}
@@ -358,6 +518,8 @@ func (w *Workspace) Open(path string) error {
 	w.Tabs = append(w.Tabs, ed)
 	w.setCurrentTab(len(w.Tabs) - 1)
 	w.SelectedFolder = relativeNoteFolder(path)
+	w.refreshTree()
+	w.syncOpenSelectionToActive()
 	w.persistSession()
 	return nil
 }
@@ -676,7 +838,7 @@ func (w *Workspace) SwitchToLastAccessedTab() bool {
 		return false
 	}
 	w.setCurrentTab(w.LastAccessedTab)
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	w.ensureEditorVisible()
 	w.updateSession()
 	return true
@@ -688,7 +850,7 @@ func (w *Workspace) SwitchToTabShortcut(shortcut string) bool {
 		return false
 	}
 	w.setCurrentTab(index)
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	w.ensureEditorVisible()
 	w.updateSession()
 	return true
@@ -700,7 +862,7 @@ func (w *Workspace) SwitchToTabAtColumn(col int) bool {
 		return false
 	}
 	w.setCurrentTab(index)
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	w.ensureEditorVisible()
 	w.updateSession()
 	return true
@@ -715,7 +877,7 @@ func (w *Workspace) NewNote() bool {
 		return false
 	}
 	_ = w.Open(path)
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	return true
 }
 
@@ -733,9 +895,17 @@ func (w *Workspace) CanDeleteFocusedNote() bool {
 	}
 	if w.FocusSidebar {
 		entry := w.selectedEntry()
-		return entry != nil && entry.Kind == treeNote
+		return entry != nil && (entry.Kind == treeNote || entry.Kind == treeOpenNote)
 	}
 	return w.ActiveEditor() != nil
+}
+
+func (w *Workspace) CanDeleteFocusedBrowserEntry() bool {
+	if w == nil || !w.SidebarBrowsing {
+		return false
+	}
+	entry := w.selectedBrowserEntry()
+	return entry != nil && (entry.Kind == treeNote || entry.Kind == treeFolder)
 }
 
 func (w *Workspace) FocusedNoteDeleteLabel() string {
@@ -748,6 +918,13 @@ func (w *Workspace) FocusedNoteDeleteLabel() string {
 	return w.ActiveEditor().Title
 }
 
+func (w *Workspace) FocusedBrowserDeleteLabel() string {
+	if !w.CanDeleteFocusedBrowserEntry() {
+		return ""
+	}
+	return w.selectedBrowserEntry().Label
+}
+
 func (w *Workspace) requestDeleteFocusedNote() bool {
 	path := w.FocusedNoteDeletePath()
 	if strings.TrimSpace(path) == "" {
@@ -755,7 +932,29 @@ func (w *Workspace) requestDeleteFocusedNote() bool {
 	}
 	w.pendingDeletePath = path
 	w.pendingDeleteLabel = w.FocusedNoteDeleteLabel()
+	w.pendingDeleteFolder = false
 	return true
+}
+
+func (w *Workspace) requestDeleteFocusedBrowserEntry() bool {
+	entry := w.selectedBrowserEntry()
+	if entry == nil {
+		return false
+	}
+	switch entry.Kind {
+	case treeNote:
+		w.pendingDeletePath = entry.Path
+		w.pendingDeleteLabel = entry.Label
+		w.pendingDeleteFolder = false
+		return true
+	case treeFolder:
+		w.pendingDeletePath = entry.Folder
+		w.pendingDeleteLabel = entry.Label
+		w.pendingDeleteFolder = true
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *Workspace) FocusedNoteDeletePath() string {
@@ -764,7 +963,7 @@ func (w *Workspace) FocusedNoteDeletePath() string {
 	}
 	if w.FocusSidebar {
 		entry := w.selectedEntry()
-		if entry == nil || entry.Kind != treeNote {
+		if entry == nil || (entry.Kind != treeNote && entry.Kind != treeOpenNote) {
 			return ""
 		}
 		return entry.Path
@@ -780,14 +979,24 @@ func (w *Workspace) DeleteFocusedNote() bool {
 }
 
 func (w *Workspace) TakePendingDeleteNote() (string, string, bool) {
-	if w == nil || strings.TrimSpace(w.pendingDeletePath) == "" {
+	path, label, folder, ok := w.TakePendingDeleteTarget()
+	if !ok || folder {
 		return "", "", false
+	}
+	return path, label, true
+}
+
+func (w *Workspace) TakePendingDeleteTarget() (string, string, bool, bool) {
+	if w == nil || strings.TrimSpace(w.pendingDeletePath) == "" {
+		return "", "", false, false
 	}
 	path := w.pendingDeletePath
 	label := w.pendingDeleteLabel
+	folder := w.pendingDeleteFolder
 	w.pendingDeletePath = ""
 	w.pendingDeleteLabel = ""
-	return path, label, true
+	w.pendingDeleteFolder = false
+	return path, label, folder, true
 }
 
 func (w *Workspace) DeleteNoteByPath(path string) error {
@@ -802,17 +1011,32 @@ func (w *Workspace) DeleteNoteByPath(path string) error {
 	}
 	w.closeTab(path)
 	w.refreshTree()
-	if len(w.Tabs) == 0 {
-		created, err := w.CreateNote("")
-		if err == nil {
-			_ = w.Open(created)
-		}
-	}
 	if w.CurrentTab >= 0 && w.CurrentTab < len(w.Tabs) {
 		w.SelectedFolder = relativeNoteFolder(w.Tabs[w.CurrentTab].Path)
 	}
 	w.refreshFiles()
 	w.persistSession()
+	return nil
+}
+
+func (w *Workspace) DeleteFolderByRel(folder string) error {
+	if w == nil || strings.TrimSpace(folder) == "" {
+		return fmt.Errorf("no folder selected")
+	}
+	folder = sanitizeFolderPath(folder)
+	if folder == "" {
+		return fmt.Errorf("no folder selected")
+	}
+	if err := os.RemoveAll(noteFolderPath(folder)); err != nil {
+		return err
+	}
+	w.closeTabsInFolder(folder)
+	w.SelectedFolder = ""
+	if ed := w.ActiveEditor(); ed != nil {
+		w.SelectedFolder = relativeNoteFolder(ed.Path)
+	}
+	w.refreshTree()
+	w.refreshFiles()
 	return nil
 }
 
@@ -851,6 +1075,111 @@ func (w *Workspace) RenameCurrentNote(name string) error {
 	return nil
 }
 
+func (w *Workspace) RenameBrowserEntry(name string) error {
+	entry := w.selectedBrowserEntry()
+	if entry == nil {
+		return fmt.Errorf("select a note or folder")
+	}
+	name = strings.TrimSpace(name)
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	}
+	switch entry.Kind {
+	case treeNote:
+		return w.renameNoteByPath(entry.Path, name)
+	case treeFolder:
+		return w.renameFolderByRel(entry.Folder, name)
+	default:
+		return fmt.Errorf("select a note or folder")
+	}
+}
+
+func (w *Workspace) renameNoteByPath(path string, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("rename requires a note name")
+	}
+	folder := relativeNoteFolder(path)
+	target := uniqueNotePathInFolder(folder, name, path)
+	if target == path {
+		return nil
+	}
+	oldAssetPath := noteAssetsPath(path)
+	newAssetPath := noteAssetsPath(target)
+	if err := os.Rename(path, target); err != nil {
+		return err
+	}
+	if _, err := os.Stat(oldAssetPath); err == nil {
+		renamedAssetPath := uniquePathLike(newAssetPath, oldAssetPath, true)
+		if renameErr := os.Rename(oldAssetPath, renamedAssetPath); renameErr != nil {
+			return renameErr
+		}
+	}
+	for _, tab := range w.Tabs {
+		if tab == nil || tab.Path != path {
+			continue
+		}
+		tab.Path = target
+		tab.Title = noteTitleFromPath(target)
+	}
+	w.SelectedFolder = relativeNoteFolder(target)
+	w.refreshTree()
+	w.refreshFiles()
+	w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, target)
+	w.persistSession()
+	return nil
+}
+
+func (w *Workspace) renameFolderByRel(folder string, name string) error {
+	folder = sanitizeFolderPath(folder)
+	name = strings.TrimSpace(name)
+	if folder == "" || name == "" {
+		return fmt.Errorf("rename requires a folder name")
+	}
+	parent := filepath.Dir(folder)
+	if parent == "." {
+		parent = ""
+	}
+	targetFolder := joinFolderParts(parent, name)
+	if targetFolder == "" {
+		return fmt.Errorf("rename requires a folder name")
+	}
+	oldPath := noteFolderPath(folder)
+	targetPath := uniquePathLike(noteFolderPath(targetFolder), oldPath, true)
+	if targetPath == oldPath {
+		return nil
+	}
+	if err := os.Rename(oldPath, targetPath); err != nil {
+		return err
+	}
+	actualRel, err := filepath.Rel(notesDir(), targetPath)
+	if err != nil {
+		actualRel = targetFolder
+	}
+	actualRel = sanitizeFolderPath(actualRel)
+	for _, tab := range w.Tabs {
+		if tab == nil {
+			continue
+		}
+		rel := noteRelPath(tab.Path)
+		if rel == "" {
+			continue
+		}
+		if rel == folder || strings.HasPrefix(rel, folder+string(filepath.Separator)) {
+			suffix := strings.TrimPrefix(rel, folder)
+			suffix = strings.TrimPrefix(suffix, string(filepath.Separator))
+			tab.Path = filepath.Join(noteFolderPath(actualRel), suffix)
+			tab.Title = noteTitleFromPath(tab.Path)
+		}
+	}
+	w.SelectedFolder = actualRel
+	w.refreshTree()
+	w.refreshFiles()
+	w.BrowserSelection = clampBrowserSelectionByFolder(w.BrowserTree, w.BrowserSelection, actualRel)
+	w.persistSession()
+	return nil
+}
+
 func (w *Workspace) HandleKey(key Key) bool {
 	if key.Ctrl && key.Name == "s" {
 		w.pendingSaveAll = true
@@ -858,6 +1187,11 @@ func (w *Workspace) HandleKey(key Key) bool {
 	}
 	if key.Ctrl && key.Name == "a" {
 		w.FocusSidebar = !w.FocusSidebar
+		if !w.FocusSidebar {
+			w.SidebarBrowsing = false
+		} else if !w.SidebarBrowsing {
+			w.syncOpenSelectionToActive()
+		}
 		return true
 	}
 	if key.Ctrl && !w.FocusSidebar && key.Name == "e" {
@@ -875,6 +1209,9 @@ func (w *Workspace) HandleKey(key Key) bool {
 		return w.NewNote()
 	}
 	if key.Ctrl && key.Name == "d" {
+		if w.SidebarBrowsing {
+			return w.requestDeleteFocusedBrowserEntry()
+		}
 		return w.requestDeleteFocusedNote()
 	}
 	if key.Ctrl && key.Name == "left" && w.FocusSidebar {
@@ -900,21 +1237,50 @@ func (w *Workspace) HandleKey(key Key) bool {
 }
 
 func (w *Workspace) handleSidebarKey(key Key) bool {
+	if w.SidebarBrowsing && w.BrowserCommandMode {
+		return w.handleBrowserCommandKey(key)
+	}
 	switch key.Name {
 	case "a":
 		if w.SwitchToLastAccessedTab() {
 			return true
 		}
-		w.FocusSidebar = false
+		w.leaveSidebar()
 		return true
 	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		if w.SwitchToTabShortcut(key.Name) {
 			return true
 		}
-		w.FocusSidebar = false
+		w.leaveSidebar()
+		return true
+	case "e":
+		w.toggleSidebarBrowser()
+		return true
+	case "h", "esc":
+		if w.SidebarBrowsing {
+			w.SidebarBrowsing = false
+			w.BrowserCommandMode = false
+			w.BrowserCommand = ""
+			return true
+		}
+		w.leaveSidebar()
+		return true
+	case "n":
+		if w.SidebarBrowsing {
+			w.startBrowserCommand("new ")
+			return true
+		}
+		_, _ = w.CreateNote("")
+		return true
+	case "f":
+		if w.SidebarBrowsing {
+			w.startBrowserCommand("new ")
+			return true
+		}
+		_ = w.CreateFolder("")
 		return true
 	}
-	if len(w.Tree) == 0 {
+	if len(w.activeSidebarEntries()) == 0 {
 		return false
 	}
 	switch key.Name {
@@ -923,48 +1289,72 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 	case "]":
 		return w.NextTab()
 	case "down", "j":
-		if w.Selection < len(w.Tree)-1 {
-			w.Selection++
-		}
+		w.moveSidebarSelection(1)
 		return true
 	case "up", "k":
-		if w.Selection > 0 {
-			w.Selection--
-		}
+		w.moveSidebarSelection(-1)
 		return true
 	case "enter", "l":
-		entry := w.Tree[w.Selection]
-		if entry.Kind == treeFolder {
-			for i := range w.Tree {
-				if w.Tree[i].Kind == treeFolder && w.Tree[i].Folder == entry.Folder {
-					w.Tree[i].Collapsed = !w.Tree[i].Collapsed
+		entry := w.selectedEntry()
+		if entry == nil {
+			return false
+		}
+		if w.SidebarBrowsing && entry.Kind == treeFolder {
+			for i := range w.BrowserTree {
+				if w.BrowserTree[i].Kind == treeFolder && w.BrowserTree[i].Folder == entry.Folder {
+					w.BrowserTree[i].Collapsed = !w.BrowserTree[i].Collapsed
 					break
 				}
 			}
-			w.refreshTree()
+			w.refreshBrowserTree()
+			return true
+		}
+		if w.SidebarBrowsing && entry.Kind == treeManagedFolder {
+			for i := range w.BrowserTree {
+				if w.BrowserTree[i].Kind == treeManagedFolder && w.BrowserTree[i].Path == entry.Path {
+					w.BrowserTree[i].Collapsed = !w.BrowserTree[i].Collapsed
+					break
+				}
+			}
+			w.refreshBrowserTree()
+			return true
+		}
+		if w.SidebarBrowsing && entry.Kind == treeManagedAsset {
+			helpers.OpenURI(pathToFileURI(entry.Path))
 			return true
 		}
 		_ = w.Open(entry.Path)
-		w.FocusSidebar = false
+		w.leaveSidebar()
 		w.ensureEditorVisible()
 		return true
-	case "h", "esc":
-		w.FocusSidebar = false
-		return true
-	case "n":
-		_, _ = w.CreateNote("")
-		return true
-	case "f":
-		_ = w.CreateFolder("")
-		return true
 	case "d":
+		if w.SidebarBrowsing {
+			return w.requestDeleteFocusedBrowserEntry()
+		}
 		return w.requestDeleteFocusedNote()
-	case "R":
+	case "x":
+		entry := w.selectedEntry()
+		if w.SidebarBrowsing || entry == nil || entry.Kind != treeOpenNote {
+			return false
+		}
+		return w.CloseNoteByPath(entry.Path)
+	case "r", "R":
+		if w.SidebarBrowsing {
+			entry := w.selectedBrowserEntry()
+			if entry == nil || (entry.Kind != treeNote && entry.Kind != treeFolder) {
+				return false
+			}
+			w.startBrowserCommand("rename " + entry.Label)
+			return true
+		}
+		if key.Name != "R" {
+			return false
+		}
 		ed := w.ActiveEditor()
 		if ed == nil {
 			return false
 		}
-		w.FocusSidebar = false
+		w.leaveSidebar()
 		ed.Mode = ModeCommand
 		ed.Command = "rename " + ed.Title
 		return true
@@ -972,10 +1362,61 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 	return false
 }
 
+func (w *Workspace) startBrowserCommand(command string) {
+	if w == nil {
+		return
+	}
+	w.BrowserCommandMode = true
+	w.BrowserCommand = command
+}
+
+func (w *Workspace) handleBrowserCommandKey(key Key) bool {
+	switch key.Name {
+	case "esc":
+		w.BrowserCommandMode = false
+		w.BrowserCommand = ""
+		return true
+	case "backspace":
+		if len(w.BrowserCommand) > 0 {
+			_, size := utf8.DecodeLastRuneInString(w.BrowserCommand)
+			w.BrowserCommand = w.BrowserCommand[:len(w.BrowserCommand)-size]
+		}
+		return true
+	case "enter":
+		err := w.executeBrowserCommand(strings.TrimSpace(w.BrowserCommand))
+		w.BrowserCommandMode = false
+		w.BrowserCommand = ""
+		if err != nil {
+			if ed := w.ActiveEditor(); ed != nil {
+				ed.Status = err.Error()
+			}
+		}
+		return true
+	}
+	if key.Rune != 0 {
+		w.BrowserCommand += string(key.Rune)
+		return true
+	}
+	return false
+}
+
+func (w *Workspace) executeBrowserCommand(command string) error {
+	switch {
+	case strings.HasPrefix(command, "new "):
+		return w.CreateBrowserTarget(strings.TrimSpace(strings.TrimPrefix(command, "new ")))
+	case strings.HasPrefix(command, "rename "):
+		return w.RenameBrowserEntry(strings.TrimSpace(strings.TrimPrefix(command, "rename ")))
+	case command == "":
+		return nil
+	default:
+		return fmt.Errorf("unknown browser command: %s", command)
+	}
+}
+
 func (w *Workspace) CreateNote(title string) (string, error) {
 	folder := w.SelectedFolder
 	if entry := w.selectedEntry(); entry != nil {
-		folder = sidebarTargetFolder(entry.Kind, entry.Path, entry.Folder)
+		folder = sidebarTargetFolder(entry)
 	}
 	var path string
 	if strings.TrimSpace(title) == "" {
@@ -998,7 +1439,7 @@ func (w *Workspace) CreateNote(title string) (string, error) {
 func (w *Workspace) CreateFolder(name string) error {
 	parent := w.SelectedFolder
 	if entry := w.selectedEntry(); entry != nil {
-		parent = sidebarTargetFolder(entry.Kind, entry.Path, entry.Folder)
+		parent = sidebarTargetFolder(entry)
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -1012,6 +1453,88 @@ func (w *Workspace) CreateFolder(name string) error {
 	w.refreshTree()
 	w.refreshFiles()
 	return nil
+}
+
+func (w *Workspace) CreateBrowserTarget(raw string) error {
+	if w == nil {
+		return fmt.Errorf("no workspace")
+	}
+	target := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if target == "" {
+		return fmt.Errorf("new requires a note or folder name")
+	}
+	isFolder := strings.HasSuffix(target, "/")
+	rootRelative := strings.HasPrefix(target, "/")
+	target = strings.Trim(target, "/")
+	if target == "" {
+		return fmt.Errorf("new requires a note or folder name")
+	}
+
+	parent := ""
+	if !rootRelative {
+		parent = browserTargetFolder(w.selectedBrowserEntry())
+	}
+	parts := strings.Split(target, "/")
+	if isFolder {
+		folder := joinFolderParts(parent, strings.Join(parts, "/"))
+		if folder == "" {
+			return fmt.Errorf("new requires a folder name")
+		}
+		if err := os.MkdirAll(noteFolderPath(folder), 0o755); err != nil {
+			return err
+		}
+		w.SelectedFolder = folder
+		w.expandBrowserAncestors(folder)
+		w.refreshTree()
+		w.BrowserSelection = clampBrowserSelectionByFolder(w.BrowserTree, w.BrowserSelection, folder)
+		w.refreshFiles()
+		return nil
+	}
+
+	title := strings.TrimSuffix(parts[len(parts)-1], ".md")
+	folder := parent
+	if len(parts) > 1 {
+		folder = joinFolderParts(parent, strings.Join(parts[:len(parts)-1], "/"))
+	}
+	path := uniqueNotePathInFolder(folder, title, "")
+	if path == "" {
+		return fmt.Errorf("new requires a note name")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		return err
+	}
+	w.SelectedFolder = folder
+	w.expandBrowserAncestors(folder)
+	w.refreshTree()
+	w.refreshFiles()
+	if err := w.Open(path); err != nil {
+		return err
+	}
+	w.leaveSidebar()
+	w.ensureEditorVisible()
+	return nil
+}
+
+func (w *Workspace) expandBrowserAncestors(folder string) {
+	if w == nil || folder == "" {
+		return
+	}
+	folder = filepath.Clean(folder)
+	for i := range w.BrowserTree {
+		if w.BrowserTree[i].Kind != treeFolder {
+			continue
+		}
+		entryFolder := filepath.Clean(w.BrowserTree[i].Folder)
+		if entryFolder == "." || entryFolder == "" {
+			continue
+		}
+		if folder == entryFolder || strings.HasPrefix(folder, entryFolder+string(filepath.Separator)) {
+			w.BrowserTree[i].Collapsed = false
+		}
+	}
 }
 
 func (w *Workspace) DeleteSelection() error {
@@ -1031,57 +1554,196 @@ func (w *Workspace) DeleteSelection() error {
 	}
 	w.refreshTree()
 	w.refreshFiles()
-	if len(w.Tabs) == 0 {
-		path, err := w.CreateNote("")
-		if err == nil {
-			_ = w.Open(path)
-		}
-	}
 	return nil
 }
 
 func (w *Workspace) closeTabsInFolder(folder string) {
 	kept := w.Tabs[:0]
 	for _, tab := range w.Tabs {
-		if !strings.HasPrefix(relativeNoteFolder(tab.Path), folder) && relativeNoteFolder(tab.Path) != folder {
+		if !folderContainsNote(folder, relativeNoteFolder(tab.Path)) {
 			kept = append(kept, tab)
 		}
 	}
 	w.Tabs = kept
-	if w.CurrentTab >= len(w.Tabs) {
-		w.CurrentTab = len(w.Tabs) - 1
-	}
-	if w.CurrentTab < 0 && len(w.Tabs) > 0 {
-		w.CurrentTab = 0
-	}
-	if w.LastAccessedTab >= len(w.Tabs) || w.LastAccessedTab == w.CurrentTab {
-		w.LastAccessedTab = -1
-	}
+	w.normalizeTabSelectionAfterRemoval(-1)
+	w.refreshTree()
+	w.syncOpenSelectionToActive()
 	w.persistSession()
+}
+
+func folderContainsNote(folder string, noteFolder string) bool {
+	folder = filepath.Clean(folder)
+	noteFolder = filepath.Clean(noteFolder)
+	return noteFolder == folder || strings.HasPrefix(noteFolder, folder+string(filepath.Separator))
 }
 
 func (w *Workspace) closeTab(path string) {
-	kept := w.Tabs[:0]
-	for _, tab := range w.Tabs {
-		if tab.Path != path {
-			kept = append(kept, tab)
+	index := -1
+	for i, tab := range w.Tabs {
+		if tab != nil && tab.Path == path {
+			index = i
+			break
 		}
 	}
-	w.Tabs = kept
-	if w.CurrentTab >= len(w.Tabs) {
-		w.CurrentTab = len(w.Tabs) - 1
+	if index < 0 {
+		return
 	}
-	if w.LastAccessedTab >= len(w.Tabs) || w.LastAccessedTab == w.CurrentTab {
-		w.LastAccessedTab = -1
-	}
+	w.Tabs = append(w.Tabs[:index], w.Tabs[index+1:]...)
+	w.normalizeTabSelectionAfterRemoval(index)
+	w.refreshTree()
+	w.syncOpenSelectionToActive()
 	w.persistSession()
 }
 
+func (w *Workspace) CloseNoteByPath(path string) bool {
+	if w == nil || strings.TrimSpace(path) == "" {
+		return false
+	}
+	w.closeTab(path)
+	if ed := w.ActiveEditor(); ed != nil {
+		w.SelectedFolder = relativeNoteFolder(ed.Path)
+	}
+	w.refreshFiles()
+	return true
+}
+
+func (w *Workspace) normalizeTabSelectionAfterRemoval(removed int) {
+	if w == nil {
+		return
+	}
+	if len(w.Tabs) == 0 {
+		w.CurrentTab = -1
+		w.LastAccessedTab = -1
+		return
+	}
+	if removed >= 0 {
+		switch {
+		case removed < w.CurrentTab:
+			w.CurrentTab--
+		case removed == w.CurrentTab:
+			switch {
+			case w.LastAccessedTab >= 0 && w.LastAccessedTab < len(w.Tabs):
+				w.CurrentTab = w.LastAccessedTab
+			case removed >= len(w.Tabs):
+				w.CurrentTab = len(w.Tabs) - 1
+			default:
+				w.CurrentTab = removed
+			}
+		}
+	}
+	if w.CurrentTab < 0 || w.CurrentTab >= len(w.Tabs) {
+		w.CurrentTab = min(max(w.CurrentTab, 0), len(w.Tabs)-1)
+	}
+	switch {
+	case len(w.Tabs) <= 1:
+		w.LastAccessedTab = -1
+	case removed >= 0 && removed < w.LastAccessedTab:
+		w.LastAccessedTab--
+	case removed == w.LastAccessedTab || w.LastAccessedTab >= len(w.Tabs) || w.LastAccessedTab == w.CurrentTab:
+		w.LastAccessedTab = -1
+	}
+}
+
 func (w *Workspace) selectedEntry() *TreeEntry {
-	if w.Selection < 0 || w.Selection >= len(w.Tree) {
+	entries := w.activeSidebarEntries()
+	selection := w.activeSidebarSelection()
+	if selection < 0 || selection >= len(entries) {
+		return nil
+	}
+	return &entries[selection]
+}
+
+func (w *Workspace) selectedOpenEntry() *TreeEntry {
+	if w == nil || w.Selection < 0 || w.Selection >= len(w.Tree) {
 		return nil
 	}
 	return &w.Tree[w.Selection]
+}
+
+func (w *Workspace) selectedBrowserEntry() *TreeEntry {
+	if w == nil || w.BrowserSelection < 0 || w.BrowserSelection >= len(w.BrowserTree) {
+		return nil
+	}
+	return &w.BrowserTree[w.BrowserSelection]
+}
+
+func (w *Workspace) activeSidebarEntries() []TreeEntry {
+	if w != nil && w.SidebarBrowsing {
+		return w.BrowserTree
+	}
+	if w == nil {
+		return nil
+	}
+	return w.Tree
+}
+
+func (w *Workspace) activeSidebarSelection() int {
+	if w != nil && w.SidebarBrowsing {
+		return w.BrowserSelection
+	}
+	if w == nil {
+		return 0
+	}
+	return w.Selection
+}
+
+func (w *Workspace) syncOpenSelectionToActive() {
+	if w == nil {
+		return
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return
+	}
+	w.Selection = clampSidebarSelectionByPath(w.Tree, w.Selection, ed.Path)
+}
+
+func (w *Workspace) moveSidebarSelection(delta int) {
+	if w == nil {
+		return
+	}
+	entries := w.activeSidebarEntries()
+	if len(entries) == 0 {
+		return
+	}
+	if w.SidebarBrowsing {
+		w.BrowserSelection = max(0, min(len(entries)-1, w.BrowserSelection+delta))
+		return
+	}
+	w.Selection = max(0, min(len(entries)-1, w.Selection+delta))
+}
+
+func (w *Workspace) leaveSidebar() {
+	if w == nil {
+		return
+	}
+	w.FocusSidebar = false
+	w.SidebarBrowsing = false
+	w.BrowserCommandMode = false
+	w.BrowserCommand = ""
+}
+
+func (w *Workspace) toggleSidebarBrowser() {
+	if w == nil {
+		return
+	}
+	if w.SidebarBrowsing {
+		w.SidebarBrowsing = false
+		w.BrowserCommandMode = false
+		w.BrowserCommand = ""
+		return
+	}
+	w.SidebarBrowsing = true
+	targetPath := ""
+	if entry := w.selectedOpenEntry(); entry != nil {
+		targetPath = entry.Path
+	}
+	if targetPath == "" {
+		if ed := w.ActiveEditor(); ed != nil {
+			targetPath = ed.Path
+		}
+	}
+	w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, targetPath)
 }
 
 func (w *Workspace) handleEditorKey(key Key) bool {
@@ -2545,6 +3207,14 @@ func (w *Workspace) Render(width int, height int) string {
 		height = 4
 	}
 	w.LastHeight = height
+	if w.SidebarBrowsing {
+		rows := w.BrowserRows(width, height)
+		lines := make([]string, 0, height)
+		for i := 0; i < height; i++ {
+			lines = append(lines, helpers.PadANSI(lineAt(rows, i), width))
+		}
+		return strings.Join(lines, "\n")
+	}
 	sidebarWidth := normalizeSidebarWidth(w.SidebarWidth)
 	if !settings.Inst().NotesApp.SidebarVisible {
 		sidebarWidth = 0
@@ -2556,7 +3226,7 @@ func (w *Workspace) Render(width int, height int) string {
 		sidebarWidth = width / 3
 	}
 	contentWidth := width - sidebarWidth - 1
-	left := w.renderTree(height, sidebarWidth)
+	left := w.SidebarRows(height)
 	right := w.renderEditor(height, contentWidth)
 	lines := make([]string, 0, height)
 	for i := 0; i < height; i++ {
@@ -2575,12 +3245,18 @@ func (w *Workspace) HelpText() string {
 	if w == nil {
 		return ""
 	}
+	if w.SidebarBrowsing {
+		if w.BrowserCommandMode {
+			return "notes/browser command: enter run | esc cancel"
+		}
+		return "notes/browser: j k move | enter open/toggle/open file | n/f new | r rename | d delete note/folder | e close | esc close"
+	}
 	if w.FocusSidebar {
-		return "notes/sidebar: j k move | enter open/toggle | a last note | 1-9/0 note | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
+		return "notes/sidebar: j k move | enter focus note | e browser | x close open note | a last note | 1-9/0 note | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
 	}
 	ed := w.ActiveEditor()
 	if ed == nil {
-		return "notes: i insert | ctrl+a sidebar | ctrl+n new | ctrl+d delete | R rename | [/] tabs | ctrl+s save"
+		return "notes: no note open | ctrl+a sidebar | ctrl+n new | ctrl+s save"
 	}
 	if ed.Mode == ModeInsert {
 		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
@@ -2646,7 +3322,13 @@ func YankHighlightDuration() time.Duration {
 
 func (w *Workspace) SidebarRows(height int) []string {
 	width := normalizeSidebarWidth(w.SidebarWidth)
-	return w.renderTree(height, width)
+	w.SidebarRenderHeight = height
+	return w.renderOpenNotes(height, width)
+}
+
+func (w *Workspace) BrowserRows(width int, height int) []string {
+	w.SidebarRenderHeight = height
+	return w.renderBrowserTree(height, width)
 }
 
 func (w *Workspace) EditorRows(width int, height int) []string {
@@ -2674,9 +3356,15 @@ func (w *Workspace) StatusText(width int) string {
 }
 
 func (w *Workspace) CommandLineText(width int) string {
+	if w != nil && w.BrowserCommandMode {
+		return helpers.TruncateANSI(w.BrowserCommand, width)
+	}
+	if w != nil && (w.FocusSidebar || w.SidebarBrowsing) {
+		return helpers.TruncateANSI(w.HelpText(), width)
+	}
 	ed := w.ActiveEditor()
 	if ed == nil {
-		return helpers.TruncateANSI(":w save | / search", width)
+		return helpers.TruncateANSI("no note open | ctrl+n new | ctrl+a sidebar", width)
 	}
 	if ed.Mode == ModeCommand {
 		return helpers.TruncateANSI(ed.Command, width)
@@ -2727,7 +3415,7 @@ func (w *Workspace) CursorPosition(totalWidth int) (int, int, bool) {
 		return 0, 0, false
 	}
 	if settings.Inst().NotesApp.SidebarVisible && w.FocusSidebar {
-		row := 3 + w.Selection
+		row := 3 + w.sidebarVisibleSelectionRow()
 		col := 2
 		return row, col, true
 	}
@@ -2750,10 +3438,10 @@ func (w *Workspace) CursorPosition(totalWidth int) (int, int, bool) {
 }
 
 func (w *Workspace) SidebarCursor() (int, int, bool) {
-	if w == nil || !w.FocusSidebar || len(w.Tree) == 0 {
+	if w == nil || !w.FocusSidebar || len(w.activeSidebarEntries()) == 0 {
 		return 0, 0, false
 	}
-	row := w.Selection + 1
+	row := w.sidebarVisibleSelectionRow() + 1
 	if row < 0 {
 		row = 0
 	}
@@ -2782,6 +3470,9 @@ func (w *Workspace) EditorCursor() (int, int, bool) {
 func (w *Workspace) CommandCursor() (int, bool) {
 	if w == nil {
 		return 0, false
+	}
+	if w.BrowserCommandMode {
+		return len([]rune(w.BrowserCommand)), true
 	}
 	ed := w.ActiveEditor()
 	if ed == nil || ed.Mode != ModeCommand {
@@ -2815,19 +3506,46 @@ func (w *Workspace) statusLine(width int) string {
 	return helpers.TruncateANSI(status, width)
 }
 
-func (w *Workspace) renderTree(height int, width int) []string {
+func (w *Workspace) renderOpenNotes(height int, width int) []string {
 	lines := []string{helpers.TruncateANSI(helpers.ANSI(helpers.ANSIBold, "Notes"), width)}
-	for i, entry := range w.Tree {
+	start, end := w.sidebarVisibleRange(max(0, height-1))
+	for i := start; i < end; i++ {
+		entry := w.Tree[i]
 		marker := " "
 		if i == w.Selection {
 			marker = helpers.ANSI(helpers.ANSIReverse, ">")
 		}
+		label := "o " + entry.Label
+		lines = append(lines, helpers.TruncateANSI(marker+" "+label, width))
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return lines[:height]
+}
+
+func (w *Workspace) renderBrowserTree(height int, width int) []string {
+	lines := []string{helpers.TruncateANSI(helpers.ANSI(helpers.ANSIBold, "Notes Browser"), width)}
+	start, end := w.sidebarVisibleRange(max(0, height-1))
+	for i := start; i < end; i++ {
+		entry := w.BrowserTree[i]
+		marker := " "
+		if i == w.BrowserSelection {
+			marker = helpers.ANSI(helpers.ANSIReverse, ">")
+		}
 		icon := "*"
-		if entry.Kind == treeFolder {
+		switch entry.Kind {
+		case treeFolder, treeManagedFolder:
 			if entry.Collapsed {
 				icon = "+"
 			} else {
 				icon = "-"
+			}
+		case treeManagedAsset:
+			if entry.Image {
+				icon = "img"
+			} else {
+				icon = "file"
 			}
 		}
 		label := strings.Repeat("  ", entry.Depth) + icon + " " + entry.Label
@@ -2839,10 +3557,50 @@ func (w *Workspace) renderTree(height int, width int) []string {
 	return lines[:height]
 }
 
+func (w *Workspace) sidebarVisibleSelectionRow() int {
+	if w == nil || len(w.activeSidebarEntries()) == 0 {
+		return 0
+	}
+	visibleRows := max(0, w.SidebarRenderHeight-1)
+	if visibleRows == 0 {
+		visibleRows = len(w.activeSidebarEntries())
+	}
+	start, _ := w.sidebarVisibleRange(visibleRows)
+	row := w.activeSidebarSelection() - start
+	if row < 0 {
+		return 0
+	}
+	return row
+}
+
+func (w *Workspace) sidebarVisibleRange(visibleRows int) (int, int) {
+	entries := w.activeSidebarEntries()
+	if w == nil || len(entries) == 0 || visibleRows <= 0 {
+		return 0, 0
+	}
+	if visibleRows >= len(entries) {
+		return 0, len(entries)
+	}
+	start := w.activeSidebarSelection() - (visibleRows - 1)
+	if start < 0 {
+		start = 0
+	}
+	end := start + visibleRows
+	if end > len(entries) {
+		end = len(entries)
+		start = max(0, end-visibleRows)
+	}
+	return start, end
+}
+
 func (w *Workspace) renderEditor(height int, width int) []string {
 	ed := w.ActiveEditor()
 	if ed == nil {
-		return fillLines(height, "No note open")
+		lines := []string{helpers.TruncateANSI(renderTabs(w), width)}
+		for _, line := range fillLines(max(0, height-1), "No note open") {
+			lines = append(lines, helpers.PadANSI(line, width))
+		}
+		return lines
 	}
 	if w.PreviewHidden {
 		tabsLine := helpers.TruncateANSI(renderTabs(w), width)
@@ -2866,6 +3624,9 @@ func (w *Workspace) renderEditor(height int, width int) []string {
 }
 
 func renderTabs(w *Workspace) string {
+	if w == nil || len(w.Tabs) == 0 {
+		return "No open notes"
+	}
 	parts := make([]string, 0, len(w.Tabs))
 	for i, tab := range w.Tabs {
 		label := noteTabLabel(i, tab)
@@ -3380,7 +4141,7 @@ func (w *Workspace) MoveEditorCursorToVisualPosition(row int, col int) bool {
 	if ed == nil {
 		return false
 	}
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	clearVisualSelection(ed)
 	ed.Cursor = vimClampOffset(ed.Text, offset)
 	w.ensureEditorVisible()
@@ -3397,7 +4158,7 @@ func (w *Workspace) MoveEditorCursorByVisualRows(delta int) bool {
 	}
 	currentRow, currentCol := editorVisualCursor(ed, w.editorRenderWidth())
 	offset := editorOffsetAtAbsoluteVisualPosition(ed.Text, w.editorRenderWidth(), currentRow+delta, currentCol)
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	clearVisualSelection(ed)
 	ed.Cursor = vimClampOffset(ed.Text, offset)
 	w.ensureEditorVisible()
@@ -3427,7 +4188,7 @@ func (w *Workspace) DragMouseSelection(row int, col int) bool {
 	if ed == nil {
 		return false
 	}
-	w.FocusSidebar = false
+	w.leaveSidebar()
 	ed.Cursor = vimClampOffset(ed.Text, offset)
 	ed.SelectionCursor = ed.Cursor
 	ed.SelectionMode = vimSelectionChar
@@ -3437,18 +4198,23 @@ func (w *Workspace) DragMouseSelection(row int, col int) bool {
 }
 
 func (w *Workspace) SelectSidebarRow(row int, open bool) bool {
-	if w == nil || len(w.Tree) == 0 {
+	entries := w.activeSidebarEntries()
+	if w == nil || len(entries) == 0 {
 		return false
 	}
 	idx := row - 1
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(w.Tree) {
-		idx = len(w.Tree) - 1
+	if idx >= len(entries) {
+		idx = len(entries) - 1
 	}
 	w.FocusSidebar = true
-	w.Selection = idx
+	if w.SidebarBrowsing {
+		w.BrowserSelection = idx
+	} else {
+		w.Selection = idx
+	}
 	if open {
 		return w.handleSidebarKey(Key{Name: "enter"})
 	}
@@ -4152,11 +4918,32 @@ func sanitizeFolderPath(folder string) string {
 	return filepath.Join(cleaned...)
 }
 
-func sidebarTargetFolder(kind treeEntryKind, rowPath string, folder string) string {
-	if kind == treeFolder {
-		return folder
+func sidebarTargetFolder(entry *TreeEntry) string {
+	if entry == nil {
+		return ""
 	}
-	return relativeNoteFolder(rowPath)
+	switch entry.Kind {
+	case treeFolder:
+		return entry.Folder
+	case treeNote, treeOpenNote:
+		return relativeNoteFolder(entry.Path)
+	default:
+		return ""
+	}
+}
+
+func browserTargetFolder(entry *TreeEntry) string {
+	if entry == nil {
+		return ""
+	}
+	switch entry.Kind {
+	case treeFolder:
+		return entry.Folder
+	case treeNote, treeOpenNote:
+		return relativeNoteFolder(entry.Path)
+	default:
+		return ""
+	}
 }
 
 func joinFolderParts(parts ...string) string {
