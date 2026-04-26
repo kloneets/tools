@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -28,6 +29,61 @@ func TestTokenFromFileRoundTrip(t *testing.T) {
 	}
 	if got.AccessToken != tok.AccessToken || got.RefreshToken != tok.RefreshToken || got.TokenType != tok.TokenType {
 		t.Fatalf("token mismatch: got %#v want %#v", got, tok)
+	}
+}
+
+func TestCustomSpellWordsPathUsesAppConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, ".config", "koko-tools", "spell", "custom.txt")
+	if got := customSpellWordsPath(); got != want {
+		t.Fatalf("customSpellWordsPath() = %q, want %q", got, want)
+	}
+}
+
+func TestShouldApplyRemoteFileWhenLocalMissing(t *testing.T) {
+	got, err := shouldApplyRemoteFile(filepath.Join(t.TempDir(), "missing.txt"), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("shouldApplyRemoteFile() error = %v", err)
+	}
+	if !got {
+		t.Fatal("shouldApplyRemoteFile() = false, want true for missing local file")
+	}
+}
+
+func TestShouldApplyRemoteFileWhenRemoteIsNewer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom.txt")
+	if err := os.WriteFile(path, []byte("local"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	localTime := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, localTime, localTime); err != nil {
+		t.Fatalf("Chtimes() error = %v", err)
+	}
+	got, err := shouldApplyRemoteFile(path, time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC).Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("shouldApplyRemoteFile() error = %v", err)
+	}
+	if !got {
+		t.Fatal("shouldApplyRemoteFile() = false, want true when remote is newer")
+	}
+}
+
+func TestShouldApplyRemoteFileWhenLocalIsNewer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom.txt")
+	if err := os.WriteFile(path, []byte("local"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	localTime := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, localTime, localTime); err != nil {
+		t.Fatalf("Chtimes() error = %v", err)
+	}
+	got, err := shouldApplyRemoteFile(path, time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC).Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("shouldApplyRemoteFile() error = %v", err)
+	}
+	if got {
+		t.Fatal("shouldApplyRemoteFile() = true, want false when local is newer")
 	}
 }
 

@@ -58,6 +58,12 @@ type remoteStateEntry struct {
 	Checksum     string
 }
 
+type remoteFileData struct {
+	ID           string
+	ModifiedTime string
+	Data         []byte
+}
+
 type SnapshotMeta struct {
 	ID        string
 	Name      string
@@ -413,6 +419,9 @@ func UploadAppSnapshot(folderID string, settingsData []byte, retain int) (Snapsh
 	if err := syncNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes")); err != nil {
 		return SnapshotMeta{}, err
 	}
+	if err := syncSnapshotSpellData(service, created.Id); err != nil {
+		return SnapshotMeta{}, err
+	}
 	if retain > 0 {
 		if err := pruneOldSnapshots(service, snapshotsRootID, retain); err != nil {
 			return SnapshotMeta{}, err
@@ -482,7 +491,77 @@ func RestoreAppSnapshot(snapshotID string) ([]byte, error) {
 	if err := restoreNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes")); err != nil {
 		return nil, err
 	}
+	if err := restoreSnapshotSpellData(service, snapshotID); err != nil {
+		return nil, err
+	}
 	return settingsData, nil
+}
+
+func syncSnapshotSpellData(service *drive.Service, snapshotID string) error {
+	localPath := customSpellWordsPath()
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read custom spell dictionary: %w", err)
+	}
+	spellFolderID, err := ensureFolder(service, snapshotID, "spell")
+	if err != nil {
+		return err
+	}
+	return syncBytes(service, spellFolderID, "custom.txt", data, "text/plain; charset=utf-8")
+}
+
+func restoreSnapshotSpellData(service *drive.Service, snapshotID string) error {
+	spellFolderID, found, err := findFolder(service, snapshotID, "spell")
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	remote, found, err := downloadDriveFileData(service, spellFolderID, "custom.txt")
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	localPath := customSpellWordsPath()
+	applyRemote, err := shouldApplyRemoteFile(localPath, remote.ModifiedTime)
+	if err != nil {
+		return err
+	}
+	if !applyRemote {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return fmt.Errorf("create spell directory: %w", err)
+	}
+	if err := os.WriteFile(localPath, remote.Data, 0o644); err != nil {
+		return fmt.Errorf("write custom spell dictionary: %w", err)
+	}
+	return nil
+}
+
+func shouldApplyRemoteFile(localPath string, remoteModifiedTime string) (bool, error) {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("stat local file: %w", err)
+	}
+	remoteTime, err := time.Parse(time.RFC3339, remoteModifiedTime)
+	if err != nil {
+		return true, nil
+	}
+	return !info.ModTime().After(remoteTime), nil
+}
+
+func customSpellWordsPath() string {
+	return filepath.Join(appConfigDir(), "spell", "custom.txt")
 }
 
 func SyncFile(folderID string, localPath string) error {
@@ -953,6 +1032,14 @@ func remoteNotesStateEntries(service *drive.Service, folderID string, relPath st
 }
 
 func downloadDriveFile(service *drive.Service, folderID string, name string) ([]byte, bool, error) {
+	file, found, err := downloadDriveFileData(service, folderID, name)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	return file.Data, true, nil
+}
+
+func downloadDriveFileData(service *drive.Service, folderID string, name string) (*remoteFileData, bool, error) {
 	query := fmt.Sprintf(
 		"name='%s' and '%s' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'",
 		escapeQueryValue(name),
@@ -960,7 +1047,7 @@ func downloadDriveFile(service *drive.Service, folderID string, name string) ([]
 	)
 	list, err := service.Files.List().
 		Q(query).
-		Fields("files(id,name)").
+		Fields("files(id,name,modifiedTime)").
 		PageSize(1).
 		Do()
 	if err != nil {
@@ -974,7 +1061,11 @@ func downloadDriveFile(service *drive.Service, folderID string, name string) ([]
 	if err != nil {
 		return nil, false, err
 	}
-	return data, true, nil
+	return &remoteFileData{
+		ID:           list.Files[0].Id,
+		ModifiedTime: list.Files[0].ModifiedTime,
+		Data:         data,
+	}, true, nil
 }
 
 func downloadDriveFileByID(service *drive.Service, fileID string) ([]byte, error) {
