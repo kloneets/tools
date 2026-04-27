@@ -1607,6 +1607,14 @@ func (w *Workspace) CloseNoteByPath(path string) bool {
 	return true
 }
 
+func (w *Workspace) CloseCurrentNote() bool {
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return false
+	}
+	return w.CloseNoteByPath(ed.Path)
+}
+
 func (w *Workspace) normalizeTabSelectionAfterRemoval(removed int) {
 	if w == nil {
 		return
@@ -3170,6 +3178,14 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 	case vimCommandRecordKeys:
 		w.pendingRecordKeys = true
 		ed.Status = "key recording requested"
+	case vimCommandBufferDelete:
+		if w.CloseCurrentNote() {
+			if active := w.ActiveEditor(); active != nil {
+				active.Status = "buffer closed"
+			}
+		} else {
+			ed.Status = "no buffer to close"
+		}
 	}
 }
 
@@ -3262,7 +3278,7 @@ func (w *Workspace) HelpText() string {
 		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | :bd close note | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
 		return "notes/visual: h j k l move | V line | >/< indent | y yank | d/x delete | esc normal"
@@ -3629,7 +3645,7 @@ func renderTabs(w *Workspace) string {
 	}
 	parts := make([]string, 0, len(w.Tabs))
 	for i, tab := range w.Tabs {
-		label := noteTabLabel(i, tab)
+		label := noteTabDisplayLabel(i, tab)
 		if i == w.CurrentTab {
 			label = helpers.ANSI(helpers.ANSIRoleActiveTab, "["+label+"]")
 		} else {
@@ -3646,7 +3662,7 @@ func (w *Workspace) tabIndexAtColumn(col int) (int, bool) {
 	}
 	pos := 0
 	for i, tab := range w.Tabs {
-		label := "[" + noteTabLabel(i, tab) + "]"
+		label := "[" + noteTabDisplayLabel(i, tab) + "]"
 		next := pos + len([]rune(label))
 		if col >= pos && col < next {
 			return i, true
@@ -3660,6 +3676,38 @@ func (w *Workspace) tabIndexAtColumn(col int) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func (w *Workspace) CloseTabAtColumn(col int) bool {
+	index, ok := w.tabCloseIndexAtColumn(col)
+	if !ok || index < 0 || index >= len(w.Tabs) || w.Tabs[index] == nil {
+		return false
+	}
+	return w.CloseNoteByPath(w.Tabs[index].Path)
+}
+
+func (w *Workspace) tabCloseIndexAtColumn(col int) (int, bool) {
+	if w == nil || col < 0 {
+		return 0, false
+	}
+	pos := 0
+	for i, tab := range w.Tabs {
+		labelWidth := len([]rune(noteTabLabel(i, tab)))
+		closeCol := pos + labelWidth + 2
+		next := pos + labelWidth + 4
+		if col == closeCol {
+			return i, true
+		}
+		pos = next
+		if i < len(w.Tabs)-1 {
+			pos++
+		}
+	}
+	return 0, false
+}
+
+func noteTabDisplayLabel(index int, tab *Editor) string {
+	return noteTabLabel(index, tab) + " x"
 }
 
 func noteTabLabel(index int, tab *Editor) string {

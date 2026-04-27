@@ -88,7 +88,7 @@ func TestRefreshNotesBodyKeepsActiveNoteTabHighlight(t *testing.T) {
 	app.initWidgets()
 	app.refreshNotesBody()
 	got := app.editor.GetText(false)
-	if !strings.Contains(got, themeMarkupPair(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG)+"[2:Two[]") {
+	if !strings.Contains(got, themeMarkupPair(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG)+"[2:Two x[]") {
 		t.Fatalf("editor text = %q, want highlighted current note tab", got)
 	}
 }
@@ -661,6 +661,7 @@ func TestAppTabAtColumnUsesRenderedTabTargets(t *testing.T) {
 
 func TestCaptureMouseSwitchesNoteTabOnEditorTabRow(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
 	settings.Init()
 	ws := &notes.Workspace{
 		Tabs: []*notes.Editor{
@@ -676,13 +677,41 @@ func TestCaptureMouseSwitchesNoteTabOnEditorTabRow(t *testing.T) {
 		notes:  ws,
 		editor: editor,
 	}
-	event := tcell.NewEventMouse(len("[1:Plan] "), 0, tcell.Button1, 0)
+	event := tcell.NewEventMouse(len("[1:Plan x] "), 0, tcell.Button1, 0)
 	returned, _ := app.captureMouse(event, tview.MouseLeftClick)
 	if returned != nil {
 		t.Fatal("captureMouse() returned event, want consumed note-tab click")
 	}
 	if ws.CurrentTab != 1 {
 		t.Fatalf("CurrentTab = %d, want 1", ws.CurrentTab)
+	}
+}
+
+func TestCaptureMouseClosesNoteTabOnCloseX(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{
+			{Path: "/tmp/plan.md", Title: "Plan", Mode: notes.ModeNormal},
+			{Path: "/tmp/log.md", Title: "Log", Mode: notes.ModeNormal},
+		},
+		CurrentTab: 0,
+	}
+	editor := tview.NewTextView()
+	editor.SetRect(0, 0, 80, 10)
+	app := &terminalApp{
+		view:   viewNotes,
+		notes:  ws,
+		editor: editor,
+	}
+	event := tcell.NewEventMouse(len("[1:Plan "), 0, tcell.Button1, 0)
+	returned, _ := app.captureMouse(event, tview.MouseLeftClick)
+	if returned != nil {
+		t.Fatal("captureMouse() returned event, want consumed close click")
+	}
+	if len(ws.Tabs) != 1 || ws.Tabs[0].Title != "Log" {
+		t.Fatalf("tabs = %#v, want Plan tab closed", ws.Tabs)
 	}
 }
 

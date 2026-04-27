@@ -656,6 +656,14 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	row := y - ey - 1
 	col := x - ex
 	if row == -1 {
+		if action == tview.MouseLeftClick {
+			if a.notes.CloseTabAtColumn(col) {
+				a.notesMouseDragging = false
+				a.notesMouseMoved = false
+				a.refresh()
+				return nil, action
+			}
+		}
 		if action == tview.MouseLeftClick || action == tview.MouseLeftDown {
 			if a.notes.SwitchToTabAtColumn(col) {
 				a.notesMouseDragging = false
@@ -2822,6 +2830,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	})...)
 	lines = append(lines, renderSection("Notes command:", []helpEntry{
 		{keys: ":w", desc: "save current local state"},
+		{keys: "bd", desc: "close current note tab without deleting its file"},
 		{keys: "undo", desc: "undo last text change"},
 		{keys: "redo", desc: "redo last undone text change"},
 		{keys: "preview", desc: "toggle preview pane"},

@@ -2094,15 +2094,17 @@ func TestRenderTabsIncludesNoteShortcutIndicators(t *testing.T) {
 		CurrentTab: 1,
 	}
 	got := helpers.StripANSI(renderTabs(w))
-	if !strings.Contains(got, "[1:Plan]") {
+	if !strings.Contains(got, "[1:Plan x]") {
 		t.Fatalf("renderTabs() = %q, want first note shortcut indicator", got)
 	}
-	if !strings.Contains(got, "[2:Log]") {
+	if !strings.Contains(got, "[2:Log x]") {
 		t.Fatalf("renderTabs() = %q, want second note shortcut indicator", got)
 	}
 }
 
 func TestSwitchToTabAtColumnSwitchesClickedNoteAndFocusesEditor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
 	w := &Workspace{
 		Tabs: []*Editor{
 			{Title: "Plan"},
@@ -2111,7 +2113,7 @@ func TestSwitchToTabAtColumnSwitchesClickedNoteAndFocusesEditor(t *testing.T) {
 		CurrentTab:   0,
 		FocusSidebar: true,
 	}
-	if !w.SwitchToTabAtColumn(len("[1:Plan] ")) {
+	if !w.SwitchToTabAtColumn(len("[1:Plan x] ")) {
 		t.Fatal("SwitchToTabAtColumn(second tab start) = false, want true")
 	}
 	if w.CurrentTab != 1 {
@@ -2120,8 +2122,26 @@ func TestSwitchToTabAtColumnSwitchesClickedNoteAndFocusesEditor(t *testing.T) {
 	if w.FocusSidebar {
 		t.Fatal("FocusSidebar = true, want editor focused")
 	}
-	if w.SwitchToTabAtColumn(len("[1:Plan]")) {
+	if w.SwitchToTabAtColumn(len("[1:Plan x]")) {
 		t.Fatal("SwitchToTabAtColumn(separator) = true, want false")
+	}
+}
+
+func TestCloseTabAtColumnClosesClickedNote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Path: "/tmp/plan.md", Title: "Plan"},
+			{Path: "/tmp/log.md", Title: "Log"},
+		},
+		CurrentTab: 0,
+	}
+	if !w.CloseTabAtColumn(len("[1:Plan ")) {
+		t.Fatal("CloseTabAtColumn(first close x) = false, want true")
+	}
+	if len(w.Tabs) != 1 || w.Tabs[0].Title != "Log" {
+		t.Fatalf("tabs = %#v, want only Log tab", w.Tabs)
 	}
 }
 
@@ -2344,6 +2364,22 @@ func TestExecuteVimCommandQuitQueuesPendingQuit(t *testing.T) {
 	}
 	if quit, _ := w.TakePendingQuit(); quit {
 		t.Fatal("TakePendingQuit() should clear request")
+	}
+}
+
+func TestExecuteVimCommandBufferDeleteClosesActiveNote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Path: "/tmp/plan.md", Title: "Plan", Text: "plan"},
+			{Path: "/tmp/log.md", Title: "Log", Text: "log"},
+		},
+		CurrentTab: 0,
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandBufferDelete})
+	if len(w.Tabs) != 1 || w.Tabs[0].Title != "Log" {
+		t.Fatalf("tabs = %#v, want active Plan buffer closed", w.Tabs)
 	}
 }
 

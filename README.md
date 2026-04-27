@@ -113,6 +113,7 @@ The Notes view is the main Markdown workspace. It supports:
 - Quick highlight feedback after yanking words, lines, or visual selections. Word yanks highlight and copy only the word itself, without trailing spaces or punctuation.
 - Optional spell checking with installable Hunspell dictionaries, underline markers for misspellings, and one shared custom word file.
 - Multiple open note tabs.
+- Mouse close buttons on note tabs.
 - Sidebar folder and note navigation.
 - Note rename, create, delete, save, and restore of open note session.
 - Managed file assets for notes.
@@ -140,6 +141,7 @@ Useful command-mode commands:
 - `:w`: save all local state.
 - `:q`: quit through the normal shutdown flow.
 - `:wq`: save all local state and close the app.
+- `:bd`: close the active note tab without deleting its file.
 - `:addword` or `:spelladd`: add the word under the cursor to the shared custom spell dictionary.
 - `:ol`: collect external links from the current note and show a confirmation prompt before opening them.
 - `:preview`: toggle the preview pane.

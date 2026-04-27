@@ -98,6 +98,16 @@ func TestParseVimCommandSpell(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandBufferDelete(t *testing.T) {
+	cmd, err := parseVimCommand("bd")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandBufferDelete {
+		t.Fatalf("kind = %q, want %q", cmd.Kind, vimCommandBufferDelete)
+	}
+}
+
 func TestParseVimCommandUndoRedo(t *testing.T) {
 	cmd, err := parseVimCommand("undo")
 	if err != nil {
