@@ -579,6 +579,44 @@ func TestApplyANSIMarkdownPrefersInlineCodeInsideListSpan(t *testing.T) {
 	}
 }
 
+func TestEditorRenderSpansHighlightOnlyMarkdownListMarkers(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		tag       string
+		wantStart int
+		wantEnd   int
+	}{
+		{name: "dash bullet", text: "- item", tag: tagList, wantStart: 0, wantEnd: 1},
+		{name: "star bullet", text: "* item", tag: tagList, wantStart: 0, wantEnd: 1},
+		{name: "plus bullet", text: "+ item", tag: tagList, wantStart: 0, wantEnd: 1},
+		{name: "ordered", text: "23. item", tag: tagOrdered, wantStart: 0, wantEnd: 3},
+		{name: "unchecked checklist", text: "- [ ] item", tag: tagChecklist, wantStart: 0, wantEnd: 5},
+		{name: "checked checklist", text: "- [x] item", tag: tagChecklist, wantStart: 0, wantEnd: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spans := editorRenderSpans(tt.text, 4)
+			assertHasSpan(t, spans, tt.tag, tt.wantStart, tt.wantEnd)
+			for _, span := range spans {
+				if span.Tag == tt.tag && span.Start == tt.wantStart && span.End > tt.wantEnd {
+					t.Fatalf("editorRenderSpans(%q) span = %#v, want marker-only end %d", tt.text, span, tt.wantEnd)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyANSIMarkdownStylesOnlyListMarkerBodyNormally(t *testing.T) {
+	line := "- item"
+	got := applyANSIMarkdown(line, []markdownSpan{{Tag: tagList, Start: 0, End: 1}})
+	wantPrefix := helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleListMarker, "-") + " item"
+	if got != wantPrefix {
+		t.Fatalf("applyANSIMarkdown() = %q, want marker-only styling %q", got, wantPrefix)
+	}
+}
+
 func TestCursorPositionForEditorFocus(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -2102,6 +2140,27 @@ func TestRenderTabsIncludesNoteShortcutIndicators(t *testing.T) {
 	}
 }
 
+func TestRenderTabsStylesOnlyActiveCloseControlWithCloseRole(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{
+			{Title: "Plan"},
+			{Title: "Log"},
+		},
+		CurrentTab: 1,
+	}
+	got := renderTabs(w)
+	if strings.Count(got, helpers.ANSIRoleActiveTabClose) != 1 {
+		t.Fatalf("renderTabs() = %q, want one active close role", got)
+	}
+	if !strings.Contains(got, helpers.ANSIRoleActiveTabClose+"x") {
+		t.Fatalf("renderTabs() = %q, want active close x styled", got)
+	}
+	inactive := strings.Split(got, " ")[0]
+	if strings.Contains(inactive, helpers.ANSIRoleActiveTabClose) {
+		t.Fatalf("inactive tab = %q, want unchanged close styling", inactive)
+	}
+}
+
 func TestSwitchToTabAtColumnSwitchesClickedNoteAndFocusesEditor(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -2928,6 +2987,72 @@ func TestExecuteVimCommandUndoRedo(t *testing.T) {
 	executeVimCommand(w, ed, vimCommand{Kind: vimCommandRedo})
 	if got := ed.Text; got != "hello!" {
 		t.Fatalf("redo text = %q, want %q", got, "hello!")
+	}
+}
+
+func TestInsertUndoTypingInsideUnfinishedWordStepsByLetter(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Mode: ModeInsert}
+	insertRune(ed, 'a')
+	insertRune(ed, 'b')
+	insertRune(ed, 'c')
+
+	if !applyUndo(ed) {
+		t.Fatal("applyUndo() = false, want undo")
+	}
+	if got := ed.Text; got != "ab" {
+		t.Fatalf("undo text = %q, want %q", got, "ab")
+	}
+}
+
+func TestInsertUndoCompletedWordsStepByWordBoundary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Mode: ModeInsert}
+	for _, r := range "alpha " {
+		insertRune(ed, r)
+	}
+
+	if !applyUndo(ed) {
+		t.Fatal("applyUndo() = false, want undo")
+	}
+	if got := ed.Text; got != "" {
+		t.Fatalf("undo text = %q, want completed word removed", got)
+	}
+}
+
+func TestInsertUndoCompletedSentenceStepsBySentenceBoundary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Mode: ModeInsert}
+	for _, r := range "Hello world. " {
+		insertRune(ed, r)
+	}
+
+	if !applyUndo(ed) {
+		t.Fatal("applyUndo() = false, want undo")
+	}
+	if got := ed.Text; got != "" {
+		t.Fatalf("undo text = %q, want completed sentence removed", got)
+	}
+}
+
+func TestInsertUndoParagraphBreakCreatesBoundary(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Text: "one\n", Cursor: len([]rune("one\n")), Mode: ModeInsert}
+	if !insertNewline(ed) {
+		t.Fatal("insertNewline() = false, want true")
+	}
+	if got := ed.Text; got != "one\n\n" {
+		t.Fatalf("text = %q, want blank line paragraph break", got)
+	}
+	if !applyUndo(ed) {
+		t.Fatal("applyUndo() = false, want undo")
+	}
+	if got := ed.Text; got != "one\n" {
+		t.Fatalf("undo text = %q, want paragraph break removed", got)
 	}
 }
 

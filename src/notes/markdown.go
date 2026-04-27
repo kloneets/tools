@@ -173,12 +173,13 @@ func markdownRenderFromText(text string) markdownRender {
 			spans = append(spans, markdownSpan{Tag: tagHeading6, Start: offset + indent, End: lineEnd})
 		case isHorizontalRule(trimmed):
 			spans = append(spans, markdownSpan{Tag: tagHorizontalRule, Start: offset + indent, End: lineEnd})
-		case strings.HasPrefix(trimmed, "- [ ] "), strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
-			spans = append(spans, markdownSpan{Tag: tagChecklist, Start: offset + indent, End: lineEnd})
-		case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
-			spans = append(spans, markdownSpan{Tag: tagList, Start: offset + indent, End: lineEnd})
+		case checklistMarkerLength(trimmed) > 0:
+			markerLen := checklistMarkerLength(trimmed)
+			spans = append(spans, markdownSpan{Tag: tagChecklist, Start: offset + indent, End: offset + indent + markerLen})
+		case unorderedListMarkerLength(trimmed) > 0:
+			spans = append(spans, markdownSpan{Tag: tagList, Start: offset + indent, End: offset + indent + 1})
 		case orderedListPrefixLength(trimmed) > 0:
-			spans = append(spans, markdownSpan{Tag: tagOrdered, Start: offset + indent, End: lineEnd})
+			spans = append(spans, markdownSpan{Tag: tagOrdered, Start: offset + indent, End: offset + indent + orderedListMarkerLength(trimmed)})
 		case strings.HasPrefix(trimmed, "> "):
 			spans = append(spans, markdownSpan{Tag: tagQuote, Start: offset + indent, End: lineEnd})
 		}
@@ -222,7 +223,7 @@ func renderMarkdownLine(line string, offset int) (string, []markdownSpan, []mark
 	case strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
 		line = prefixText + "☑ " + trimmed[6:]
 		lineTag = tagChecklist
-	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
+	case unorderedListMarkerLength(trimmed) > 0:
 		line = prefixText + "• " + trimmed[2:]
 		lineTag = tagList
 	case orderedListPrefixLength(trimmed) > 0:
@@ -610,6 +611,31 @@ func orderedListPrefixLength(line string) int {
 	return i + 2
 }
 
+func orderedListMarkerLength(line string) int {
+	prefixLen := orderedListPrefixLength(line)
+	if prefixLen == 0 {
+		return 0
+	}
+	return prefixLen - 1
+}
+
+func unorderedListMarkerLength(line string) int {
+	if len(line) >= 2 && (line[0] == '-' || line[0] == '*' || line[0] == '+') && line[1] == ' ' {
+		return 1
+	}
+	return 0
+}
+
+func checklistMarkerLength(line string) int {
+	if len(line) >= 6 && line[0] == '-' && line[1] == ' ' && line[2] == '[' && line[4] == ']' && line[5] == ' ' {
+		switch line[3] {
+		case ' ', 'x', 'X':
+			return 5
+		}
+	}
+	return 0
+}
+
 func applyWrap(text string, start, end int, prefix, suffix, placeholder string) (string, int, int) {
 	if start != end {
 		replacement := prefix + text[start:end] + suffix
@@ -725,7 +751,7 @@ func stripListPrefix(line string) string {
 		return trimmed[6:]
 	case strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
 		return trimmed[6:]
-	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), strings.HasPrefix(trimmed, "> "):
+	case unorderedListMarkerLength(trimmed) > 0, strings.HasPrefix(trimmed, "> "):
 		return trimmed[2:]
 	case orderedListPrefixLength(trimmed) > 0:
 		return trimmed[orderedListPrefixLength(trimmed):]

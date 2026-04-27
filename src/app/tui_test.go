@@ -88,8 +88,13 @@ func TestRefreshNotesBodyKeepsActiveNoteTabHighlight(t *testing.T) {
 	app.initWidgets()
 	app.refreshNotesBody()
 	got := app.editor.GetText(false)
-	if !strings.Contains(got, themeMarkupPair(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG)+"[2:Two x[]") {
+	activeTabStyle := themeMarkupPair(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG)
+	activeCloseStyle := themeMarkupPair(currentTheme().ErrorAccent, currentTheme().ActiveTabBG)
+	if !strings.Contains(got, activeTabStyle+"[2:Two "+activeCloseStyle+"x"+activeTabStyle+"]") {
 		t.Fatalf("editor text = %q, want highlighted current note tab", got)
+	}
+	if strings.Contains(got, activeCloseStyle+"x"+activeTabStyle+"[]") {
+		t.Fatalf("editor text = %q, want active close followed by literal closing bracket", got)
 	}
 }
 
@@ -752,6 +757,14 @@ func TestAnsiToTViewSpellErrorUsesStableForegroundOnly(t *testing.T) {
 	}
 	if strings.Contains(got, "::u") {
 		t.Fatalf("ansiToTView(spell error) = %q, want no underline style tag", got)
+	}
+}
+
+func TestAnsiToTViewActiveTabCloseUsesErrorOnActiveBackground(t *testing.T) {
+	got := ansiToTView(helpers.ANSI(helpers.ANSIRoleActiveTabClose, "x"))
+	want := themeMarkupPair(currentTheme().ErrorAccent, currentTheme().ActiveTabBG) + "x"
+	if !strings.Contains(got, want) {
+		t.Fatalf("ansiToTView(active tab close) = %q, want %q", got, want)
 	}
 }
 

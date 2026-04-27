@@ -2414,7 +2414,6 @@ func joinTViewLines(lines []string) string {
 
 func ansiToTView(s string) string {
 	theme := currentTheme()
-	escaped := tview.Escape(s)
 	replacer := strings.NewReplacer(
 		helpers.ANSIBold, "[::b]",
 		helpers.ANSIItalic, "[::i]",
@@ -2447,11 +2446,35 @@ func ansiToTView(s string) string {
 		helpers.ANSIRoleSearch, themeMarkupPair(theme.Syntax[helpers.ANSIRoleSearch], theme.SelectionBG),
 		helpers.ANSIRoleVisualSelection, themeMarkupPair(theme.Syntax[helpers.ANSIRoleVisualSelection], theme.SelectionBG),
 		helpers.ANSIRoleActiveTab, themeMarkupPair(theme.ActiveTabFG, theme.ActiveTabBG),
+		helpers.ANSIRoleActiveTabClose, themeMarkupPair(theme.ErrorAccent, theme.ActiveTabBG),
 		helpers.ANSIRoleSelection, themeMarkupPair(theme.SelectionFG, theme.SelectionBG),
 		helpers.ANSIRoleSpellError, themeMarkupFG(theme.ErrorAccent),
 		"\x1b[0m", "[-:-:-]",
 	)
-	return replacer.Replace(escaped)
+	return replaceANSIWithTViewMarkup(s, replacer)
+}
+
+func replaceANSIWithTViewMarkup(s string, replacer *strings.Replacer) string {
+	var out strings.Builder
+	for len(s) > 0 {
+		idx := strings.IndexByte(s, '\x1b')
+		if idx < 0 {
+			out.WriteString(tview.Escape(s))
+			break
+		}
+		if idx > 0 {
+			out.WriteString(tview.Escape(s[:idx]))
+			s = s[idx:]
+		}
+		end := strings.IndexByte(s, 'm')
+		if end < 0 {
+			out.WriteString(tview.Escape(s))
+			break
+		}
+		out.WriteString(replacer.Replace(s[:end+1]))
+		s = s[end+1:]
+	}
+	return out.String()
 }
 
 func (a *terminalApp) renderPages(height int) string {

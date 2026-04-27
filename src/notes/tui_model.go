@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/kloneets/tools/src/helpers"
@@ -1941,7 +1942,7 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 }
 
 func insertRune(ed *Editor, r rune) bool {
-	rememberUndoState(ed)
+	rememberTypedInsertBoundary(ed, r)
 	runes := []rune(ed.Text)
 	idx := vimClampOffset(ed.Text, ed.Cursor)
 	runes = append(runes[:idx], append([]rune{r}, runes[idx:]...)...)
@@ -1949,6 +1950,88 @@ func insertRune(ed *Editor, r rune) bool {
 	ed.Cursor = idx + 1
 	ed.Dirty = true
 	return true
+}
+
+func rememberTypedInsertBoundary(ed *Editor, r rune) {
+	if ed == nil {
+		return
+	}
+	switch {
+	case unicode.IsSpace(r):
+		rememberWhitespaceInsertBoundary(ed)
+	case isSentenceEndingRune(r):
+		rememberUndoState(ed)
+	default:
+		rememberUndoState(ed)
+	}
+}
+
+func rememberWhitespaceInsertBoundary(ed *Editor) {
+	runes := []rune(ed.Text)
+	cursor := vimClampOffset(ed.Text, ed.Cursor)
+	if cursor == 0 {
+		rememberUndoState(ed)
+		return
+	}
+	prev := runes[cursor-1]
+	switch {
+	case isSentenceEndingRune(prev):
+		rememberInsertBoundarySnapshot(ed, sentenceStartSnapshot(ed.Text, cursor))
+	case isWordRune(prev):
+		rememberInsertBoundarySnapshot(ed, wordStartSnapshot(ed.Text, cursor))
+	default:
+		rememberUndoState(ed)
+	}
+}
+
+func rememberInsertBoundarySnapshot(ed *Editor, snapshot editorSnapshot) {
+	if ed == nil {
+		return
+	}
+	for i := len(ed.UndoStack) - 1; i >= 0; i-- {
+		if ed.UndoStack[i].Text == snapshot.Text && ed.UndoStack[i].Cursor == snapshot.Cursor {
+			ed.UndoStack = ed.UndoStack[:i+1]
+			ed.RedoStack = nil
+			return
+		}
+	}
+	ed.UndoStack = append(ed.UndoStack, snapshot)
+	ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
+	ed.RedoStack = nil
+}
+
+func wordStartSnapshot(text string, cursor int) editorSnapshot {
+	runes := []rune(text)
+	cursor = vimClampOffset(text, cursor)
+	start := cursor
+	for start > 0 && isWordRune(runes[start-1]) {
+		start--
+	}
+	withoutWord := append([]rune(nil), runes[:start]...)
+	withoutWord = append(withoutWord, runes[cursor:]...)
+	return editorSnapshot{Text: string(withoutWord), Cursor: start}
+}
+
+func sentenceStartSnapshot(text string, cursor int) editorSnapshot {
+	runes := []rune(text)
+	cursor = vimClampOffset(text, cursor)
+	start := 0
+	for i := cursor - 2; i >= 0; i-- {
+		if isSentenceEndingRune(runes[i]) {
+			start = i + 1
+			for start < cursor && unicode.IsSpace(runes[start]) {
+				start++
+			}
+			break
+		}
+	}
+	withoutSentence := append([]rune(nil), runes[:start]...)
+	withoutSentence = append(withoutSentence, runes[cursor:]...)
+	return editorSnapshot{Text: string(withoutSentence), Cursor: start}
+}
+
+func isSentenceEndingRune(r rune) bool {
+	return r == '.' || r == '!' || r == '?'
 }
 
 func insertNewline(ed *Editor) bool {
@@ -3647,7 +3730,9 @@ func renderTabs(w *Workspace) string {
 	for i, tab := range w.Tabs {
 		label := noteTabDisplayLabel(i, tab)
 		if i == w.CurrentTab {
-			label = helpers.ANSI(helpers.ANSIRoleActiveTab, "["+label+"]")
+			label = helpers.ANSIRoleActiveTab + "[" + noteTabLabel(i, tab) + " " +
+				helpers.ANSIRoleActiveTabClose + "x" +
+				helpers.ANSIRoleActiveTab + "]" + "\x1b[0m"
 		} else {
 			label = "[" + label + "]"
 		}
@@ -4626,12 +4711,12 @@ func editorMarkdownSpans(text string) []markdownSpan {
 			spans = append(spans, markdownSpan{Tag: tagHeading6, Start: offset + indent, End: lineEnd})
 		case isHorizontalRule(trimmed):
 			spans = append(spans, markdownSpan{Tag: tagHorizontalRule, Start: offset + indent, End: lineEnd})
-		case strings.HasPrefix(trimmed, "- [ ] "), strings.HasPrefix(strings.ToLower(trimmed), "- [x] "):
-			spans = append(spans, markdownSpan{Tag: tagChecklist, Start: offset + indent, End: lineEnd})
-		case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "):
-			spans = append(spans, markdownSpan{Tag: tagList, Start: offset + indent, End: lineEnd})
+		case checklistMarkerLength(trimmed) > 0:
+			spans = append(spans, markdownSpan{Tag: tagChecklist, Start: offset + indent, End: offset + indent + checklistMarkerLength(trimmed)})
+		case unorderedListMarkerLength(trimmed) > 0:
+			spans = append(spans, markdownSpan{Tag: tagList, Start: offset + indent, End: offset + indent + unorderedListMarkerLength(trimmed)})
 		case orderedListPrefixLength(trimmed) > 0:
-			spans = append(spans, markdownSpan{Tag: tagOrdered, Start: offset + indent, End: lineEnd})
+			spans = append(spans, markdownSpan{Tag: tagOrdered, Start: offset + indent, End: offset + indent + orderedListMarkerLength(trimmed)})
 		case strings.HasPrefix(trimmed, "> "):
 			spans = append(spans, markdownSpan{Tag: tagQuote, Start: offset + indent, End: lineEnd})
 		}

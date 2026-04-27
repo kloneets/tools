@@ -17,8 +17,8 @@ func TestMarkdownSpansDetectsLinksListsAndChecklists(t *testing.T) {
 	text := "1. first\n- [x] done\n[site](https://example.com)\n"
 	spans := markdownSpans(text)
 
-	assertHasSpan(t, spans, tagOrdered, 0, 8)
-	assertHasSpan(t, spans, tagChecklist, 9, 19)
+	assertHasSpan(t, spans, tagOrdered, 0, 2)
+	assertHasSpan(t, spans, tagChecklist, 9, 14)
 	assertHasSpan(t, spans, tagLink, 20, 24)
 }
 
