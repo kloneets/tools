@@ -463,6 +463,175 @@ func TestBrowserRenameFolderUpdatesOpenTabs(t *testing.T) {
 	}
 }
 
+func TestBrowserMoveStartsCommandForNotesAndFoldersOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, w.ActiveEditor().Path, "")
+	if !w.HandleKey(Key{Name: "m", Rune: 'm'}) {
+		t.Fatal("HandleKey(m note) = false, want move command")
+	}
+	if !w.BrowserCommandMode || w.BrowserCommand != "move " {
+		t.Fatalf("BrowserCommand = mode:%t command:%q, want move prompt", w.BrowserCommandMode, w.BrowserCommand)
+	}
+
+	w.BrowserCommandMode = false
+	w.BrowserCommand = ""
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	if !w.HandleKey(Key{Name: "m", Rune: 'm'}) {
+		t.Fatal("HandleKey(m folder) = false, want move command")
+	}
+
+	w.BrowserCommandMode = false
+	w.BrowserCommand = ""
+	w.BrowserTree = []TreeEntry{{Kind: treeManagedAsset, Path: "/tmp/image.png", Label: "image.png"}}
+	w.BrowserSelection = 0
+	if w.HandleKey(Key{Name: "m", Rune: 'm'}) {
+		t.Fatal("HandleKey(m managed asset) = true, want false")
+	}
+	if w.BrowserCommandMode || w.BrowserCommand != "" {
+		t.Fatalf("BrowserCommand = mode:%t command:%q, want unchanged", w.BrowserCommandMode, w.BrowserCommand)
+	}
+}
+
+func TestBrowserMoveNoteMovesAssetsOpenTabAndRenames(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath := w.ActiveEditor().Path
+	oldAssets := noteAssetsPath(oldPath)
+	if err := os.MkdirAll(oldAssets, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldAssets, "diagram.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, oldPath, "")
+	if err := w.MoveBrowserEntry("Projects/TODO.md"); err != nil {
+		t.Fatalf("MoveBrowserEntry() error = %v", err)
+	}
+
+	newPath := filepath.Join(noteFolderPath("Projects"), "TODO.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("moved note missing: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old note stat err = %v, want missing", err)
+	}
+	if _, err := os.Stat(filepath.Join(noteAssetsPath(newPath), "diagram.png")); err != nil {
+		t.Fatalf("moved asset missing: %v", err)
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != newPath || got.Title != "TODO" {
+		t.Fatalf("active editor = %#v, want moved TODO note", got)
+	}
+}
+
+func TestBrowserMoveNoteCommandCreatesNestedFolderAndKeepsTitle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPath := w.ActiveEditor().Path
+	title := w.ActiveEditor().Title
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, oldPath, "")
+	if !w.HandleKey(Key{Name: "m", Rune: 'm'}) {
+		t.Fatal("HandleKey(m) = false, want move command")
+	}
+	typeWorkspaceText(t, w, "Projects/Archive/")
+	if !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(enter) = false, want execute move")
+	}
+	newPath := filepath.Join(noteFolderPath(filepath.Join("Projects", "Archive")), title+".md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("moved note missing: %v", err)
+	}
+}
+
+func TestBrowserMoveFolderUpdatesOpenTabs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CreateFolder("Projects"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	created, err := w.CreateNote("Plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relativeNoteFolder(created) != "Projects" {
+		t.Fatalf("created folder = %q, want Projects", relativeNoteFolder(created))
+	}
+	if err := os.MkdirAll(noteFolderPath("Archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w.refreshTree()
+
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	if err := w.MoveBrowserEntry("Archive"); err != nil {
+		t.Fatalf("MoveBrowserEntry() error = %v", err)
+	}
+
+	newPath := filepath.Join(noteFolderPath(filepath.Join("Archive", "Projects")), "Plan.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("moved folder note missing: %v", err)
+	}
+	if _, err := os.Stat(noteFolderPath("Projects")); !os.IsNotExist(err) {
+		t.Fatalf("old folder stat err = %v, want missing", err)
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != newPath {
+		t.Fatalf("active editor = %#v, want path %q", got, newPath)
+	}
+}
+
+func TestBrowserMoveFolderRejectsDescendantTarget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.CreateFolder("Projects/Archive"); err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+	if err := w.MoveBrowserEntry("Projects/Archive"); err == nil {
+		t.Fatal("MoveBrowserEntry() error = nil, want descendant target rejected")
+	}
+	if _, err := os.Stat(noteFolderPath("Projects")); err != nil {
+		t.Fatalf("Projects folder missing after rejected move: %v", err)
+	}
+}
+
 func TestBrowserRowsShowManagedFilesUnderNote(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -511,6 +680,96 @@ func TestBrowserEnterTogglesManagedFolder(t *testing.T) {
 	rows := strings.Join(w.BrowserRows(120, 20), "\n")
 	if strings.Contains(rows, "diagram.png") {
 		t.Fatalf("BrowserRows() = %q, want collapsed managed asset hidden", rows)
+	}
+}
+
+func TestBrowserOOpensAllNotesInsideSelectedFolder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(noteFolderPath("Projects"), "Plan.md")
+	deepPath := filepath.Join(noteFolderPath(filepath.Join("Projects", "Archive")), "Deep.md")
+	outsidePath := filepath.Join(notesDir(), "Outside.md")
+	if err := os.MkdirAll(filepath.Dir(deepPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deepPath, []byte("deep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.refreshTree()
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+
+	if !w.HandleKey(Key{Name: "o", Rune: 'o'}) {
+		t.Fatal("HandleKey(o) = false, want open folder notes")
+	}
+	if w.SidebarBrowsing || w.FocusSidebar {
+		t.Fatalf("browser/focus = %t/%t, want editor focused after opening folder notes", w.SidebarBrowsing, w.FocusSidebar)
+	}
+	if !workspaceHasOpenTab(w, planPath) || !workspaceHasOpenTab(w, deepPath) {
+		t.Fatalf("tabs = %#v, want folder notes opened", w.Tabs)
+	}
+	if workspaceHasOpenTab(w, outsidePath) {
+		t.Fatalf("tabs = %#v, want outside note not opened", w.Tabs)
+	}
+	if got := w.ActiveEditor(); got == nil || got.Path != planPath {
+		t.Fatalf("active editor = %#v, want last opened note %q", got, planPath)
+	}
+}
+
+func TestBrowserOFolderOpenDoesNotDuplicateExistingTabs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(noteFolderPath("Projects"), "Plan.md")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte("plan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Open(planPath); err != nil {
+		t.Fatal(err)
+	}
+	before := len(w.Tabs)
+	w.refreshTree()
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeFolder, "", "Projects")
+
+	if !w.HandleKey(Key{Name: "o", Rune: 'o'}) {
+		t.Fatal("HandleKey(o) = false, want open folder notes")
+	}
+	if len(w.Tabs) != before {
+		t.Fatalf("tab count = %d, want %d without duplicate", len(w.Tabs), before)
+	}
+}
+
+func TestBrowserOIgnoresNonFolderRows(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w, err := NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.FocusSidebar = true
+	w.SidebarBrowsing = true
+	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, w.ActiveEditor().Path, "")
+	if w.HandleKey(Key{Name: "o", Rune: 'o'}) {
+		t.Fatal("HandleKey(o note) = true, want false")
 	}
 }
 
@@ -2892,6 +3151,83 @@ func TestHandleNormalModeDDownDeletesCurrentAndNextLine(t *testing.T) {
 	}
 }
 
+func TestHandleNormalModeDDRenumbersFollowingOrderedListItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{
+		Text:   "1. one\n2. two\n3. three",
+		Cursor: len([]rune("1. one\n")),
+		Mode:   ModeNormal,
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) second = false, want true")
+	}
+	if got := ed.Text; got != "1. one\n2. three" {
+		t.Fatalf("text = %q, want ordered list renumbered after delete", got)
+	}
+}
+
+func TestHandleNormalModeDDRenumbersOrderedListAcrossNestedBulletItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{
+		Text: strings.Join([]string{
+			"1. a",
+			"2. b",
+			"    - ba",
+			"    - bb",
+			"3. c",
+			"4. d",
+		}, "\n"),
+		Cursor: len([]rune("1. a\n2. b\n    - ba\n    - bb\n")),
+		Mode:   ModeNormal,
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) second = false, want true")
+	}
+	want := strings.Join([]string{
+		"1. a",
+		"2. b",
+		"    - ba",
+		"    - bb",
+		"3. d",
+	}, "\n")
+	if got := ed.Text; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
+func TestHandleNormalModeDDownRenumbersFollowingOrderedListItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{
+		Text:   "1. one\n2. two\n3. three\n4. four",
+		Cursor: len([]rune("1. one\n")),
+		Mode:   ModeNormal,
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "down"}) {
+		t.Fatal("handleNormalMode(down) = false, want true after d")
+	}
+	if got := ed.Text; got != "1. one\n2. four" {
+		t.Fatalf("text = %q, want ordered list renumbered after span delete", got)
+	}
+}
+
 func TestHandleNormalModeDUpDeletesCurrentAndPreviousLine(t *testing.T) {
 	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
 	defer restoreWrite()
@@ -3053,6 +3389,56 @@ func TestInsertUndoParagraphBreakCreatesBoundary(t *testing.T) {
 	}
 	if got := ed.Text; got != "one\n" {
 		t.Fatalf("undo text = %q, want paragraph break removed", got)
+	}
+}
+
+func TestInsertNewlineRenumbersFollowingOrderedListItems(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:   "1. one\n2. two\n3. three",
+		Cursor: len([]rune("1. one")),
+		Mode:   ModeInsert,
+	}
+
+	if !insertNewline(ed) {
+		t.Fatal("insertNewline() = false, want true")
+	}
+	want := "1. one\n2. \n3. two\n4. three"
+	if ed.Text != want {
+		t.Fatalf("text = %q, want %q", ed.Text, want)
+	}
+	if ed.Cursor != len([]rune("1. one\n2. ")) {
+		t.Fatalf("cursor = %d, want after inserted ordered marker", ed.Cursor)
+	}
+}
+
+func TestInsertNewlineRenumbersOnlySameIndentOrderedListBlock(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text: strings.Join([]string{
+			"  1. one",
+			"  2. two",
+			"    1. nested",
+			"  3. three",
+		}, "\n"),
+		Cursor: len([]rune("  1. one")),
+		Mode:   ModeInsert,
+	}
+
+	if !insertNewline(ed) {
+		t.Fatal("insertNewline() = false, want true")
+	}
+	want := strings.Join([]string{
+		"  1. one",
+		"  2. ",
+		"  3. two",
+		"    1. nested",
+		"  4. three",
+	}, "\n")
+	if ed.Text != want {
+		t.Fatalf("text = %q, want %q", ed.Text, want)
 	}
 }
 
@@ -3255,6 +3641,20 @@ func TestInsertModeEnterOnEmptyOrderedItemRemovesMarker(t *testing.T) {
 	}
 	if got := ed.Text; got != "" {
 		t.Fatalf("text = %q, want empty line after leaving ordered item", got)
+	}
+}
+
+func TestInsertModeEnterOnEmptyOrderedItemRenumbersFollowingItems(t *testing.T) {
+	ed := &Editor{
+		Text:   "1. one\n2. \n3. three",
+		Cursor: len([]rune("1. one\n2. ")),
+		Mode:   ModeInsert,
+	}
+	if !handleInsertMode(&Workspace{}, ed, Key{Name: "enter"}) {
+		t.Fatal("handleInsertMode(enter) = false, want true")
+	}
+	if got := ed.Text; got != "1. one\n\n2. three" {
+		t.Fatalf("text = %q, want following ordered item renumbered", got)
 	}
 }
 
@@ -3821,4 +4221,13 @@ func TestRenderEditorPaneHighlightsVisualSelection(t *testing.T) {
 func handleEditorKeyForTest(ed *Editor, key Key) bool {
 	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
 	return w.handleEditorKey(key)
+}
+
+func workspaceHasOpenTab(w *Workspace, path string) bool {
+	for _, tab := range w.Tabs {
+		if tab != nil && tab.Path == path {
+			return true
+		}
+	}
+	return false
 }

@@ -525,6 +525,39 @@ func (w *Workspace) Open(path string) error {
 	return nil
 }
 
+func (w *Workspace) OpenFolderNotes(folder string) error {
+	if w == nil {
+		return fmt.Errorf("no workspace")
+	}
+	folder = sanitizeFolderPath(folder)
+	if folder == "" {
+		return fmt.Errorf("select a folder")
+	}
+	files, err := listNoteFiles()
+	if err != nil {
+		return err
+	}
+	opened := 0
+	for _, file := range files {
+		if !folderContainsNote(folder, file.Folder) {
+			continue
+		}
+		if err := w.Open(file.Path); err != nil {
+			return err
+		}
+		opened++
+	}
+	if opened == 0 {
+		if ed := w.ActiveEditor(); ed != nil {
+			ed.Status = "no notes in folder"
+		}
+		return nil
+	}
+	w.leaveSidebar()
+	w.ensureEditorVisible()
+	return nil
+}
+
 func defaultEditorMode() Mode {
 	if settings.Inst().NotesApp.VimMode {
 		return ModeNormal
@@ -1095,6 +1128,21 @@ func (w *Workspace) RenameBrowserEntry(name string) error {
 	}
 }
 
+func (w *Workspace) MoveBrowserEntry(target string) error {
+	entry := w.selectedBrowserEntry()
+	if entry == nil {
+		return fmt.Errorf("select a note or folder")
+	}
+	switch entry.Kind {
+	case treeNote:
+		return w.moveNoteByPath(entry.Path, target)
+	case treeFolder:
+		return w.moveFolderByRel(entry.Folder, target)
+	default:
+		return fmt.Errorf("select a note or folder")
+	}
+}
+
 func (w *Workspace) renameNoteByPath(path string, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -1124,6 +1172,48 @@ func (w *Workspace) renameNoteByPath(path string, name string) error {
 		tab.Title = noteTitleFromPath(target)
 	}
 	w.SelectedFolder = relativeNoteFolder(target)
+	w.refreshTree()
+	w.refreshFiles()
+	w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, target)
+	w.persistSession()
+	return nil
+}
+
+func (w *Workspace) moveNoteByPath(path string, rawTarget string) error {
+	targetFolder, targetTitle, err := resolveNoteMoveTarget(rawTarget, path)
+	if err != nil {
+		return err
+	}
+	target := uniqueNotePathInFolder(targetFolder, targetTitle, path)
+	if target == "" {
+		return fmt.Errorf("move requires a note target")
+	}
+	if target == path {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	oldAssetPath := noteAssetsPath(path)
+	newAssetPath := noteAssetsPath(target)
+	if err := os.Rename(path, target); err != nil {
+		return err
+	}
+	if _, err := os.Stat(oldAssetPath); err == nil {
+		renamedAssetPath := uniquePathLike(newAssetPath, oldAssetPath, true)
+		if renameErr := os.Rename(oldAssetPath, renamedAssetPath); renameErr != nil {
+			return renameErr
+		}
+	}
+	for _, tab := range w.Tabs {
+		if tab == nil || tab.Path != path {
+			continue
+		}
+		tab.Path = target
+		tab.Title = noteTitleFromPath(target)
+	}
+	w.SelectedFolder = relativeNoteFolder(target)
+	w.expandBrowserAncestors(w.SelectedFolder)
 	w.refreshTree()
 	w.refreshFiles()
 	w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, target)
@@ -1174,6 +1264,62 @@ func (w *Workspace) renameFolderByRel(folder string, name string) error {
 		}
 	}
 	w.SelectedFolder = actualRel
+	w.refreshTree()
+	w.refreshFiles()
+	w.BrowserSelection = clampBrowserSelectionByFolder(w.BrowserTree, w.BrowserSelection, actualRel)
+	w.persistSession()
+	return nil
+}
+
+func (w *Workspace) moveFolderByRel(folder string, rawTarget string) error {
+	folder = sanitizeFolderPath(folder)
+	targetParent, err := resolveFolderMoveTarget(rawTarget)
+	if err != nil {
+		return err
+	}
+	if folder == "" {
+		return fmt.Errorf("move requires a folder")
+	}
+	if targetParent == folder || strings.HasPrefix(targetParent, folder+string(filepath.Separator)) {
+		return fmt.Errorf("cannot move folder into itself")
+	}
+	targetFolder := joinFolderParts(targetParent, filepath.Base(folder))
+	if targetFolder == "" {
+		return fmt.Errorf("move requires a folder target")
+	}
+	oldPath := noteFolderPath(folder)
+	targetPath := uniquePathLike(noteFolderPath(targetFolder), oldPath, true)
+	if targetPath == oldPath {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(oldPath, targetPath); err != nil {
+		return err
+	}
+	actualRel, err := filepath.Rel(notesDir(), targetPath)
+	if err != nil {
+		actualRel = targetFolder
+	}
+	actualRel = sanitizeFolderPath(actualRel)
+	for _, tab := range w.Tabs {
+		if tab == nil {
+			continue
+		}
+		rel := noteRelPath(tab.Path)
+		if rel == "" {
+			continue
+		}
+		if rel == folder || strings.HasPrefix(rel, folder+string(filepath.Separator)) {
+			suffix := strings.TrimPrefix(rel, folder)
+			suffix = strings.TrimPrefix(suffix, string(filepath.Separator))
+			tab.Path = filepath.Join(noteFolderPath(actualRel), suffix)
+			tab.Title = noteTitleFromPath(tab.Path)
+		}
+	}
+	w.SelectedFolder = actualRel
+	w.expandBrowserAncestors(actualRel)
 	w.refreshTree()
 	w.refreshFiles()
 	w.BrowserSelection = clampBrowserSelectionByFolder(w.BrowserTree, w.BrowserSelection, actualRel)
@@ -1328,11 +1474,35 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 		w.leaveSidebar()
 		w.ensureEditorVisible()
 		return true
+	case "o":
+		if !w.SidebarBrowsing {
+			return false
+		}
+		entry := w.selectedBrowserEntry()
+		if entry == nil || entry.Kind != treeFolder {
+			return false
+		}
+		if err := w.OpenFolderNotes(entry.Folder); err != nil {
+			if ed := w.ActiveEditor(); ed != nil {
+				ed.Status = err.Error()
+			}
+		}
+		return true
 	case "d":
 		if w.SidebarBrowsing {
 			return w.requestDeleteFocusedBrowserEntry()
 		}
 		return w.requestDeleteFocusedNote()
+	case "m":
+		if w.SidebarBrowsing {
+			entry := w.selectedBrowserEntry()
+			if entry == nil || (entry.Kind != treeNote && entry.Kind != treeFolder) {
+				return false
+			}
+			w.startBrowserCommand("move ")
+			return true
+		}
+		return false
 	case "x":
 		entry := w.selectedEntry()
 		if w.SidebarBrowsing || entry == nil || entry.Kind != treeOpenNote {
@@ -1407,6 +1577,8 @@ func (w *Workspace) executeBrowserCommand(command string) error {
 		return w.CreateBrowserTarget(strings.TrimSpace(strings.TrimPrefix(command, "new ")))
 	case strings.HasPrefix(command, "rename "):
 		return w.RenameBrowserEntry(strings.TrimSpace(strings.TrimPrefix(command, "rename ")))
+	case strings.HasPrefix(command, "move "):
+		return w.MoveBrowserEntry(strings.TrimSpace(strings.TrimPrefix(command, "move ")))
 	case command == "":
 		return nil
 	default:
@@ -2041,10 +2213,14 @@ func insertNewline(ed *Editor) bool {
 	rememberUndoState(ed)
 	runes := []rune(ed.Text)
 	idx := vimClampOffset(ed.Text, ed.Cursor)
-	insert := []rune("\n" + newlineContinuationPrefix(ed.Text, ed.Cursor))
+	continuationPrefix := newlineContinuationPrefix(ed.Text, ed.Cursor)
+	insert := []rune("\n" + continuationPrefix)
 	runes = append(runes[:idx], append(insert, runes[idx:]...)...)
 	ed.Text = string(runes)
 	ed.Cursor = idx + len(insert)
+	if _, _, ok := orderedListLineParts(continuationPrefix); ok {
+		ed.Text = renumberFollowingOrderedListLines(ed.Text, ed.Cursor)
+	}
 	ed.Dirty = true
 	return true
 }
@@ -2111,6 +2287,7 @@ func deleteEmptyListMarker(ed *Editor) bool {
 	updated := string(runes[:lineStart]) + string(runes[lineEnd:])
 	ed.Text = updated
 	ed.Cursor = lineStart
+	ed.Text = renumberOrderedListBlockAtOffset(ed.Text, ed.Cursor)
 	ed.Dirty = true
 	return true
 }
@@ -2196,6 +2373,165 @@ func orderedListPrefix(trimmed string) (int, string, bool) {
 		return 0, "", false
 	}
 	return number + 1, ". ", true
+}
+
+func renumberFollowingOrderedListLines(text string, cursor int) string {
+	lines := strings.Split(text, "\n")
+	currentLine := lineIndexAtRuneOffset(text, cursor)
+	if currentLine < 0 || currentLine >= len(lines) {
+		return text
+	}
+	indent, number, ok := orderedListLineParts(lines[currentLine])
+	if !ok {
+		return text
+	}
+	nextNumber := number + 1
+	changed := false
+	for i := currentLine + 1; i < len(lines); i++ {
+		currentIndent, _, ok := orderedListLineParts(lines[i])
+		if !ok {
+			if lineIndent := lineIndent(lines[i]); len(lineIndent) > len(indent) {
+				continue
+			}
+			break
+		}
+		if len(currentIndent) > len(indent) {
+			continue
+		}
+		if currentIndent != indent {
+			break
+		}
+		lines[i] = replaceOrderedListNumber(lines[i], nextNumber)
+		nextNumber++
+		changed = true
+	}
+	if !changed {
+		return text
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renumberOrderedListBlockAtOffset(text string, cursor int) string {
+	lines := strings.Split(text, "\n")
+	lineIdx := lineIndexAtRuneOffset(text, cursor)
+	if lineIdx < 0 || lineIdx >= len(lines) {
+		return text
+	}
+	indent, _, ok := orderedListLineParts(lines[lineIdx])
+	start := lineIdx
+	firstNumber := 0
+	if !ok {
+		if lineIdx+1 >= len(lines) {
+			return text
+		}
+		start = lineIdx + 1
+		indent, firstNumber, ok = orderedListLineParts(lines[start])
+		if !ok {
+			return text
+		}
+		if lineIdx > 0 {
+			if prevIndent, prevNumber, ok := orderedListLineParts(lines[lineIdx-1]); ok && prevIndent == indent {
+				firstNumber = prevNumber + 1
+			} else {
+				firstNumber = 1
+			}
+		} else {
+			firstNumber = 1
+		}
+	} else {
+		for start > 0 {
+			prevIndent, _, ok := orderedListLineParts(lines[start-1])
+			if !ok {
+				if lineIndent := lineIndent(lines[start-1]); len(lineIndent) > len(indent) {
+					start--
+					continue
+				}
+				break
+			}
+			if len(prevIndent) > len(indent) {
+				start--
+				continue
+			}
+			if prevIndent != indent {
+				break
+			}
+			start--
+		}
+		_, firstNumber, ok = orderedListLineParts(lines[start])
+		if !ok {
+			return text
+		}
+	}
+	nextNumber := firstNumber
+	changed := false
+	for i := start; i < len(lines); i++ {
+		currentIndent, number, ok := orderedListLineParts(lines[i])
+		if !ok {
+			if lineIndent := lineIndent(lines[i]); len(lineIndent) > len(indent) {
+				continue
+			}
+			break
+		}
+		if len(currentIndent) > len(indent) {
+			continue
+		}
+		if currentIndent != indent {
+			break
+		}
+		if number != nextNumber {
+			lines[i] = replaceOrderedListNumber(lines[i], nextNumber)
+			changed = true
+		}
+		nextNumber++
+	}
+	if !changed {
+		return text
+	}
+	return strings.Join(lines, "\n")
+}
+
+func lineIndexAtRuneOffset(text string, offset int) int {
+	runes := []rune(text)
+	offset = min(max(offset, 0), len(runes))
+	line := 0
+	for _, r := range runes[:offset] {
+		if r == '\n' {
+			line++
+		}
+	}
+	return line
+}
+
+func orderedListLineParts(line string) (indent string, number int, ok bool) {
+	indentLen := len(line) - len(strings.TrimLeft(line, " \t"))
+	trimmed := line[indentLen:]
+	i := 0
+	for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+		i++
+	}
+	if i == 0 || i+1 >= len(trimmed) || trimmed[i] != '.' || trimmed[i+1] != ' ' {
+		return "", 0, false
+	}
+	number, err := strconv.Atoi(trimmed[:i])
+	if err != nil || number <= 0 {
+		return "", 0, false
+	}
+	return line[:indentLen], number, true
+}
+
+func replaceOrderedListNumber(line string, number int) string {
+	indentLen := len(line) - len(strings.TrimLeft(line, " \t"))
+	trimmed := line[indentLen:]
+	i := 0
+	for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+		i++
+	}
+	return line[:indentLen] + strconv.Itoa(number) + trimmed[i:]
+}
+
+func lineIndent(line string) string {
+	indentLen := len(line) - len(strings.TrimLeft(line, " \t"))
+	return line[:indentLen]
 }
 
 func clearAutoComplete(ed *Editor) {
@@ -2601,6 +2937,7 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 				updateClipboardForRegister(w, ed, "deleted line")
 				rememberUndoState(ed)
 				ed.Text, ed.Cursor = vimDeleteLine(ed.Text, ed.Cursor)
+				ed.Text = renumberOrderedListBlockAtOffset(ed.Text, ed.Cursor)
 				ed.Dirty = true
 			}
 			if key.Name == "y" {
@@ -2903,6 +3240,7 @@ func applyPendingOperator(w *Workspace, ed *Editor, key string) bool {
 		rememberUndoState(ed)
 		ed.Text = updated
 		ed.Cursor = cursor
+		ed.Text = renumberOrderedListBlockAtOffset(ed.Text, ed.Cursor)
 		ed.Dirty = true
 		return true
 	}
@@ -3163,6 +3501,7 @@ func deleteVisualSelection(w *Workspace, ed *Editor) {
 		updateClipboardForRegister(w, ed, "deleted lines")
 		start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
 		ed.Text, ed.Cursor = vimDeleteRange(ed.Text, start, max(start, end-1))
+		ed.Text = renumberOrderedListBlockAtOffset(ed.Text, ed.Cursor)
 	case vimSelectionBlock:
 		var reg vimRegister
 		ed.Text, ed.Cursor, reg = vimDeleteBlockRegister(ed.Text, ed.SelectionMark, ed.SelectionCursor)
@@ -3348,7 +3687,7 @@ func (w *Workspace) HelpText() string {
 		if w.BrowserCommandMode {
 			return "notes/browser command: enter run | esc cancel"
 		}
-		return "notes/browser: j k move | enter open/toggle/open file | n/f new | r rename | d delete note/folder | e close | esc close"
+		return "notes/browser: j k move | enter open/toggle/open file | o open folder notes | n/f new | r rename | m move | d delete note/folder | e close | esc close"
 	}
 	if w.FocusSidebar {
 		return "notes/sidebar: j k move | enter focus note | e browser | x close open note | a last note | 1-9/0 note | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
@@ -5077,6 +5416,42 @@ func browserTargetFolder(entry *TreeEntry) string {
 	default:
 		return ""
 	}
+}
+
+func resolveNoteMoveTarget(raw string, currentPath string) (string, string, error) {
+	target := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if target == "" {
+		return "", "", fmt.Errorf("move requires a target")
+	}
+	target = strings.TrimLeft(target, "/")
+	if target == "" {
+		return "", "", fmt.Errorf("move requires a target")
+	}
+	forceFolder := strings.HasSuffix(target, "/")
+	target = strings.Trim(target, "/")
+	if target == "" {
+		return "", "", fmt.Errorf("move requires a target")
+	}
+	parts := strings.Split(target, "/")
+	currentTitle := noteTitleFromPath(currentPath)
+	if forceFolder || len(parts) == 1 {
+		return sanitizeFolderPath(target), currentTitle, nil
+	}
+	title := strings.TrimSuffix(parts[len(parts)-1], ".md")
+	if strings.TrimSpace(title) == "" {
+		return "", "", fmt.Errorf("move requires a note name")
+	}
+	folder := sanitizeFolderPath(strings.Join(parts[:len(parts)-1], "/"))
+	return folder, title, nil
+}
+
+func resolveFolderMoveTarget(raw string) (string, error) {
+	target := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if target == "" {
+		return "", fmt.Errorf("move requires a target")
+	}
+	target = strings.Trim(target, "/")
+	return sanitizeFolderPath(target), nil
 }
 
 func joinFolderParts(parts ...string) string {

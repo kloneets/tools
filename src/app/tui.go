@@ -2803,6 +2803,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "ctrl+a, :sidebar, :sb", desc: "toggle sidebar/editor focus"},
 		{keys: "j/k, arrows", desc: "move selection"},
 		{keys: "enter, l", desc: "focus selected open note or open selected browser note"},
+		{keys: "o", desc: "open all notes inside selected browser folder"},
 		{keys: "e", desc: "toggle the full note browser while the sidebar is focused"},
 		{keys: "h", desc: "return to editor"},
 		{keys: "a", desc: "switch to last accessed note and return to editor"},
@@ -2811,6 +2812,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "n", desc: "new note"},
 		{keys: "f", desc: "new folder"},
 		{keys: "d", desc: "delete selected note"},
+		{keys: "m", desc: "move selected browser note or folder"},
 		{keys: "[, ]", desc: "switch open note tabs"},
 		{keys: "R", desc: "rename current note"},
 	})...)
