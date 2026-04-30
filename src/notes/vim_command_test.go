@@ -108,6 +108,35 @@ func TestParseVimCommandBufferDelete(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandLineMove(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantDelta int
+	}{
+		{"mld", 1},
+		{"mlu", -1},
+		{"ml3d", 3},
+		{"ml12u", -12},
+	}
+	for _, tc := range cases {
+		cmd, err := parseVimCommand(tc.raw)
+		if err != nil {
+			t.Fatalf("parseVimCommand(%q) error = %v", tc.raw, err)
+		}
+		if cmd.Kind != vimCommandLineMove || cmd.LineDelta != tc.wantDelta {
+			t.Fatalf("parseVimCommand(%q) = %#v, want line move delta %d", tc.raw, cmd, tc.wantDelta)
+		}
+	}
+}
+
+func TestParseVimCommandLineMoveRejectsInvalidForms(t *testing.T) {
+	for _, raw := range []string{"ml", "ml0d", "ml-1d", "mlxd", "ml3x"} {
+		if _, err := parseVimCommand(raw); err == nil {
+			t.Fatalf("parseVimCommand(%q) error = nil, want error", raw)
+		}
+	}
+}
+
 func TestParseVimCommandUndoRedo(t *testing.T) {
 	cmd, err := parseVimCommand("undo")
 	if err != nil {

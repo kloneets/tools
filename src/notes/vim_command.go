@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -25,6 +26,7 @@ const (
 	vimCommandSpell        vimCommandKind = "spell"
 	vimCommandRecordKeys   vimCommandKind = "record-keys"
 	vimCommandBufferDelete vimCommandKind = "buffer-delete"
+	vimCommandLineMove     vimCommandKind = "line-move"
 	vimCommandQuit         vimCommandKind = "quit"
 	vimCommandSequence     vimCommandKind = "sequence"
 )
@@ -38,6 +40,7 @@ type vimCommand struct {
 	Name        string
 	Commands    []vimCommand
 	Force       bool
+	LineDelta   int
 }
 
 func parseVimCommand(raw string) (vimCommand, error) {
@@ -77,6 +80,10 @@ func parseVimCommand(raw string) (vimCommand, error) {
 		return vimCommand{Kind: vimCommandRecordKeys}, nil
 	case "bd", "bdelete":
 		return vimCommand{Kind: vimCommandBufferDelete}, nil
+	}
+
+	if move, ok, err := parseMoveLineCommand(cmd); ok || err != nil {
+		return move, err
 	}
 
 	if chained, ok := parseOneCharCommandChain(cmd); ok {
@@ -127,6 +134,37 @@ func parseVimCommand(raw string) (vimCommand, error) {
 	}
 
 	return vimCommand{}, fmt.Errorf("unknown command: %s", cmd)
+}
+
+func parseMoveLineCommand(cmd string) (vimCommand, bool, error) {
+	if !strings.HasPrefix(cmd, "ml") {
+		return vimCommand{}, false, nil
+	}
+	if len(cmd) < 3 {
+		return vimCommand{}, true, fmt.Errorf("invalid line move command: %s", cmd)
+	}
+	direction := cmd[len(cmd)-1]
+	if direction != 'u' && direction != 'd' {
+		return vimCommand{}, true, fmt.Errorf("invalid line move command: %s", cmd)
+	}
+	countText := cmd[2 : len(cmd)-1]
+	count := 1
+	if countText != "" {
+		for _, r := range countText {
+			if r < '0' || r > '9' {
+				return vimCommand{}, true, fmt.Errorf("invalid line move count: %s", countText)
+			}
+		}
+		parsed, err := strconv.Atoi(countText)
+		if err != nil || parsed <= 0 {
+			return vimCommand{}, true, fmt.Errorf("invalid line move count: %s", countText)
+		}
+		count = parsed
+	}
+	if direction == 'u' {
+		count = -count
+	}
+	return vimCommand{Kind: vimCommandLineMove, LineDelta: count}, true, nil
 }
 
 func parseOneCharCommandChain(cmd string) (vimCommand, bool) {

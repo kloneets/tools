@@ -455,6 +455,50 @@ func TestHandleGlobalKeyAllowsPlainNumbersInInsertMode(t *testing.T) {
 	}
 }
 
+func TestHandleGlobalKeyMovesNormalModeLineWithMLCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.VimMode = true
+
+	ws, err := notes.NewWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed := ws.ActiveEditor()
+	ed.Text = "one\ntwo\nthree\nfour"
+	ed.Cursor = len([]rune("one\n"))
+	ed.Mode = notes.ModeNormal
+	ws.FocusSidebar = false
+	app := &terminalApp{view: viewNotes, notes: ws}
+
+	for _, key := range []notes.Key{
+		{Name: "m", Rune: 'm'},
+		{Name: "l", Rune: 'l'},
+		{Name: "2", Rune: '2'},
+		{Name: "d", Rune: 'd'},
+	} {
+		if !app.handleGlobalKey(key) {
+			t.Fatalf("handleGlobalKey(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\nthree\nfour\ntwo" {
+		t.Fatalf("editor text = %q, want cursor line moved down through app routing", got)
+	}
+
+	for _, key := range []notes.Key{
+		{Name: "m", Rune: 'm'},
+		{Name: "l", Rune: 'l'},
+		{Name: "u", Rune: 'u'},
+	} {
+		if !app.handleGlobalKey(key) {
+			t.Fatalf("handleGlobalKey(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\nthree\ntwo\nfour" {
+		t.Fatalf("editor text = %q, want cursor line moved up through app routing", got)
+	}
+}
+
 func TestGeneratePasswordAndNotifyCopiesToClipboard(t *testing.T) {
 	helpers.InitStatusBar()
 	clipboardRestore := helpers.SetClipboardWriterForTesting(func(string) error { return nil })

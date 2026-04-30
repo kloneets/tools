@@ -3795,6 +3795,450 @@ func TestVisualModeShiftSelectionRightAndLeft(t *testing.T) {
 	}
 }
 
+func TestNormalModeMoveLineDownAndUp(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree", Cursor: len([]rune("one\n")), Mode: ModeNormal}
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "d", Rune: 'd'}} {
+		if !handleNormalMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleNormalMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\nthree\ntwo" {
+		t.Fatalf("text = %q, want line moved down", got)
+	}
+	if got, want := ed.Cursor, len([]rune("one\nthree\n")); got != want {
+		t.Fatalf("cursor = %d, want moved line start %d", got, want)
+	}
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "u", Rune: 'u'}} {
+		if !handleNormalMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleNormalMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\ntwo\nthree" {
+		t.Fatalf("text = %q, want line moved back up", got)
+	}
+}
+
+func TestWorkspaceNormalModeMoveLineAtCursor(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "one\ntwo\nthree",
+			Cursor: len([]rune("one\n")),
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "d", Rune: 'd'}} {
+		if !w.HandleKey(key) {
+			t.Fatalf("HandleKey(%q) = false, want true", key.Name)
+		}
+	}
+	if got := w.ActiveEditor().Text; got != "one\nthree\ntwo" {
+		t.Fatalf("text = %q, want current cursor line moved down", got)
+	}
+}
+
+func TestWorkspaceNormalModeMoveLineUsesRuneToken(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "one\ntwo\nthree",
+			Cursor: len([]rune("one\n")),
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	for _, key := range []Key{{Rune: 'm'}, {Rune: 'l'}, {Rune: 'd'}} {
+		if !w.HandleKey(key) {
+			t.Fatalf("HandleKey(%q/%q) = false, want true", key.Name, key.Rune)
+		}
+	}
+	if got := w.ActiveEditor().Text; got != "one\nthree\ntwo" {
+		t.Fatalf("text = %q, want current cursor line moved down", got)
+	}
+}
+
+func TestMoveLinePendingCommandShownInCommandLine(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text: "one\ntwo",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	if !w.HandleKey(Key{Name: "m", Rune: 'm'}) {
+		t.Fatal("HandleKey(m) = false, want pending command")
+	}
+	if got := w.CommandLineText(80); got != "m" {
+		t.Fatalf("CommandLineText() = %q, want m", got)
+	}
+	if col, ok := w.CommandCursor(); !ok || col != 1 {
+		t.Fatalf("CommandCursor() = %d/%t, want 1/true", col, ok)
+	}
+	if !w.HandleKey(Key{Name: "l", Rune: 'l'}) || !w.HandleKey(Key{Name: "3", Rune: '3'}) {
+		t.Fatal("HandleKey(ml3) = false, want pending command")
+	}
+	if got := w.CommandLineText(80); got != "ml3" {
+		t.Fatalf("CommandLineText() = %q, want ml3", got)
+	}
+	if col, ok := w.CommandCursor(); !ok || col != 3 {
+		t.Fatalf("CommandCursor() = %d/%t, want 3/true", col, ok)
+	}
+}
+
+func TestNormalModeMoveLineCountAndUndo(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree\nfour", Cursor: 0, Mode: ModeNormal}
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "3", Rune: '3'}, {Name: "d", Rune: 'd'}} {
+		if !handleNormalMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleNormalMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "two\nthree\nfour\none" {
+		t.Fatalf("text = %q, want line moved to bottom", got)
+	}
+	if got, want := ed.Cursor, len([]rune("two\nthree\nfour\n")); got != want {
+		t.Fatalf("cursor = %d, want moved line start %d", got, want)
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "u", Rune: 'u'}) {
+		t.Fatal("handleNormalMode(u) = false, want undo")
+	}
+	if got := ed.Text; got != "one\ntwo\nthree\nfour" {
+		t.Fatalf("text after undo = %q, want original", got)
+	}
+}
+
+func TestNormalModeMoveLineAtEdgeNoopsCleanly(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo", Cursor: 0, Mode: ModeNormal}
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "u", Rune: 'u'}} {
+		if !handleNormalMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleNormalMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\ntwo" {
+		t.Fatalf("text = %q, want unchanged", got)
+	}
+	if ed.Dirty {
+		t.Fatal("Dirty = true, want no-op move to remain clean")
+	}
+}
+
+func TestCommandModeMoveLineDownAndUp(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "one\ntwo\nthree",
+			Cursor: len([]rune("one\n")),
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	if !submitEditorCommand(w, "mld") {
+		t.Fatal("submitEditorCommand(mld) = false, want true")
+	}
+	ed := w.ActiveEditor()
+	if got := ed.Text; got != "one\nthree\ntwo" {
+		t.Fatalf("text = %q, want current line moved down", got)
+	}
+	if ed.Status != "moved line down" {
+		t.Fatalf("Status = %q, want moved line down", ed.Status)
+	}
+	if !submitEditorCommand(w, "mlu") {
+		t.Fatal("submitEditorCommand(mlu) = false, want true")
+	}
+	if got := ed.Text; got != "one\ntwo\nthree" {
+		t.Fatalf("text = %q, want current line moved back up", got)
+	}
+	if ed.Status != "moved line up" {
+		t.Fatalf("Status = %q, want moved line up", ed.Status)
+	}
+}
+
+func TestCommandModeMoveLineCountClampAndUndo(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "one\ntwo\nthree\nfour",
+			Cursor: 0,
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	if !submitEditorCommand(w, "ml3d") {
+		t.Fatal("submitEditorCommand(ml3d) = false, want true")
+	}
+	if got := ed.Text; got != "two\nthree\nfour\none" {
+		t.Fatalf("text = %q, want line moved to bottom", got)
+	}
+	if !submitEditorCommand(w, "mld") {
+		t.Fatal("submitEditorCommand(mld) = false, want boundary no-op")
+	}
+	if got := ed.Text; got != "two\nthree\nfour\none" {
+		t.Fatalf("text after boundary move = %q, want unchanged", got)
+	}
+	if ed.Status != "line already at boundary" {
+		t.Fatalf("Status = %q, want boundary message", ed.Status)
+	}
+	executeVimCommand(w, ed, vimCommand{Kind: vimCommandUndo})
+	if got := ed.Text; got != "one\ntwo\nthree\nfour" {
+		t.Fatalf("text after undo = %q, want original", got)
+	}
+}
+
+func TestVisualLineModeMoveSelectionDownKeepsSelection(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree\nfour", Cursor: len([]rune("one\n")), Mode: ModeNormal}
+	startVisualSelection(ed, vimSelectionLine)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "d", Rune: 'd'}} {
+		if !handleVisualMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleVisualMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\nfour\ntwo\nthree" {
+		t.Fatalf("text = %q, want selected block moved down", got)
+	}
+	if ed.Mode != ModeVisual || ed.SelectionMode != vimSelectionLine {
+		t.Fatalf("mode = %s selection = %s, want visual line", ed.Mode, ed.SelectionMode)
+	}
+	start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+	if got := ed.Text[start:end]; got != "two\nthree" {
+		t.Fatalf("selected text = %q, want moved block selected", got)
+	}
+}
+
+func TestVisualLineMovePendingCommandShownInCommandLine(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text: "one\ntwo\nthree",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	startVisualSelection(ed, vimSelectionLine)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	if !w.HandleKey(Key{Name: "m", Rune: 'm'}) || !w.HandleKey(Key{Name: "l", Rune: 'l'}) {
+		t.Fatal("HandleKey(ml) = false, want pending visual move")
+	}
+	if got := w.CommandLineText(80); got != "ml" {
+		t.Fatalf("CommandLineText() = %q, want ml", got)
+	}
+	if col, ok := w.CommandCursor(); !ok || col != 2 {
+		t.Fatalf("CommandCursor() = %d/%t, want 2/true", col, ok)
+	}
+}
+
+func TestVisualCharModeMoveSelectedLines(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree\nfour", Cursor: len([]rune("one\n")), Mode: ModeNormal}
+	startVisualSelection(ed, vimSelectionChar)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "d", Rune: 'd'}} {
+		if !handleVisualMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleVisualMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "one\nfour\ntwo\nthree" {
+		t.Fatalf("text = %q, want selected lines moved down", got)
+	}
+	if ed.Mode != ModeVisual || ed.SelectionMode != vimSelectionChar {
+		t.Fatalf("mode = %s selection = %s, want visual char", ed.Mode, ed.SelectionMode)
+	}
+}
+
+func TestCommandModeMoveVisualSelectionsByTouchedLines(t *testing.T) {
+	cases := []struct {
+		name string
+		mode vimSelectionMode
+	}{
+		{"char", vimSelectionChar},
+		{"line", vimSelectionLine},
+		{"block", vimSelectionBlock},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &Workspace{
+				Tabs: []*Editor{{
+					Text:   "one\ntwo\nthree\nfour",
+					Cursor: len([]rune("one\n")),
+					Mode:   ModeNormal,
+				}},
+				CurrentTab: 0,
+			}
+			ed := w.ActiveEditor()
+			startVisualSelection(ed, tc.mode)
+			ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+			refreshVisualSelection(ed)
+			if !submitEditorCommand(w, "mld") {
+				t.Fatal("submitEditorCommand(mld) = false, want true")
+			}
+			if got := ed.Text; got != "one\nfour\ntwo\nthree" {
+				t.Fatalf("text = %q, want selected touched lines moved down", got)
+			}
+			if ed.Mode != ModeNormal || ed.SelectionMode != vimSelectionNone {
+				t.Fatalf("Mode/SelectionMode = %q/%q, want normal/no selection", ed.Mode, ed.SelectionMode)
+			}
+			if ed.Status != "moved lines down" {
+				t.Fatalf("Status = %q, want moved lines down", ed.Status)
+			}
+		})
+	}
+}
+
+func TestCommandModeMoveVisualSelectionCountUp(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "one\ntwo\nthree\nfour",
+			Cursor: len([]rune("one\ntwo\n")),
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	startVisualSelection(ed, vimSelectionLine)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	if !submitEditorCommand(w, "ml2u") {
+		t.Fatal("submitEditorCommand(ml2u) = false, want true")
+	}
+	if got := ed.Text; got != "three\nfour\none\ntwo" {
+		t.Fatalf("text = %q, want selected lines moved to top", got)
+	}
+	if ed.SelectionMode != vimSelectionNone {
+		t.Fatalf("SelectionMode = %q, want cleared", ed.SelectionMode)
+	}
+}
+
+func TestCommandModeUnknownCommandUpdatesStatusBar(t *testing.T) {
+	helpers.InitStatusBar()
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text: "one",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	if !submitEditorCommand(w, "doesnotexist") {
+		t.Fatal("submitEditorCommand(doesnotexist) = false, want handled")
+	}
+	want := "unknown command: doesnotexist"
+	if got := w.ActiveEditor().Status; got != want {
+		t.Fatalf("editor Status = %q, want %q", got, want)
+	}
+	if got := helpers.StatusBarInst().Text(); got != want {
+		t.Fatalf("status bar = %q, want %q", got, want)
+	}
+}
+
+func TestVisualSelectionCommandRunsOnEnter(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.VimMode = true
+
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Title: "Plan",
+			Text:  "one\ntwo",
+			Mode:  ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	startVisualSelection(ed, vimSelectionLine)
+	if !w.HandleKey(Key{Name: ":", Rune: ':'}) {
+		t.Fatal("HandleKey(:) = false, want command mode")
+	}
+	if ed.Mode != ModeCommand {
+		t.Fatalf("Mode = %q, want command", ed.Mode)
+	}
+	if got := w.CommandLineText(80); got != "" {
+		t.Fatalf("CommandLineText() = %q, want empty command", got)
+	}
+	if !w.HandleKey(Key{Name: "w", Rune: 'w'}) || !w.HandleKey(Key{Name: "enter"}) {
+		t.Fatal("HandleKey(:w enter) = false, want command executed")
+	}
+	if !w.pendingSaveAll {
+		t.Fatal("pendingSaveAll = false, want save requested")
+	}
+	if ed.Mode != ModeNormal {
+		t.Fatalf("Mode = %q, want normal after command", ed.Mode)
+	}
+	if ed.SelectionMode != vimSelectionNone {
+		t.Fatalf("SelectionMode = %q, want cleared", ed.SelectionMode)
+	}
+}
+
+func TestVisualSelectionSearchCommandRunsOnEnter(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.VimMode = true
+
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text: "one\ntwo",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	startVisualSelection(ed, vimSelectionChar)
+	if !w.HandleKey(Key{Name: "/", Rune: '/'}) {
+		t.Fatal("HandleKey(/) = false, want search command mode")
+	}
+	if got := w.CommandLineText(80); got != "/" {
+		t.Fatalf("CommandLineText() = %q, want search prompt", got)
+	}
+	for _, key := range []Key{{Name: "t", Rune: 't'}, {Name: "w", Rune: 'w'}, {Name: "o", Rune: 'o'}, {Name: "enter"}} {
+		if !w.HandleKey(key) {
+			t.Fatalf("HandleKey(%q) = false, want search command executed", key.Name)
+		}
+	}
+	if ed.LastSearch != "two" {
+		t.Fatalf("LastSearch = %q, want two", ed.LastSearch)
+	}
+	if ed.Cursor != len([]rune("one\n")) {
+		t.Fatalf("Cursor = %d, want start of match", ed.Cursor)
+	}
+	if ed.Mode != ModeNormal || ed.SelectionMode != vimSelectionNone {
+		t.Fatalf("Mode/SelectionMode = %q/%q, want normal/no selection", ed.Mode, ed.SelectionMode)
+	}
+}
+
+func TestVisualSelectionCommandEscCancelsAndClearsSelection(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text: "one\ntwo",
+			Mode: ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	ed := w.ActiveEditor()
+	startVisualSelection(ed, vimSelectionLine)
+	if !w.HandleKey(Key{Name: ":", Rune: ':'}) || !w.HandleKey(Key{Name: "esc"}) {
+		t.Fatal("HandleKey(: esc) = false, want command cancelled")
+	}
+	if ed.Mode != ModeNormal || ed.Command != "" || ed.SelectionMode != vimSelectionNone {
+		t.Fatalf("Mode/Command/SelectionMode = %q/%q/%q, want normal empty no selection", ed.Mode, ed.Command, ed.SelectionMode)
+	}
+}
+
+func TestVisualLineModeMoveSelectionCountUp(t *testing.T) {
+	ed := &Editor{Text: "one\ntwo\nthree\nfour", Cursor: len([]rune("one\ntwo\n")), Mode: ModeNormal}
+	startVisualSelection(ed, vimSelectionLine)
+	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
+	refreshVisualSelection(ed)
+	for _, key := range []Key{{Name: "m", Rune: 'm'}, {Name: "l", Rune: 'l'}, {Name: "2", Rune: '2'}, {Name: "u", Rune: 'u'}} {
+		if !handleVisualMode(&Workspace{}, ed, key) {
+			t.Fatalf("handleVisualMode(%q) = false, want true", key.Name)
+		}
+	}
+	if got := ed.Text; got != "three\nfour\none\ntwo" {
+		t.Fatalf("text = %q, want selected block moved to top", got)
+	}
+	start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+	if got := ed.Text[start:end]; got != "three\nfour\n" {
+		t.Fatalf("selected text = %q, want moved block selected", got)
+	}
+}
+
 func TestVisualBlockYankAndDelete(t *testing.T) {
 	restore := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
 	defer restore()
@@ -4221,6 +4665,18 @@ func TestRenderEditorPaneHighlightsVisualSelection(t *testing.T) {
 func handleEditorKeyForTest(ed *Editor, key Key) bool {
 	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
 	return w.handleEditorKey(key)
+}
+
+func submitEditorCommand(w *Workspace, command string) bool {
+	if w == nil || !w.HandleKey(Key{Name: ":", Rune: ':'}) {
+		return false
+	}
+	for _, r := range command {
+		if !w.HandleKey(Key{Name: string(r), Rune: r}) {
+			return false
+		}
+	}
+	return w.HandleKey(Key{Name: "enter"})
 }
 
 func workspaceHasOpenTab(w *Workspace, path string) bool {

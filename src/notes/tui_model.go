@@ -1990,6 +1990,7 @@ func (w *Workspace) handleEditorKey(key Key) bool {
 func handleCommandMode(w *Workspace, ed *Editor, key Key) bool {
 	switch key.Name {
 	case "esc":
+		clearVisualSelection(ed)
 		ed.Mode = ModeNormal
 		ed.Command = ""
 		return true
@@ -2003,11 +2004,16 @@ func handleCommandMode(w *Workspace, ed *Editor, key Key) bool {
 		cmd, err := parseVimCommand(ed.Command)
 		if err != nil {
 			ed.Status = err.Error()
+			if helpers.HasStatusBar() {
+				helpers.StatusBarInst().UpdateStatusBar(err.Error())
+			}
+			clearVisualSelection(ed)
 			ed.Mode = ModeNormal
 			return true
 		}
 		executeVimCommand(w, ed, cmd)
 		ed.Command = ""
+		clearVisualSelection(ed)
 		if settings.Inst().NotesApp.VimMode {
 			ed.Mode = ModeNormal
 		} else {
@@ -2750,6 +2756,11 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 	if ed.PendingOp == "r" {
 		return handleReplacePending(ed, key)
 	}
+	if ed.PendingOp == "m" || ed.PendingOp == "ml" {
+		if handleMoveLinePending(ed, key, false) {
+			return true
+		}
+	}
 	if ed.PendingOp == "z" {
 		ed.PendingOp = ""
 		if key.Name == "g" {
@@ -2777,6 +2788,11 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 			return true
 		}
 		ed.NormalCount += key.Name
+		return true
+	}
+	if moveLineKeyToken(key) == "m" {
+		ed.NormalCount = ""
+		ed.PendingOp = "m"
 		return true
 	}
 	switch key.Name {
@@ -3087,11 +3103,40 @@ func consumeXMotionOverride(w *Workspace, ed *Editor, key Key) bool {
 }
 
 func handleVisualMode(w *Workspace, ed *Editor, key Key) bool {
+	if ed.PendingOp == "m" || ed.PendingOp == "ml" {
+		if handleMoveLinePending(ed, key, true) {
+			return true
+		}
+	}
 	switch key.Name {
 	case "esc":
 		clearVisualSelection(ed)
+		ed.PendingOp = ""
+		ed.NormalCount = ""
 		ed.Mode = ModeNormal
 		return true
+	case ":":
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		ed.Mode = ModeCommand
+		ed.Command = ""
+		return true
+	case "/":
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		ed.Mode = ModeCommand
+		ed.Command = "/"
+		return true
+	}
+	if moveLineKeyToken(key) == "m" {
+		if ed.SelectionMode == vimSelectionNone {
+			return false
+		}
+		ed.NormalCount = ""
+		ed.PendingOp = "m"
+		return true
+	}
+	switch key.Name {
 	case "h", "left":
 		ed.Cursor = vimClampOffset(ed.Text, ed.Cursor-1)
 		refreshVisualSelection(ed)
@@ -3162,6 +3207,230 @@ func handleVisualMode(w *Workspace, ed *Editor, key Key) bool {
 		return shiftVisualSelection(ed, false)
 	}
 	return false
+}
+
+func handleMoveLinePending(ed *Editor, key Key, visual bool) bool {
+	token := moveLineKeyToken(key)
+	switch ed.PendingOp {
+	case "m":
+		if token == "l" {
+			ed.PendingOp = "ml"
+			ed.NormalCount = ""
+			return true
+		}
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		return false
+	case "ml":
+		if token >= "0" && token <= "9" && len([]rune(token)) == 1 {
+			if token == "0" && ed.NormalCount == "" {
+				return true
+			}
+			ed.NormalCount += token
+			return true
+		}
+		if token == "u" || token == "d" {
+			count := normalModeCount(ed)
+			if count <= 0 {
+				count = 1
+			}
+			if token == "u" {
+				count = -count
+			}
+			ed.PendingOp = ""
+			ed.NormalCount = ""
+			if visual {
+				return moveVisualLineSelection(ed, count)
+			}
+			return moveCurrentLine(ed, count)
+		}
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		return false
+	default:
+		return false
+	}
+}
+
+func moveLineKeyToken(key Key) string {
+	if key.Rune != 0 && !key.Ctrl && !key.Meta && !key.Alt {
+		r := unicode.ToLower(key.Rune)
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return string(r)
+		}
+	}
+	return key.Name
+}
+
+func moveCurrentLine(ed *Editor, delta int) bool {
+	updated, offsets, changed := vimMoveLineBlockAndOffsets(ed.Text, ed.Cursor, ed.Cursor, delta, []int{ed.Cursor})
+	if !changed {
+		return true
+	}
+	rememberUndoState(ed)
+	ed.Text = updated
+	ed.Cursor = offsets[0]
+	ed.Dirty = true
+	return true
+}
+
+func moveCommandLines(ed *Editor, delta int) bool {
+	if ed == nil {
+		return false
+	}
+	if ed.SelectionMode != vimSelectionNone {
+		return moveCommandLineRange(ed, delta)
+	}
+	updated, offsets, changed := vimMoveLineBlockAndOffsets(ed.Text, ed.Cursor, ed.Cursor, delta, []int{ed.Cursor})
+	if changed {
+		rememberUndoState(ed)
+		ed.Text = updated
+		ed.Cursor = offsets[0]
+		ed.Dirty = true
+	}
+	ed.Status = lineMoveStatus(false, delta, changed)
+	return true
+}
+
+func moveCommandLineRange(ed *Editor, delta int) bool {
+	updated, offsets, changed := vimMoveLineBlockAndOffsets(ed.Text, ed.SelectionMark, ed.SelectionCursor, delta, []int{
+		ed.Cursor,
+		ed.SelectionMark,
+		ed.SelectionCursor,
+	})
+	if changed {
+		rememberUndoState(ed)
+		ed.Text = updated
+		ed.Cursor = offsets[0]
+		ed.SelectionMark = offsets[1]
+		ed.SelectionCursor = offsets[2]
+		ed.Dirty = true
+	}
+	ed.Status = lineMoveStatus(true, delta, changed)
+	clearVisualSelection(ed)
+	ed.Mode = ModeNormal
+	return true
+}
+
+func lineMoveStatus(plural bool, delta int, changed bool) string {
+	if !changed {
+		if plural {
+			return "lines already at boundary"
+		}
+		return "line already at boundary"
+	}
+	direction := "down"
+	if delta < 0 {
+		direction = "up"
+	}
+	if plural {
+		return "moved lines " + direction
+	}
+	return "moved line " + direction
+}
+
+func moveVisualLineSelection(ed *Editor, delta int) bool {
+	if ed.SelectionMode == vimSelectionNone {
+		return false
+	}
+	mode := ed.SelectionMode
+	updated, offsets, changed := vimMoveLineBlockAndOffsets(ed.Text, ed.SelectionMark, ed.SelectionCursor, delta, []int{
+		ed.Cursor,
+		ed.SelectionMark,
+		ed.SelectionCursor,
+	})
+	if changed {
+		rememberUndoState(ed)
+		ed.Text = updated
+		ed.Cursor = offsets[0]
+		ed.SelectionMark = offsets[1]
+		ed.SelectionCursor = offsets[2]
+		ed.Dirty = true
+	}
+	ed.Mode = ModeVisual
+	ed.SelectionMode = mode
+	return true
+}
+
+func vimMoveLineBlockAndOffsets(text string, startOffset int, endOffset int, delta int, offsets []int) (string, []int, bool) {
+	transformed := append([]int(nil), offsets...)
+	if delta == 0 {
+		return text, transformed, false
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) <= 1 {
+		return text, transformed, false
+	}
+	startIdx, endIdx := vimLineIndexRange(text, startOffset, endOffset)
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if endIdx >= len(lines) {
+		endIdx = len(lines) - 1
+	}
+	if startIdx > endIdx {
+		startIdx, endIdx = endIdx, startIdx
+	}
+	blockLen := endIdx - startIdx + 1
+	if blockLen >= len(lines) {
+		return text, transformed, false
+	}
+	targetStart := startIdx + delta
+	if targetStart < 0 {
+		targetStart = 0
+	}
+	if maxStart := len(lines) - blockLen; targetStart > maxStart {
+		targetStart = maxStart
+	}
+	if targetStart == startIdx {
+		return text, transformed, false
+	}
+
+	lineInfos := vimLineInfos(text)
+	lineRefs := make([]lineOffsetRef, len(offsets))
+	for i, offset := range offsets {
+		lineIdx := vimLineIndexAtOffset(text, offset)
+		if lineIdx < startIdx {
+			lineIdx = startIdx
+		}
+		if lineIdx > endIdx {
+			lineIdx = endIdx
+		}
+		col := offset - lineInfos[lineIdx].start
+		if col < 0 {
+			col = 0
+		}
+		lineRefs[i] = lineOffsetRef{line: lineIdx - startIdx, col: col}
+	}
+
+	block := append([]string(nil), lines[startIdx:endIdx+1]...)
+	remaining := make([]string, 0, len(lines)-blockLen)
+	remaining = append(remaining, lines[:startIdx]...)
+	remaining = append(remaining, lines[endIdx+1:]...)
+	updatedLines := make([]string, 0, len(lines))
+	updatedLines = append(updatedLines, remaining[:targetStart]...)
+	updatedLines = append(updatedLines, block...)
+	updatedLines = append(updatedLines, remaining[targetStart:]...)
+	updated := strings.Join(updatedLines, "\n")
+	updatedStarts := lineStartOffsets(updated)
+
+	for i, ref := range lineRefs {
+		lineIdx := targetStart + ref.line
+		if lineIdx < 0 {
+			lineIdx = 0
+		}
+		if lineIdx >= len(updatedLines) {
+			lineIdx = len(updatedLines) - 1
+		}
+		col := min(ref.col, len([]rune(updatedLines[lineIdx])))
+		transformed[i] = updatedStarts[lineIdx] + col
+	}
+	return updated, transformed, true
+}
+
+type lineOffsetRef struct {
+	line int
+	col  int
 }
 
 func shiftCurrentLine(ed *Editor, right bool) bool {
@@ -3608,6 +3877,8 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 		} else {
 			ed.Status = "no buffer to close"
 		}
+	case vimCommandLineMove:
+		moveCommandLines(ed, cmd.LineDelta)
 	}
 }
 
@@ -3700,12 +3971,12 @@ func (w *Workspace) HelpText() string {
 		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | :bd close note | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | :bd close note | :mld/:mlu move lines | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
 	}
 	if ed.Mode == ModeVisual {
-		return "notes/visual: h j k l move | V line | >/< indent | y yank | d/x delete | esc normal"
+		return "notes/visual: h j k l move | V line | :mld/:mlu move selected lines | >/< indent | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | >/< indent | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | zg add word | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
+	return "notes/normal: i insert | u undo | :mld/:mlu move line | >/< indent | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | zg add word | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -3803,6 +4074,9 @@ func (w *Workspace) CommandLineText(width int) string {
 	ed := w.ActiveEditor()
 	if ed == nil {
 		return helpers.TruncateANSI("no note open | ctrl+n new | ctrl+a sidebar", width)
+	}
+	if command := pendingEditorCommandText(ed); command != "" {
+		return helpers.TruncateANSI(command, width)
 	}
 	if ed.Mode == ModeCommand {
 		return helpers.TruncateANSI(ed.Command, width)
@@ -3913,10 +4187,30 @@ func (w *Workspace) CommandCursor() (int, bool) {
 		return len([]rune(w.BrowserCommand)), true
 	}
 	ed := w.ActiveEditor()
-	if ed == nil || ed.Mode != ModeCommand {
+	if ed == nil {
+		return 0, false
+	}
+	if command := pendingEditorCommandText(ed); command != "" {
+		return len([]rune(command)), true
+	}
+	if ed.Mode != ModeCommand {
 		return 0, false
 	}
 	return len([]rune(ed.Command)), true
+}
+
+func pendingEditorCommandText(ed *Editor) string {
+	if ed == nil {
+		return ""
+	}
+	switch ed.PendingOp {
+	case "m":
+		return "m"
+	case "ml":
+		return "ml" + ed.NormalCount
+	default:
+		return ""
+	}
 }
 
 func (w *Workspace) statusLine(width int) string {
