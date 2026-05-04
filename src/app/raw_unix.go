@@ -5,6 +5,7 @@ package app
 import (
 	"bufio"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/kloneets/tools/src/notes"
@@ -135,6 +136,10 @@ func parseCSI(seq []byte) notes.Key {
 	last := seq[len(seq)-1]
 	params := strings.TrimSuffix(string(seq), string(last))
 	switch last {
+	case 'u':
+		if key, ok := parseCSIUKey(params); ok {
+			return key
+		}
 	case 'A':
 		return notes.Key{Name: "up"}
 	case 'B':
@@ -154,6 +159,9 @@ func parseCSI(seq []byte) notes.Key {
 	case 'F':
 		return notes.Key{Name: "end"}
 	case '~':
+		if key, ok := parseModifyOtherKeys(params); ok {
+			return key
+		}
 		switch firstParam(params) {
 		case "1", "7":
 			return notes.Key{Name: "home"}
@@ -168,6 +176,37 @@ func parseCSI(seq []byte) notes.Key {
 		}
 	}
 	return notes.Key{Name: "esc"}
+}
+
+func parseCSIUKey(params string) (notes.Key, bool) {
+	parts := strings.Split(params, ";")
+	if len(parts) < 2 || parts[1] != "5" {
+		return notes.Key{}, false
+	}
+	return ctrlKeyFromCodepoint(parts[0])
+}
+
+func parseModifyOtherKeys(params string) (notes.Key, bool) {
+	parts := strings.Split(params, ";")
+	if len(parts) != 3 || parts[0] != "27" || parts[1] != "5" {
+		return notes.Key{}, false
+	}
+	return ctrlKeyFromCodepoint(parts[2])
+}
+
+func ctrlKeyFromCodepoint(code string) (notes.Key, bool) {
+	value, err := strconv.Atoi(code)
+	if err != nil {
+		return notes.Key{}, false
+	}
+	if value >= 0 && value <= 31 {
+		return decodeCtrlByte(byte(value))
+	}
+	if value >= int('a') && value <= int('z') {
+		r := rune(value)
+		return notes.Key{Name: string(r), Rune: r, Ctrl: true}, true
+	}
+	return notes.Key{}, false
 }
 
 func firstParam(params string) string {

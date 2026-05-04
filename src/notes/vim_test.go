@@ -122,8 +122,22 @@ func TestVimYankWordSkipsPunctuationAndStopsBeforePunctuation(t *testing.T) {
 
 func TestVimDeleteWord(t *testing.T) {
 	got, cursor := vimDeleteWord("alpha beta", 0)
-	if got != "beta" || cursor != 0 {
-		t.Fatalf("vimDeleteWord() = %q,%d want %q,%d", got, cursor, "beta", 0)
+	if got != " beta" || cursor != 0 {
+		t.Fatalf("vimDeleteWord() = %q,%d want %q,%d", got, cursor, " beta", 0)
+	}
+}
+
+func TestVimDeleteWordKeepsNewline(t *testing.T) {
+	got, cursor := vimDeleteWord("alpha\nbeta", 0)
+	if got != "\nbeta" || cursor != 0 {
+		t.Fatalf("vimDeleteWord() = %q,%d want %q,%d", got, cursor, "\nbeta", 0)
+	}
+}
+
+func TestVimDeleteWordFromMiddleKeepsTrailingSpace(t *testing.T) {
+	got, cursor := vimDeleteWord("alpha beta", 2)
+	if got != "al beta" || cursor != 2 {
+		t.Fatalf("vimDeleteWord() = %q,%d want %q,%d", got, cursor, "al beta", 2)
 	}
 }
 

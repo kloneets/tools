@@ -33,6 +33,16 @@ func TestParseCSI(t *testing.T) {
 	}
 }
 
+func TestParseCSIDecodesTmuxCtrlGSequences(t *testing.T) {
+	for _, seq := range []string{"103;5u", "7;5u", "27;5;103~"} {
+		got := parseCSI([]byte(seq))
+		want := notes.Key{Name: "g", Rune: 'g', Ctrl: true}
+		if got != want {
+			t.Fatalf("parseCSI(%q) = %#v, want %#v", seq, got, want)
+		}
+	}
+}
+
 func TestDecodeCtrlByte(t *testing.T) {
 	cases := []struct {
 		in   byte

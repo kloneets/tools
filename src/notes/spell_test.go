@@ -558,10 +558,13 @@ func TestNativeMisspelledWordsParsesNuspellAndHunspellOutput(t *testing.T) {
 
 func TestNativeSuggestionWordsParsesOutput(t *testing.T) {
 	cases := map[string][]string{
-		"& Wrong: collor. How about: color, collar":                                 {"color", "collar"},
-		"Enter some text: & Wrong: collor. How about: color, collar":                {"color", "collar"},
-		"# Wrong: chpjrsgdhodi. No suggestions.":                                    nil,
-		"& Wrong: collor. How about: color, collar # Wrong: abowe. No suggestions.": {"color", "collar"},
+		"& Wrong: collor. How about: color, collar":                                     {"color", "collar"},
+		"Enter some text: & Wrong: collor. How about: color, collar":                    {"color", "collar"},
+		"& collor 7 0: color, collar, coll or, coll-or, collator, corolla, coll":        {"color", "collar", "collator", "corolla", "coll"},
+		"Enter some text: & collor 7 0: color, collar, coll or, coll-or":                {"color", "collar"},
+		"# Wrong: chpjrsgdhodi. No suggestions.":                                        nil,
+		"& Wrong: collor. How about: color, collar # Wrong: abowe. No suggestions.":     {"color", "collar"},
+		"& collor 7 0: color, collar, coll or, coll-or # Wrong: abowe. No suggestions.": {"color", "collar"},
 	}
 	for input, want := range cases {
 		if got := nativeSuggestionWords(input); strings.Join(got, ",") != strings.Join(want, ",") {

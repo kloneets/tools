@@ -2605,13 +2605,13 @@ func openSpellSuggestions(w *Workspace, ed *Editor) bool {
 	word, start, end, ok := spellSuggestionTarget(ed)
 	if !ok {
 		clearAutoComplete(ed)
-		ed.Status = "no spelling suggestions available"
+		ed.Status = "no word under cursor for spelling"
 		return true
 	}
 	service, err := currentSpellService()
 	if err != nil || service == nil || !service.ready() {
 		clearAutoComplete(ed)
-		ed.Status = "no spelling suggestions available"
+		ed.Status = "spell service unavailable"
 		return true
 	}
 	if service.correct(word) {
@@ -2622,13 +2622,13 @@ func openSpellSuggestions(w *Workspace, ed *Editor) bool {
 	suggestions, err := service.suggestions(word)
 	if err != nil {
 		clearAutoComplete(ed)
-		ed.Status = "no spelling suggestions available"
+		ed.Status = "spell suggestions failed"
 		return true
 	}
 	suggestions = filterSpellSuggestions(word, suggestions)
 	if len(suggestions) == 0 {
 		clearAutoComplete(ed)
-		ed.Status = "no spelling suggestions available"
+		ed.Status = "no spelling suggestions returned"
 		return true
 	}
 	ed.AutoCompleteKind = autoCompleteSpell
@@ -3968,7 +3968,7 @@ func (w *Workspace) HelpText() string {
 		return "notes: no note open | ctrl+a sidebar | ctrl+n new | ctrl+s save"
 	}
 	if ed.Mode == ModeInsert {
-		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
+		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g/:spell spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
 		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | :bd close note | :mld/:mlu move lines | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
@@ -3976,7 +3976,7 @@ func (w *Workspace) HelpText() string {
 	if ed.Mode == ModeVisual {
 		return "notes/visual: h j k l move | V line | :mld/:mlu move selected lines | >/< indent | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | :mld/:mlu move line | >/< indent | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | zg add word | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
+	return "notes/normal: i insert | u undo | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | zg add word | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {

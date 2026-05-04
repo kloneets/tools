@@ -620,7 +620,7 @@ func vimYankWord(text string, offset int) vimRegister {
 }
 
 func vimDeleteWord(text string, offset int) (string, int) {
-	start, end := vimWordRange(text, offset)
+	start, end := vimStrictWordRange(text, offset)
 	if start == end {
 		return text, start
 	}

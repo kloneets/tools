@@ -722,9 +722,12 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 }
 
 var inputSequenceShortcuts = map[string]notes.Key{
-	"\x1b[9;5u":    {Name: "tab", Ctrl: true},
-	"\x1b[27;5;9~": {Name: "tab", Ctrl: true},
-	"\x1b[1;5I":    {Name: "tab", Ctrl: true},
+	"\x1b[9;5u":      {Name: "tab", Ctrl: true},
+	"\x1b[27;5;9~":   {Name: "tab", Ctrl: true},
+	"\x1b[1;5I":      {Name: "tab", Ctrl: true},
+	"\x1b[103;5u":    {Name: "g", Rune: 'g', Ctrl: true},
+	"\x1b[7;5u":      {Name: "g", Rune: 'g', Ctrl: true},
+	"\x1b[27;5;103~": {Name: "g", Rune: 'g', Ctrl: true},
 }
 
 func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
@@ -914,6 +917,9 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 	switch event.Key() {
 	case tcell.KeyRune:
 		r := event.Rune()
+		if key, ok := mapControlRune(r); ok {
+			return key, true
+		}
 		if event.Modifiers()&tcell.ModCtrl != 0 {
 			return notes.Key{Ctrl: true, Name: string(r), Rune: r}, true
 		}
@@ -989,6 +995,24 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 		return notes.Key{Name: "6", Ctrl: true}, true
 	default:
 		return mapControlTCellKey(event)
+	}
+}
+
+func mapControlRune(r rune) (notes.Key, bool) {
+	switch r {
+	case 1, 2, 4, 5, 6, 7, 8, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26:
+		keyRune := rune('a' + (r - 1))
+		return notes.Key{Name: string(keyRune), Rune: keyRune, Ctrl: true}, true
+	case 28:
+		return notes.Key{Name: "4", Ctrl: true}, true
+	case 29:
+		return notes.Key{Name: "5", Ctrl: true}, true
+	case 30:
+		return notes.Key{Name: "6", Ctrl: true}, true
+	case 31:
+		return notes.Key{Name: "7", Ctrl: true}, true
+	default:
+		return notes.Key{}, false
 	}
 }
 
@@ -2832,6 +2856,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "p", desc: "paste register"},
 		{keys: ":, /", desc: "enter command or search"},
 		{keys: "n, N", desc: "next or previous search match"},
+		{keys: "ctrl+g, :spell", desc: "open spelling suggestions for the word under cursor"},
 		{keys: "zg", desc: "add word under cursor to the shared spell dictionary"},
 		{keys: "v, V, ctrl+v", desc: "start visual char, line, or block selection"},
 		{keys: "ctrl+s", desc: "save locally"},
@@ -2851,6 +2876,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "enter", desc: "insert newline"},
 		{keys: "tab", desc: "path-complete inside markdown refs, otherwise insert spaces"},
 		{keys: "shift+tab", desc: "reverse path-complete inside markdown refs"},
+		{keys: "ctrl+g, :spell", desc: "open spelling suggestions for the word under cursor"},
 		{keys: "esc", desc: "return to normal mode"},
 	})...)
 	lines = append(lines, renderSection("Notes command:", []helpEntry{
@@ -2859,6 +2885,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "undo", desc: "undo last text change"},
 		{keys: "redo", desc: "redo last undone text change"},
 		{keys: "preview", desc: "toggle preview pane"},
+		{keys: ":spell", desc: "open spelling suggestions for the word under cursor"},
 		{keys: "/text", desc: "search for text"},
 		{keys: "ol", desc: "review and open all unique external links"},
 		{keys: "recordkeys", desc: "open the on-demand recorder tab and capture keys for 5 seconds"},

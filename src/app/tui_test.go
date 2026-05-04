@@ -156,6 +156,7 @@ func TestMapTCellKey(t *testing.T) {
 		{tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModCtrl), notes.Key{Name: "v", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlG, 0, tcell.ModCtrl), notes.Key{Name: "g", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlR, 0, tcell.ModCtrl), notes.Key{Name: "r", Ctrl: true}},
+		{tcell.NewEventKey(tcell.KeyRune, 0x07, tcell.ModNone), notes.Key{Name: "g", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModCtrl), notes.Key{Name: "t", Ctrl: true, Rune: 't'}},
 		{tcell.NewEventKey(tcell.KeyRune, '1', tcell.ModCtrl), notes.Key{Name: "1", Ctrl: true, Rune: '1'}},
 		{tcell.NewEventKey(tcell.KeyRune, 'g', tcell.ModCtrl), notes.Key{Name: "g", Ctrl: true, Rune: 'g'}},
@@ -174,6 +175,14 @@ func TestMapTCellKey(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("mapTCellKey(%v) = %#v, want %#v", tc.event, got, tc.want)
 		}
+	}
+}
+
+func TestMapControlRuneDecodesLinuxCtrlG(t *testing.T) {
+	got, ok := mapControlRune(0x07)
+	want := notes.Key{Name: "g", Rune: 'g', Ctrl: true}
+	if !ok || got != want {
+		t.Fatalf("mapControlRune(0x07) = %#v, %t want %#v, true", got, ok, want)
 	}
 }
 
@@ -645,6 +654,38 @@ func TestCaptureInputCtrlTabCSIuCyclesAppTabs(t *testing.T) {
 	}
 	if app.view != viewFiles {
 		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	}
+}
+
+func TestCaptureInputTmuxCtrlGCSIuOpensSpellSuggestions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ws := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Text:   "mispelled",
+			Cursor: 1,
+			Mode:   notes.ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	app := &terminalApp{view: viewNotes, notes: ws}
+	events := []*tcell.EventKey{
+		tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '[', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '1', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '0', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '3', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, ';', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, '5', tcell.ModNone),
+		tcell.NewEventKey(tcell.KeyRune, 'u', tcell.ModNone),
+	}
+	for _, event := range events {
+		if got := app.captureInput(event); got != nil {
+			t.Fatalf("captureInput(%v) returned event, want consumed", event)
+		}
+	}
+	if got := ws.ActiveEditor().Status; got == "" {
+		t.Fatal("editor status is empty, want ctrl+g to reach spell suggestions handler")
 	}
 }
 
@@ -1278,6 +1319,17 @@ func TestRenderHelpOverlayFormatsBindingsAsAlignedRows(t *testing.T) {
 	}
 	if strings.Contains(got, "ctrl+t activate tab bar |") {
 		t.Fatalf("renderHelpOverlay() = %q, want one binding per row, not inline pipe list", got)
+	}
+}
+
+func TestRenderHelpOverlayIncludesSpellAutocompleteHelp(t *testing.T) {
+	app := &terminalApp{view: viewNotes}
+	got, _ := app.renderHelpOverlay(100, 30)
+	if !strings.Contains(got, "ctrl+g, :spell") {
+		t.Fatalf("renderHelpOverlay() = %q, want ctrl+g and :spell help", got)
+	}
+	if !strings.Contains(got, "open spelling suggestions") {
+		t.Fatalf("renderHelpOverlay() = %q, want spell suggestion description", got)
 	}
 }
 

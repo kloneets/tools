@@ -107,6 +107,11 @@ func TestHelpTextIncludesNavigation(t *testing.T) {
 	if !strings.Contains(got, "ctrl+a") {
 		t.Fatalf("HelpText() = %q, want sidebar navigation help", got)
 	}
+	w.Tabs = []*Editor{{Text: "alpha", Mode: ModeNormal}}
+	w.CurrentTab = 0
+	if got := w.HelpText(); !strings.Contains(got, "ctrl+g/:spell spelling") {
+		t.Fatalf("HelpText() = %q, want spell shortcut and command help", got)
+	}
 }
 
 func findTreeEntryIndex(t *testing.T, entries []TreeEntry, kind treeEntryKind, path string, label string) int {
@@ -1778,10 +1783,10 @@ func TestInsertModeCtrlGOpensSpellSuggestionsAndTabCycles(t *testing.T) {
 		return "", errors.New("missing")
 	}, func(name string, args []string, input string) (string, error) {
 		if strings.Contains(input, "kokotoolsspellprobe") {
-			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+			return "& kokotoolsspellprobe 1 0: tool\n", nil
 		}
 		if strings.Contains(input, "collor") {
-			return "& Wrong: collor. How about: color, collar\n", nil
+			return "& collor 7 0: color, collar, coll or, coll-or\n", nil
 		}
 		return "* OK\n", nil
 	})
@@ -1847,8 +1852,8 @@ func TestInsertModeCtrlGWithoutNativeSuggestionsShowsStatus(t *testing.T) {
 	if !ws.handleEditorKey(Key{Name: "g", Ctrl: true}) {
 		t.Fatal("handleEditorKey(ctrl+g) = false, want true")
 	}
-	if ed.Status != "no spelling suggestions available" {
-		t.Fatalf("status = %q, want no spelling suggestions available", ed.Status)
+	if ed.Status != "spell suggestions failed" {
+		t.Fatalf("status = %q, want spell suggestions failed", ed.Status)
 	}
 }
 
@@ -1866,10 +1871,10 @@ func TestHandleEditorKeyCtrlGOpensSpellSuggestionsOutsideInsertMode(t *testing.T
 		return "", errors.New("missing")
 	}, func(name string, args []string, input string) (string, error) {
 		if strings.Contains(input, "kokotoolsspellprobe") {
-			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+			return "& kokotoolsspellprobe 1 0: tool\n", nil
 		}
 		if strings.Contains(input, "Naice") {
-			return "& Wrong: Naice. How about: Nice, Naive\n", nil
+			return "& Naice 2 0: Nice, Naive\n", nil
 		}
 		return "* OK\n", nil
 	})
@@ -1913,10 +1918,10 @@ func TestExecuteVimCommandSpellAppliesSuggestions(t *testing.T) {
 		return "", errors.New("missing")
 	}, func(name string, args []string, input string) (string, error) {
 		if strings.Contains(input, "kokotoolsspellprobe") {
-			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
+			return "& kokotoolsspellprobe 1 0: tool\n", nil
 		}
 		if strings.Contains(input, "Naice") {
-			return "& Wrong: Naice. How about: Nice, Naive\n", nil
+			return "& Naice 2 0: Nice, Naive\n", nil
 		}
 		return "* OK\n", nil
 	})
@@ -1941,6 +1946,63 @@ func TestExecuteVimCommandSpellAppliesSuggestions(t *testing.T) {
 	}
 	if got := w.ActiveEditor().Text; got != "Nice work" {
 		t.Fatalf("text = %q, want accepted spell suggestion after :spell", got)
+	}
+}
+
+func TestCommandModeSpellOpensSuggestions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().NotesApp.SpellCheckEnabled = true
+	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
+	defer ResetSpellTestHooksForTests()
+	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
+	SetSpellNativeHooksForTests(func(name string) (string, error) {
+		if name == "nuspell" {
+			return "/bin/nuspell", nil
+		}
+		return "", errors.New("missing")
+	}, func(name string, args []string, input string) (string, error) {
+		if strings.Contains(input, "kokotoolsspellprobe") {
+			return "& kokotoolsspellprobe 1 0: tool\n", nil
+		}
+		if strings.Contains(input, "Naice") {
+			return "& Naice 2 0: Nice, Naive\n", nil
+		}
+		return "* OK\n", nil
+	})
+
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "Naice work",
+			Cursor: 2,
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	if !submitEditorCommand(w, "spell") {
+		t.Fatal("submitEditorCommand(spell) = false, want true")
+	}
+	ed := w.ActiveEditor()
+	if ed.AutoCompleteKind != autoCompleteSpell {
+		t.Fatalf("AutoCompleteKind = %q, want %q", ed.AutoCompleteKind, autoCompleteSpell)
+	}
+	if ed.Status != "spell suggestions ready" {
+		t.Fatalf("status = %q, want spell suggestion readiness", ed.Status)
+	}
+}
+
+func TestSpellCommandWithoutWordShowsSpecificStatus(t *testing.T) {
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:   "   ",
+			Cursor: 1,
+			Mode:   ModeNormal,
+		}},
+		CurrentTab: 0,
+	}
+	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandSpell})
+	if got := w.ActiveEditor().Status; got != "no word under cursor for spelling" {
+		t.Fatalf("status = %q, want no word under cursor for spelling", got)
 	}
 }
 
@@ -1983,8 +2045,8 @@ func TestOpenSpellSuggestionsIgnoresIdentitySuggestions(t *testing.T) {
 	if w.ActiveEditor().AutoCompleteKind != "" {
 		t.Fatalf("AutoCompleteKind = %q, want cleared autocomplete when no proper suggestions exist", w.ActiveEditor().AutoCompleteKind)
 	}
-	if w.ActiveEditor().Status != "no spelling suggestions available" {
-		t.Fatalf("status = %q, want no spelling suggestions available", w.ActiveEditor().Status)
+	if w.ActiveEditor().Status != "no spelling suggestions returned" {
+		t.Fatalf("status = %q, want no spelling suggestions returned", w.ActiveEditor().Status)
 	}
 }
 
@@ -3110,11 +3172,41 @@ func TestHandleNormalModeDWDeletesWord(t *testing.T) {
 	if !handleNormalMode(&Workspace{}, ed, Key{Name: "w", Rune: 'w'}) {
 		t.Fatal("handleNormalMode(w) = false, want true after d")
 	}
-	if got := ed.Text; got != "beta gamma" {
-		t.Fatalf("text = %q, want %q", got, "beta gamma")
+	if got := ed.Text; got != " beta gamma" {
+		t.Fatalf("text = %q, want %q", got, " beta gamma")
 	}
 	if ed.PendingOp != "" {
 		t.Fatalf("PendingOp = %q, want cleared", ed.PendingOp)
+	}
+}
+
+func TestHandleNormalModeDWDeletesWordWithoutNewline(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "alpha\nbeta", Cursor: 0, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "w", Rune: 'w'}) {
+		t.Fatal("handleNormalMode(w) = false, want true after d")
+	}
+	if got := ed.Text; got != "\nbeta" {
+		t.Fatalf("text = %q, want %q", got, "\nbeta")
+	}
+}
+
+func TestHandleNormalModeDWDeletesFromCursorToWordEndOnly(t *testing.T) {
+	restoreWrite := helpers.SetClipboardWriterForTesting(func(string) error { return nil })
+	defer restoreWrite()
+	ed := &Editor{Text: "alpha beta", Cursor: 2, Mode: ModeNormal}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
+		t.Fatal("handleNormalMode(d) = false, want true")
+	}
+	if !handleNormalMode(&Workspace{}, ed, Key{Name: "w", Rune: 'w'}) {
+		t.Fatal("handleNormalMode(w) = false, want true after d")
+	}
+	if got := ed.Text; got != "al beta" {
+		t.Fatalf("text = %q, want %q", got, "al beta")
 	}
 }
 

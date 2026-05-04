@@ -832,14 +832,10 @@ func nativeMisspelledWords(line string) []string {
 
 func nativeSuggestionWords(line string) []string {
 	line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Enter some text:"))
-	if line == "" || !strings.Contains(line, "How about:") {
+	if line == "" {
 		return nil
 	}
-	idx := strings.Index(line, "How about:")
-	if idx < 0 {
-		return nil
-	}
-	rest := strings.TrimSpace(line[idx+len("How about:"):])
+	rest := nativeSuggestionList(line)
 	if rest == "" {
 		return nil
 	}
@@ -849,11 +845,31 @@ func nativeSuggestionWords(line string) []string {
 	parts := strings.Split(rest, ",")
 	suggestions := make([]string, 0, len(parts))
 	for _, part := range parts {
-		if word := normalizeSpellWord(part); word != "" {
+		if word := normalizeSpellWord(part); validNativeSuggestionWord(word) {
 			suggestions = append(suggestions, word)
 		}
 	}
 	return suggestions
+}
+
+func validNativeSuggestionWord(word string) bool {
+	if !shouldCheckSpellWord(word) {
+		return false
+	}
+	return !strings.ContainsAny(word, " \t-")
+}
+
+func nativeSuggestionList(line string) string {
+	if idx := strings.Index(line, "How about:"); idx >= 0 {
+		return strings.TrimSpace(line[idx+len("How about:"):])
+	}
+	if !strings.HasPrefix(line, "& ") {
+		return ""
+	}
+	if idx := strings.Index(line, ":"); idx >= 0 {
+		return strings.TrimSpace(line[idx+1:])
+	}
+	return ""
 }
 
 func (d nativeSpellDictionary) run(words []string) (string, error) {
