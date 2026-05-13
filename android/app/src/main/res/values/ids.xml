@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="tab_notes" type="id" />
+    <item name="tab_pages" type="id" />
+    <item name="tab_sync" type="id" />
+    <item name="app_title" type="id" />
+    <item name="tools_menu" type="id" />
+    <item name="actions_menu" type="id" />
+    <item name="notes_list" type="id" />
+    <item name="note_editor" type="id" />
+    <item name="note_new" type="id" />
+    <item name="note_save" type="id" />
+    <item name="note_delete" type="id" />
+    <item name="note_sync" type="id" />
+    <item name="pages_first" type="id" />
+    <item name="pages_read" type="id" />
+    <item name="pages_second" type="id" />
+    <item name="pages_result" type="id" />
+    <item name="pages_calculate" type="id" />
+    <item name="sync_folder_id" type="id" />
+    <item name="sync_connect" type="id" />
+    <item name="sync_save_folder" type="id" />
+    <item name="sync_upload" type="id" />
+    <item name="sync_refresh" type="id" />
+    <item name="sync_restore" type="id" />
+    <item name="sync_snapshot_list" type="id" />
+    <item name="sync_status" type="id" />
+</resources>

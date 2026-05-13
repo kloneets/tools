@@ -36,6 +36,12 @@ go test ./...
 
 The first build or test run can take longer while Go downloads and compiles dependencies.
 
+## Android Companion App
+
+A Kotlin Android companion app lives in `android/`. It supports a focused subset of the desktop app: Markdown note editing, Pages calculations, and Google Drive snapshot interoperability.
+
+See `android/README.md` for Android Studio import, build commands, local data paths, and Google Drive OAuth setup.
+
 ## CLI Commands
 
 ### Open Links
