@@ -1,6 +1,8 @@
 .vscode
 koko-tools
 main
+!android/app/src/main/
+!android/app/src/main/**
 dist
 
 credentials.json

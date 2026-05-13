@@ -68,6 +68,45 @@ func TestParseVimCommandCurrentLineReplace(t *testing.T) {
 	}
 }
 
+func TestParseVimCommandReplaceRangeFlagsAndDelimiter(t *testing.T) {
+	cmd, err := parseVimCommand(`2,4s#old\#value#new/value#gci`)
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandReplace || cmd.Range.Kind != vimRangeLines || cmd.Range.Start != 2 || cmd.Range.End != 4 {
+		t.Fatalf("range cmd = %#v, want line range 2,4", cmd)
+	}
+	if cmd.Query != "old#value" || cmd.Replacement != "new/value" || !cmd.Global || !cmd.Confirm || !cmd.IgnoreCase {
+		t.Fatalf("cmd = %#v, want escaped delimiter replacement with gci flags", cmd)
+	}
+}
+
+func TestParseVimCommandVisualReplace(t *testing.T) {
+	cmd, err := parseVimCommand("'<,'>s/old/new/g")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandReplace || cmd.Range.Kind != vimRangeVisual || !cmd.Global {
+		t.Fatalf("cmd = %#v, want visual range replace", cmd)
+	}
+}
+
+func TestParseVimCommandBackwardSearch(t *testing.T) {
+	cmd, err := parseVimCommand("?needle")
+	if err != nil {
+		t.Fatalf("parseVimCommand() error = %v", err)
+	}
+	if cmd.Kind != vimCommandSearch || cmd.Query != "needle" || !cmd.SearchBack {
+		t.Fatalf("cmd = %#v, want backward search", cmd)
+	}
+}
+
+func TestParseVimCommandReplaceRejectsUnknownFlag(t *testing.T) {
+	if _, err := parseVimCommand("%s/old/new/x"); err == nil {
+		t.Fatal("parseVimCommand() error = nil, want unsupported flag error")
+	}
+}
+
 func TestParseVimCommandOpenLinks(t *testing.T) {
 	cmd, err := parseVimCommand("ol")
 	if err != nil {
@@ -240,5 +279,16 @@ func TestReplaceTextInRange(t *testing.T) {
 	got, count := replaceTextInRange("one\ntwo one\none", "one", "1", true, 4, 11)
 	if got != "one\ntwo 1\none" || count != 1 {
 		t.Fatalf("replaceTextInRange() = %q,%d want %q,%d", got, count, "one\ntwo 1\none", 1)
+	}
+}
+
+func TestReplaceRegexUsesVimSubsetAndCaptures(t *testing.T) {
+	re, err := compileVimRegex(`\(foo\)\+`, false)
+	if err != nil {
+		t.Fatalf("compileVimRegex() error = %v", err)
+	}
+	got, count, _ := replaceRegexInRange("foofoo bar", re, `[\1:&]`, true, 0, len([]rune("foofoo bar")))
+	if got != "[foo:foofoo] bar" || count != 1 {
+		t.Fatalf("replaceRegexInRange() = %q,%d want capture replacement", got, count)
 	}
 }

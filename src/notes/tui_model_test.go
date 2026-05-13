@@ -1256,6 +1256,52 @@ func TestRenderEditorPaneHighlightsAllSearchOccurrences(t *testing.T) {
 	}
 }
 
+func TestRenderEditorPaneHighlightsLiveSearchCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:       "alpha beta alpha",
+		Mode:       ModeCommand,
+		Command:    "/alpha",
+		LastSearch: "beta",
+	}
+	got := renderEditorPane(ed, 40, 1)[0]
+	if strings.Count(got, helpers.ANSIRoleSearch) != 2 {
+		t.Fatalf("renderEditorPane() = %q, want live command matches highlighted", got)
+	}
+	if strings.Contains(got, helpers.ANSIRoleSearch+"beta") {
+		t.Fatalf("renderEditorPane() = %q, want command query to override previous search", got)
+	}
+}
+
+func TestRenderEditorPaneHighlightsLiveSubstituteCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:    "alpha beta alpha",
+		Mode:    ModeCommand,
+		Command: "%s/alpha/omega/",
+	}
+	got := renderEditorPane(ed, 40, 1)[0]
+	if strings.Count(got, helpers.ANSIRoleSearch) != 2 {
+		t.Fatalf("renderEditorPane() = %q, want live substitute matches highlighted", got)
+	}
+}
+
+func TestRenderEditorPaneHighlightsPartialLiveSubstituteCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{
+		Text:    "alpha beta alpha",
+		Mode:    ModeCommand,
+		Command: "s#alpha",
+	}
+	got := renderEditorPane(ed, 40, 1)[0]
+	if strings.Count(got, helpers.ANSIRoleSearch) != 2 {
+		t.Fatalf("renderEditorPane() = %q, want partial substitute matches highlighted", got)
+	}
+}
+
 func TestListManagedFilesSkipsNotesAndIncludesAssets(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -3549,6 +3595,103 @@ func TestReplaceCommandCanBeUndone(t *testing.T) {
 	}
 }
 
+func TestVimSubstituteRangeAndCaptures(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Title: "Plan", Text: "one\ntwo two\nthree two", Cursor: 0, Mode: ModeNormal}
+	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
+	if !submitEditorCommand(w, `2,$s/\(two\)/[\1:&]/g`) {
+		t.Fatal("submitEditorCommand(range substitute) = false, want true")
+	}
+	if got := ed.Text; got != "one\n[two:two] [two:two]\nthree [two:two]" {
+		t.Fatalf("text = %q, want ranged capture replacement", got)
+	}
+}
+
+func TestVimSubstituteConfirmKeys(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Title: "Plan", Text: "one one one", Cursor: 0, Mode: ModeNormal}
+	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
+	if !submitEditorCommand(w, "%s/one/two/gc") {
+		t.Fatal("submitEditorCommand(confirm substitute) = false, want true")
+	}
+	if ed.ReplaceConfirm == nil {
+		t.Fatal("ReplaceConfirm = nil, want active confirm session")
+	}
+	if !w.HandleKey(Key{Name: "n", Rune: 'n'}) || !w.HandleKey(Key{Name: "y", Rune: 'y'}) || !w.HandleKey(Key{Name: "q", Rune: 'q'}) {
+		t.Fatal("confirm keys were not handled")
+	}
+	if got := ed.Text; got != "one two one" {
+		t.Fatalf("text = %q, want only accepted replacement applied", got)
+	}
+	if ed.Status != "1 replacements" {
+		t.Fatalf("Status = %q, want 1 replacements", ed.Status)
+	}
+	executeVimCommand(w, ed, vimCommand{Kind: vimCommandUndo})
+	if got := ed.Text; got != "one one one" {
+		t.Fatalf("undo text = %q, want original", got)
+	}
+}
+
+func TestVimSubstituteConfirmEscCancels(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Title: "Plan", Text: "one one", Cursor: 0, Mode: ModeNormal}
+	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
+	if !submitEditorCommand(w, "%s/one/two/gc") {
+		t.Fatal("submitEditorCommand(confirm substitute) = false, want true")
+	}
+	if !w.HandleKey(Key{Name: "esc"}) {
+		t.Fatal("HandleKey(esc) = false, want handled")
+	}
+	if got := ed.Text; got != "one one" {
+		t.Fatalf("text = %q, want unchanged", got)
+	}
+	if ed.ReplaceConfirm != nil {
+		t.Fatal("ReplaceConfirm still active after esc")
+	}
+}
+
+func TestVisualSubstituteUsesSelectedLineRange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Title: "Plan", Text: "one\ntwo\none", Cursor: len([]rune("one\n")), Mode: ModeNormal}
+	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
+	startVisualSelection(ed, vimSelectionLine)
+	if !submitEditorCommand(w, "s/two/2/") {
+		t.Fatal("submitEditorCommand(visual substitute) = false, want true")
+	}
+	if got := ed.Text; got != "one\n2\none" {
+		t.Fatalf("text = %q, want selected line replaced", got)
+	}
+}
+
+func TestBackwardSearchAndRepeatDirection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	ed := &Editor{Title: "Plan", Text: "alpha beta alpha", Cursor: len([]rune("alpha beta alpha")), Mode: ModeNormal}
+	w := &Workspace{Tabs: []*Editor{ed}, CurrentTab: 0}
+	if !submitEditorCommand(w, "?alpha") {
+		t.Fatal("submitEditorCommand(?alpha) = false, want true")
+	}
+	if ed.Cursor != len([]rune("alpha beta ")) {
+		t.Fatalf("Cursor = %d, want second alpha", ed.Cursor)
+	}
+	if !w.HandleKey(Key{Name: "n", Rune: 'n'}) {
+		t.Fatal("HandleKey(n) = false, want repeat search")
+	}
+	if ed.Cursor != 0 {
+		t.Fatalf("Cursor after n = %d, want first alpha", ed.Cursor)
+	}
+	if !w.HandleKey(Key{Name: "N", Rune: 'N', Shift: true}) {
+		t.Fatal("HandleKey(N) = false, want reverse repeat search")
+	}
+	if ed.Cursor != len([]rune("alpha beta ")) {
+		t.Fatalf("Cursor after N = %d, want second alpha", ed.Cursor)
+	}
+}
+
 func TestUndoLimitTrimsOldestSnapshots(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -4241,8 +4384,8 @@ func TestVisualSelectionCommandRunsOnEnter(t *testing.T) {
 	if ed.Mode != ModeCommand {
 		t.Fatalf("Mode = %q, want command", ed.Mode)
 	}
-	if got := w.CommandLineText(80); got != "" {
-		t.Fatalf("CommandLineText() = %q, want empty command", got)
+	if got := w.CommandLineText(80); got != "'<,'>" {
+		t.Fatalf("CommandLineText() = %q, want visual range command prefix", got)
 	}
 	if !w.HandleKey(Key{Name: "w", Rune: 'w'}) || !w.HandleKey(Key{Name: "enter"}) {
 		t.Fatal("HandleKey(:w enter) = false, want command executed")

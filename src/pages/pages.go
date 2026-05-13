@@ -15,6 +15,8 @@ type Model struct {
 	Focus           int
 	Editing         bool
 	Dirty           bool
+	EditCursor      int
+	SelectionActive bool
 }
 
 func NewModel() *Model {
@@ -51,10 +53,12 @@ func (m *Model) Move(delta int) {
 
 func (m *Model) StartEditing() {
 	m.Editing = true
+	m.selectFocusedValue()
 }
 
 func (m *Model) StopEditing() {
 	m.Editing = false
+	m.SelectionActive = false
 }
 
 func (m *Model) IsEditing() bool {
@@ -67,7 +71,7 @@ func (m *Model) Cursor() (int, int, bool) {
 	}
 	row := 2 + m.Focus
 	col := len([]rune(m.focusPrefix() + m.focusLabel()))
-	col += len([]rune(m.focusedValue()))
+	col += m.EditCursor
 	return row, col, true
 }
 
@@ -84,16 +88,58 @@ func (m *Model) HandleEditKey(name string, r rune) bool {
 		m.Recalculate()
 		m.Dirty = true
 		return true
+	case "tab":
+		m.Move(1)
+		m.selectFocusedValue()
+		return true
+	case "shift+tab":
+		m.Move(-1)
+		m.selectFocusedValue()
+		return true
+	case "left":
+		m.moveCursor(-1)
+		return true
+	case "right":
+		m.moveCursor(1)
+		return true
+	case "up", "down":
+		return true
 	case "backspace":
-		value := []rune(m.focusedValue())
-		if len(value) == 0 {
+		if m.SelectionActive {
+			m.setFocusedValue("")
+			m.EditCursor = 0
+			m.SelectionActive = false
+			m.Dirty = true
 			return true
 		}
-		m.setFocusedValue(string(value[:len(value)-1]))
+		value := []rune(m.focusedValue())
+		if m.EditCursor > len(value) {
+			m.EditCursor = len(value)
+		}
+		if m.EditCursor == 0 {
+			return true
+		}
+		value = append(value[:m.EditCursor-1], value[m.EditCursor:]...)
+		m.EditCursor--
+		m.setFocusedValue(string(value))
+		m.Dirty = true
 		return true
 	}
 	if r >= '0' && r <= '9' {
-		m.setFocusedValue(m.focusedValue() + string(r))
+		if m.SelectionActive {
+			m.setFocusedValue(string(r))
+			m.EditCursor = 1
+			m.SelectionActive = false
+			m.Dirty = true
+			return true
+		}
+		value := []rune(m.focusedValue())
+		if m.EditCursor > len(value) {
+			m.EditCursor = len(value)
+		}
+		value = append(value[:m.EditCursor], append([]rune{r}, value[m.EditCursor:]...)...)
+		m.EditCursor++
+		m.setFocusedValue(string(value))
 		m.Dirty = true
 		return true
 	}
@@ -149,6 +195,31 @@ func (m *Model) setFocusedValue(value string) {
 		m.ReadInput = value
 	default:
 		m.SecondBookInput = value
+	}
+}
+
+func (m *Model) selectFocusedValue() {
+	m.SelectionActive = true
+	m.EditCursor = len([]rune(m.focusedValue()))
+}
+
+func (m *Model) moveCursor(delta int) {
+	valueLen := len([]rune(m.focusedValue()))
+	if m.SelectionActive {
+		if delta < 0 {
+			m.EditCursor = 0
+		} else {
+			m.EditCursor = valueLen
+		}
+		m.SelectionActive = false
+		return
+	}
+	m.EditCursor += delta
+	if m.EditCursor < 0 {
+		m.EditCursor = 0
+	}
+	if m.EditCursor > valueLen {
+		m.EditCursor = valueLen
 	}
 }
 

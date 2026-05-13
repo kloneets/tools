@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,11 +21,12 @@ import (
 type Mode string
 
 const (
-	ModeNormal  Mode = "NORMAL"
-	ModeInsert  Mode = "INSERT"
-	ModeCommand Mode = "COMMAND"
-	ModeVisual  Mode = "VISUAL"
-	tagSearch        = "md-search"
+	ModeNormal        Mode = "NORMAL"
+	ModeInsert        Mode = "INSERT"
+	ModeCommand       Mode = "COMMAND"
+	ModeVisual        Mode = "VISUAL"
+	tagSearch              = "md-search"
+	tagReplaceCurrent      = "md-replace-current"
 )
 
 const yankHighlightDuration = 180 * time.Millisecond
@@ -111,6 +113,7 @@ type Editor struct {
 	NormalCount         string
 	LastSearch          string
 	LastSearchPos       int
+	LastSearchBackward  bool
 	Register            vimRegister
 	SelectionMode       vimSelectionMode
 	SelectionMark       int
@@ -133,6 +136,15 @@ type Editor struct {
 	SpellAsyncRunning   bool
 	UndoStack           []editorSnapshot
 	RedoStack           []editorSnapshot
+	ReplaceConfirm      *replaceConfirmSession
+}
+
+type replaceConfirmSession struct {
+	OriginalText string
+	Before       editorSnapshot
+	Candidates   []replaceCandidate
+	Accepted     []bool
+	Current      int
 }
 
 type Workspace struct {
@@ -1932,6 +1944,9 @@ func (w *Workspace) handleEditorKey(key Key) bool {
 	if ed == nil {
 		return false
 	}
+	if ed.ReplaceConfirm != nil {
+		return handleReplaceConfirmKey(ed, key)
+	}
 	if autoCompleteActive(ed, autoCompleteSpell) {
 		switch key.Name {
 		case "down":
@@ -2904,6 +2919,11 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.Mode = ModeCommand
 		ed.Command = "/"
 		return true
+	case "?":
+		ed.NormalCount = ""
+		ed.Mode = ModeCommand
+		ed.Command = "?"
+		return true
 	case "R":
 		ed.NormalCount = ""
 		ed.Mode = ModeCommand
@@ -3119,13 +3139,19 @@ func handleVisualMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.PendingOp = ""
 		ed.NormalCount = ""
 		ed.Mode = ModeCommand
-		ed.Command = ""
+		ed.Command = "'<,'>"
 		return true
 	case "/":
 		ed.PendingOp = ""
 		ed.NormalCount = ""
 		ed.Mode = ModeCommand
 		ed.Command = "/"
+		return true
+	case "?":
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		ed.Mode = ModeCommand
+		ed.Command = "?"
 		return true
 	}
 	if moveLineKeyToken(key) == "m" {
@@ -3643,6 +3669,9 @@ func repeatSearch(ed *Editor, forward bool) {
 	if ed.LastSearch == "" {
 		return
 	}
+	if ed.LastSearchBackward {
+		forward = !forward
+	}
 	if forward {
 		idx := findNext(ed.Text, ed.LastSearch, ed.Cursor+1)
 		if idx < 0 {
@@ -3662,6 +3691,172 @@ func repeatSearch(ed *Editor, forward bool) {
 		ed.Cursor = idx
 		ed.LastSearchPos = idx
 	}
+}
+
+func executeReplaceCommand(ed *Editor, cmd vimCommand) {
+	var re *regexp.Regexp
+	var err error
+	if cmd.Literal {
+		pattern := regexp.QuoteMeta(cmd.Query)
+		if cmd.IgnoreCase {
+			pattern = "(?i)" + pattern
+		}
+		re, err = regexp.Compile(pattern)
+	} else {
+		re, err = compileVimRegex(cmd.Query, cmd.IgnoreCase)
+	}
+	if err != nil {
+		ed.Status = "invalid pattern: " + err.Error()
+		return
+	}
+	start, end := commandReplaceRange(ed, cmd)
+	candidates := collectReplaceCandidates(ed.Text, re, cmd.Replacement, cmd.Global, start, end)
+	if len(candidates) == 0 {
+		ed.Status = "0 replacements"
+		return
+	}
+	before := currentEditorSnapshot(ed)
+	if cmd.Confirm {
+		ed.ReplaceConfirm = &replaceConfirmSession{
+			OriginalText: ed.Text,
+			Before:       before,
+			Candidates:   candidates,
+			Accepted:     make([]bool, len(candidates)),
+			Current:      0,
+		}
+		ed.Cursor = candidates[0].Start
+		ed.Status = replaceConfirmStatus(ed.ReplaceConfirm)
+		return
+	}
+	ed.Text = applyReplaceCandidates(ed.Text, candidates, nil)
+	ed.Cursor = min(candidates[0].Start+len([]rune(candidates[0].Replacement)), len([]rune(ed.Text)))
+	ed.UndoStack = append(ed.UndoStack, before)
+	ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
+	ed.RedoStack = nil
+	ed.Dirty = true
+	ed.Status = fmt.Sprintf("%d replacements", len(candidates))
+}
+
+func commandReplaceRange(ed *Editor, cmd vimCommand) (int, int) {
+	switch cmd.Range.Kind {
+	case vimRangeAll:
+		return 0, len([]rune(ed.Text))
+	case vimRangeVisual:
+		if ed.SelectionMode != vimSelectionNone {
+			return vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
+		}
+		return vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
+	case vimRangeLines:
+		return vimLineNumberRange(ed.Text, ed.Cursor, cmd.Range.Start, cmd.Range.End)
+	case vimRangeCurrent, vimRangeDefault:
+		return vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
+	default:
+		return vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
+	}
+}
+
+func vimLineNumberRange(text string, cursor int, startLine int, endLine int) (int, int) {
+	lines := vimLineInfos(text)
+	if len(lines) == 0 {
+		return 0, 0
+	}
+	resolve := func(spec int) int {
+		switch spec {
+		case -1:
+			return len(lines) - 1
+		case 0:
+			return vimLineIndexAtOffset(text, cursor)
+		default:
+			return spec - 1
+		}
+	}
+	startIdx := resolve(startLine)
+	endIdx := resolve(endLine)
+	if startIdx > endIdx {
+		startIdx, endIdx = endIdx, startIdx
+	}
+	startIdx = max(0, min(len(lines)-1, startIdx))
+	endIdx = max(0, min(len(lines)-1, endIdx))
+	return lines[startIdx].start, lines[endIdx].end
+}
+
+func handleReplaceConfirmKey(ed *Editor, key Key) bool {
+	session := ed.ReplaceConfirm
+	if session == nil {
+		return false
+	}
+	switch key.Name {
+	case "esc":
+		ed.Text = session.OriginalText
+		ed.ReplaceConfirm = nil
+		ed.Status = "replace cancelled"
+		return true
+	}
+	switch key.Rune {
+	case 'y':
+		session.Accepted[session.Current] = true
+		return advanceReplaceConfirm(ed)
+	case 'n':
+		return advanceReplaceConfirm(ed)
+	case 'a':
+		for i := session.Current; i < len(session.Accepted); i++ {
+			session.Accepted[i] = true
+		}
+		finishReplaceConfirm(ed)
+		return true
+	case 'q':
+		finishReplaceConfirm(ed)
+		return true
+	case 'l':
+		session.Accepted[session.Current] = true
+		finishReplaceConfirm(ed)
+		return true
+	}
+	return true
+}
+
+func advanceReplaceConfirm(ed *Editor) bool {
+	session := ed.ReplaceConfirm
+	if session == nil {
+		return false
+	}
+	session.Current++
+	if session.Current >= len(session.Candidates) {
+		finishReplaceConfirm(ed)
+		return true
+	}
+	ed.Cursor = session.Candidates[session.Current].Start
+	ed.Status = replaceConfirmStatus(session)
+	return true
+}
+
+func finishReplaceConfirm(ed *Editor) {
+	session := ed.ReplaceConfirm
+	if session == nil {
+		return
+	}
+	count := 0
+	for _, accepted := range session.Accepted {
+		if accepted {
+			count++
+		}
+	}
+	if count > 0 {
+		ed.Text = applyReplaceCandidates(session.OriginalText, session.Candidates, session.Accepted)
+		ed.UndoStack = append(ed.UndoStack, session.Before)
+		ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
+		ed.RedoStack = nil
+		ed.Dirty = true
+	}
+	ed.ReplaceConfirm = nil
+	ed.Status = fmt.Sprintf("%d replacements", count)
+}
+
+func replaceConfirmStatus(session *replaceConfirmSession) string {
+	if session == nil || len(session.Candidates) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("replace with %q? y/n/a/q/l/esc (%d/%d)", session.Candidates[session.Current].Replacement, session.Current+1, len(session.Candidates))
 }
 
 func startVisualSelection(ed *Editor, mode vimSelectionMode) {
@@ -3802,9 +3997,18 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 		ed.Status = "quit"
 	case vimCommandSearch:
 		ed.LastSearch = cmd.Query
-		idx := findNext(ed.Text, cmd.Query, ed.Cursor)
-		if idx < 0 {
-			idx = findNext(ed.Text, cmd.Query, 0)
+		ed.LastSearchBackward = cmd.SearchBack
+		idx := -1
+		if cmd.SearchBack {
+			idx = findPrevious(ed.Text, cmd.Query, ed.Cursor-1)
+			if idx < 0 {
+				idx = findPrevious(ed.Text, cmd.Query, len([]rune(ed.Text))-1)
+			}
+		} else {
+			idx = findNext(ed.Text, cmd.Query, ed.Cursor)
+			if idx < 0 {
+				idx = findNext(ed.Text, cmd.Query, 0)
+			}
 		}
 		if idx >= 0 {
 			ed.Cursor = idx
@@ -3814,21 +4018,7 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 			ed.Status = "pattern not found"
 		}
 	case vimCommandReplace:
-		before := currentEditorSnapshot(ed)
-		var count int
-		if cmd.CurrentLine {
-			start, end := vimLineRange(ed.Text, ed.Cursor, ed.Cursor)
-			ed.Text, count = replaceTextInRange(ed.Text, cmd.Query, cmd.Replacement, cmd.Global, start, end)
-		} else {
-			ed.Text, count = replaceText(ed.Text, cmd.Query, cmd.Replacement, cmd.Global)
-		}
-		if count > 0 {
-			ed.UndoStack = append(ed.UndoStack, before)
-			ed.UndoStack = trimSnapshots(ed.UndoStack, undoLimit())
-			ed.RedoStack = nil
-			ed.Dirty = true
-		}
-		ed.Status = fmt.Sprintf("%d replacements", count)
+		executeReplaceCommand(ed, cmd)
 	case vimCommandRename:
 		if err := w.RenameCurrentNote(cmd.Name); err != nil {
 			ed.Status = err.Error()
@@ -3971,12 +4161,12 @@ func (w *Workspace) HelpText() string {
 		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g/:spell spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | :q quit | :wq save quit | :bd close note | :mld/:mlu move lines | sidebar/sb | undo redo preview | spell | recordkeys | /text search | ol open links | rename name | n next | N prev | %s/old/new/g replace"
+		return "notes/command: enter run | esc cancel | :w save | :q quit | :bd close note | :mld/:mlu move lines | /pat ?pat search | :s/pat/repl/gc replace | sidebar/sb | undo redo preview | spell"
 	}
 	if ed.Mode == ModeVisual {
-		return "notes/visual: h j k l move | V line | :mld/:mlu move selected lines | >/< indent | y yank | d/x delete | esc normal"
+		return "notes/visual: h j k l move | V line | :'<,'>s/pat/repl/gc replace | :mld/:mlu move selected lines | >/< indent | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | xw word | x$ eol | : command | / search | R rename | zg add word | n next | N prev | ctrl+n new | ctrl+d delete | [/] tabs | ctrl+s save | ctrl+a sidebar | ctrl+a,a last note | ctrl+a,<number> note"
+	return "notes/normal: i insert | u undo | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | : command | /pat ?pat search | n next | N prev | :%s/pat/repl/g replace | R rename | ctrl+a sidebar"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -4074,6 +4264,9 @@ func (w *Workspace) CommandLineText(width int) string {
 	ed := w.ActiveEditor()
 	if ed == nil {
 		return helpers.TruncateANSI("no note open | ctrl+n new | ctrl+a sidebar", width)
+	}
+	if ed.ReplaceConfirm != nil {
+		return helpers.TruncateANSI(replaceConfirmStatus(ed.ReplaceConfirm), width)
 	}
 	if command := pendingEditorCommandText(ed); command != "" {
 		return helpers.TruncateANSI(command, width)
@@ -4189,6 +4382,9 @@ func (w *Workspace) CommandCursor() (int, bool) {
 	ed := w.ActiveEditor()
 	if ed == nil {
 		return 0, false
+	}
+	if ed.ReplaceConfirm != nil {
+		return len([]rune(replaceConfirmStatus(ed.ReplaceConfirm))), true
 	}
 	if command := pendingEditorCommandText(ed); command != "" {
 		return len([]rune(command)), true
@@ -4490,7 +4686,8 @@ func renderPreviewPane(ed *Editor, width int, height int) []string {
 	lines := strings.Split(render.Text, "\n")
 	out := make([]string, 0, height)
 	lineSpans := groupSpansByLine(render.Text, render.Spans)
-	searchSpans := groupSpansByLine(render.Text, searchHighlightSpans(render.Text, ed.LastSearch))
+	searchQuery := editorHighlightSearchQuery(ed)
+	searchSpans := groupSpansByLine(render.Text, searchHighlightSpans(render.Text, searchQuery))
 	rows := make([]string, 0, len(lines))
 	for lineIdx := range lines {
 		spans := []markdownSpan(nil)
@@ -4502,7 +4699,7 @@ func renderPreviewPane(ed *Editor, width int, height int) []string {
 			continue
 		}
 		base := spans
-		if ed.LastSearch != "" && lineIdx < len(searchSpans) && len(searchSpans[lineIdx]) > 0 {
+		if searchQuery != "" && lineIdx < len(searchSpans) && len(searchSpans[lineIdx]) > 0 {
 			base = searchSpans[lineIdx]
 		}
 		for _, segment := range wrapPlainLine(lines[lineIdx], max(1, width)) {
@@ -4530,7 +4727,9 @@ type wrappedSegment struct {
 func buildEditorVisualRows(ed *Editor, width int) []string {
 	lines := strings.Split(ed.Text, "\n")
 	lineSpans := groupSpansByLine(ed.Text, editorRenderSpans(ed.Text, settings.Inst().NotesApp.TabSpaces))
-	searchSpans := groupSpansByLine(ed.Text, searchHighlightSpans(ed.Text, ed.LastSearch))
+	searchQuery := editorHighlightSearchQuery(ed)
+	searchSpans := groupSpansByLine(ed.Text, searchHighlightSpans(ed.Text, searchQuery))
+	replaceSpans := groupSpansByLine(ed.Text, replaceConfirmHighlightSpans(ed))
 	selectionSpans := groupSpansByLine(ed.Text, visualHighlightSpans(ed))
 	yankSpans := groupSpansByLine(ed.Text, yankHighlightSpans(ed))
 	spellSpans := groupSpansByLine(ed.Text, spellHighlightSpansForEditor(ed, ed.Text))
@@ -4542,7 +4741,9 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 		if lineIdx < len(lineSpans) {
 			baseSpans = lineSpans[lineIdx]
 		}
-		if ed.LastSearch != "" && lineIdx < len(searchSpans) && len(searchSpans[lineIdx]) > 0 {
+		if lineIdx < len(replaceSpans) && len(replaceSpans[lineIdx]) > 0 {
+			baseSpans = replaceSpans[lineIdx]
+		} else if searchQuery != "" && lineIdx < len(searchSpans) && len(searchSpans[lineIdx]) > 0 {
 			baseSpans = searchSpans[lineIdx]
 		} else if lineIdx < len(selectionSpans) && len(selectionSpans[lineIdx]) > 0 {
 			baseSpans = selectionSpans[lineIdx]
@@ -5190,6 +5391,8 @@ func styleForMarkdownTag(tag string, text string) string {
 		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleConstant, text)
 	case tagSearch:
 		return helpers.ANSI(helpers.ANSIRoleSearch, text)
+	case tagReplaceCurrent:
+		return helpers.ANSI(helpers.ANSIRoleVisualSelection, text)
 	case tagVisualSelection:
 		return helpers.ANSI(helpers.ANSIRoleVisualSelection, text)
 	case tagYankHighlight:
@@ -5251,9 +5454,68 @@ func visualHighlightSpans(ed *Editor) []markdownSpan {
 	}
 }
 
+func replaceConfirmHighlightSpans(ed *Editor) []markdownSpan {
+	if ed == nil || ed.ReplaceConfirm == nil || ed.ReplaceConfirm.Current >= len(ed.ReplaceConfirm.Candidates) {
+		return nil
+	}
+	candidate := ed.ReplaceConfirm.Candidates[ed.ReplaceConfirm.Current]
+	return []markdownSpan{{Tag: tagReplaceCurrent, Start: candidate.Start, End: candidate.End}}
+}
+
+func editorHighlightSearchQuery(ed *Editor) string {
+	if ed == nil {
+		return ""
+	}
+	if ed.Mode == ModeCommand {
+		if strings.HasPrefix(ed.Command, "/") || strings.HasPrefix(ed.Command, "?") {
+			return strings.TrimSpace(ed.Command[1:])
+		}
+		if query, ok := liveSubstituteSearchQuery(ed.Command); ok {
+			return query
+		}
+		return ""
+	}
+	return ed.LastSearch
+}
+
+func liveSubstituteSearchQuery(command string) (string, bool) {
+	sIndex := substituteCommandIndex(command)
+	if sIndex < 0 {
+		return "", false
+	}
+	if sIndex+1 >= len(command) {
+		return "", true
+	}
+	delimiter := rune(command[sIndex+1])
+	if delimiter == '\\' || delimiter == 0 {
+		return "", true
+	}
+	rest := command[sIndex+2:]
+	pattern, _, ok := readDelimitedField(rest, delimiter)
+	if !ok {
+		pattern = rest
+	}
+	return strings.TrimSpace(unescapeDelimited(pattern, delimiter)), true
+}
+
 func searchHighlightSpans(text string, query string) []markdownSpan {
 	if query == "" {
 		return nil
+	}
+	if re, err := compileVimRegex(query, true); err == nil {
+		matches := re.FindAllStringIndex(text, -1)
+		spans := make([]markdownSpan, 0, len(matches))
+		for _, match := range matches {
+			if match[0] == match[1] {
+				continue
+			}
+			spans = append(spans, markdownSpan{
+				Tag:   tagSearch,
+				Start: utf8.RuneCountInString(text[:match[0]]),
+				End:   utf8.RuneCountInString(text[:match[1]]),
+			})
+		}
+		return spans
 	}
 	lowerText := strings.ToLower(text)
 	lowerQuery := strings.ToLower(query)

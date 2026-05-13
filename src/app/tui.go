@@ -1365,6 +1365,9 @@ func (a *terminalApp) handlePagesKey(key notes.Key) bool {
 		return false
 	}
 	if a.pages.IsEditing() {
+		if key.Name == "tab" && key.Shift {
+			return a.pages.HandleEditKey("shift+tab", key.Rune)
+		}
 		return a.pages.HandleEditKey(key.Name, key.Rune)
 	}
 	switch key.Name {
@@ -2511,12 +2514,18 @@ func (a *terminalApp) renderPages(height int) string {
 		}
 		return "  "
 	}
+	fieldValue := func(idx int, value string) string {
+		if a.pages.Editing && a.pages.Focus == idx && a.pages.SelectionActive {
+			return helpers.ANSI(helpers.ANSIRoleSelection, value)
+		}
+		return value
+	}
 	lines := []string{
 		"Pages calculator",
-		"j/k move | e/enter edit | digits edit | esc stop edit | r recalc",
-		fmt.Sprintf("%sfirst book:  %s", focusPrefix(0), a.pages.FirstBookInput),
-		fmt.Sprintf("%sread pages:  %s", focusPrefix(1), a.pages.ReadInput),
-		fmt.Sprintf("%sother book:  %s", focusPrefix(2), a.pages.SecondBookInput),
+		"j/k move | e/enter edit | tab fields | enter apply | r recalc",
+		fmt.Sprintf("%sfirst book:  %s", focusPrefix(0), fieldValue(0, a.pages.FirstBookInput)),
+		fmt.Sprintf("%sread pages:  %s", focusPrefix(1), fieldValue(1, a.pages.ReadInput)),
+		fmt.Sprintf("%sother book:  %s", focusPrefix(2), fieldValue(2, a.pages.SecondBookInput)),
 		fmt.Sprintf("result: %s", a.pages.Result),
 	}
 	for len(lines) < height {
@@ -2749,7 +2758,7 @@ func (a *terminalApp) helpText() string {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.pages != nil && a.pages.IsEditing() {
-			return "pages/edit: digits edit | backspace delete | enter apply | esc stop edit"
+			return "pages/edit: digits replace selection | tab/shift+tab field | left/right cursor | backspace delete | enter apply | esc stop edit"
 		}
 		return "pages: q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | e edit | r recalc"
 	case viewPassword:

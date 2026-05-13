@@ -54,6 +54,16 @@ func TestHelpTextForSettingsEditMode(t *testing.T) {
 	}
 }
 
+func TestHelpTextForPagesEditMode(t *testing.T) {
+	app := &terminalApp{view: viewPages, pages: &pages.Model{Editing: true}}
+	got := app.helpText()
+	for _, want := range []string{"tab/shift+tab field", "left/right cursor", "enter apply"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("helpText() = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 	app := &terminalApp{view: viewSync}
 	got := app.renderTabBar()
@@ -634,6 +644,46 @@ func TestHandleGlobalKeyPlainTabStillReachesNotesInsertMode(t *testing.T) {
 	}
 	if app.view != viewNotes {
 		t.Fatalf("view = %v, want notes", app.view)
+	}
+}
+
+func TestHandleGlobalKeyPlainTabReachesPagesEditMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	app := &terminalApp{
+		view:  viewPages,
+		pages: &pages.Model{FirstBookInput: "100", ReadInput: "25", SecondBookInput: "320", Editing: true},
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "tab"}) {
+		t.Fatal("handleGlobalKey(tab) = false, want pages edit tab handling")
+	}
+	if app.view != viewPages {
+		t.Fatalf("view = %v, want pages", app.view)
+	}
+	if app.pages.Focus != 1 || !app.pages.SelectionActive {
+		t.Fatalf("pages focus/selection = %d/%t, want read field selected", app.pages.Focus, app.pages.SelectionActive)
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "tab", Shift: true}) {
+		t.Fatal("handleGlobalKey(shift+tab) = false, want pages edit reverse tab handling")
+	}
+	if app.pages.Focus != 0 || !app.pages.SelectionActive {
+		t.Fatalf("pages focus/selection = %d/%t, want first field selected", app.pages.Focus, app.pages.SelectionActive)
+	}
+}
+
+func TestRenderPagesHighlightsSelectedEditValue(t *testing.T) {
+	app := &terminalApp{
+		pages: &pages.Model{
+			FirstBookInput:  "100",
+			ReadInput:       "25",
+			SecondBookInput: "320",
+			Editing:         true,
+			SelectionActive: true,
+		},
+	}
+	got := app.renderPages(6)
+	if !strings.Contains(got, helpers.ANSIRoleSelection+"100") {
+		t.Fatalf("renderPages() = %q, want selected first book value highlighted", got)
 	}
 }
 
