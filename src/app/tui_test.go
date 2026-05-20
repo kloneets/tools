@@ -18,6 +18,7 @@ import (
 	"github.com/kloneets/tools/src/pages"
 	"github.com/kloneets/tools/src/password"
 	"github.com/kloneets/tools/src/settings"
+	"github.com/kloneets/tools/src/todo"
 	"github.com/rivo/tview"
 )
 
@@ -67,7 +68,7 @@ func TestHelpTextForPagesEditMode(t *testing.T) {
 func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 	app := &terminalApp{view: viewSync}
 	got := app.renderTabBar()
-	if !strings.Contains(got, "5:Sync") {
+	if !strings.Contains(got, "6:Sync") {
 		t.Fatalf("renderTabBar() = %q, want sync tab label", got)
 	}
 	if !strings.Contains(got, themeMarkupFGStyleBG(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG, ":b")) {
@@ -78,8 +79,49 @@ func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 func TestRenderTabBarShowsRecorderWhenVisible(t *testing.T) {
 	app := &terminalApp{view: viewRecorder, recorderVisible: true}
 	got := app.renderTabBar()
-	if !strings.Contains(got, "7:Recorder") {
+	if !strings.Contains(got, "8:Recorder") {
 		t.Fatalf("renderTabBar() = %q, want recorder tab label", got)
+	}
+}
+
+func TestRenderTabBarUsesConfiguredTabOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().UI.TabOrder = []string{"settings", "notes", "todo", "files", "pages", "password", "sync"}
+	app := &terminalApp{view: viewTodo}
+
+	got := app.renderTabBar()
+
+	for _, want := range []string{"1:Settings", "2:Notes", "3:Todo", "7:Sync"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("renderTabBar() = %q, want %q", got, want)
+		}
+	}
+	if target, ok := app.appTabViewForKey("3"); !ok || target != viewTodo {
+		t.Fatalf("appTabViewForKey(3) = %v, %t; want todo, true", target, ok)
+	}
+}
+
+func TestVisibleAppTabsKeepsRecorderLastAfterConfiguredOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().UI.TabOrder = []string{"settings", "notes", "todo", "files", "pages", "password", "sync"}
+	app := &terminalApp{view: viewRecorder, recorderVisible: true}
+
+	tabs := app.visibleAppTabs()
+
+	if got := tabs[len(tabs)-1]; got.view != viewRecorder || got.key != "8" {
+		t.Fatalf("last tab = %#v, want recorder with key 8", got)
+	}
+}
+
+func TestDefaultAppViewUsesFirstConfiguredTab(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().UI.TabOrder = []string{"todo", "notes", "files", "pages", "password", "sync", "settings"}
+
+	if got := defaultAppView(); got != viewTodo {
+		t.Fatalf("defaultAppView() = %v, want %v", got, viewTodo)
 	}
 }
 
@@ -576,7 +618,7 @@ func TestHandleGlobalKeySwitchesTabAfterTabSelect(t *testing.T) {
 
 func TestHandleGlobalKeyCtrlNumberSwitchesTabDirectly(t *testing.T) {
 	app := &terminalApp{view: viewNotes, tabSelect: true}
-	if !app.handleGlobalKey(notes.Key{Name: "5", Rune: '5', Ctrl: true}) {
+	if !app.handleGlobalKey(notes.Key{Name: "6", Rune: '6', Ctrl: true}) {
 		t.Fatal("handleGlobalKey() = false, want true for ctrl+number")
 	}
 	if app.view != viewSync {
@@ -589,11 +631,100 @@ func TestHandleGlobalKeyCtrlNumberSwitchesTabDirectly(t *testing.T) {
 
 func TestHandleGlobalKeyCtrlNumberSwitchesRecorderTabWhenVisible(t *testing.T) {
 	app := &terminalApp{view: viewNotes, recorderVisible: true}
-	if !app.handleGlobalKey(notes.Key{Name: "7", Rune: '7', Ctrl: true}) {
-		t.Fatal("handleGlobalKey() = false, want true for ctrl+7")
+	if !app.handleGlobalKey(notes.Key{Name: "8", Rune: '8', Ctrl: true}) {
+		t.Fatal("handleGlobalKey() = false, want true for ctrl+8")
 	}
 	if app.view != viewRecorder {
 		t.Fatalf("view = %v, want %v", app.view, viewRecorder)
+	}
+}
+
+func TestHandleGlobalKeyTodoNewAndToggle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	app := &terminalApp{view: viewTodo, todos: repo}
+
+	for _, key := range []notes.Key{
+		{Name: "n", Rune: 'n'},
+		{Name: "a", Rune: 'a'},
+		{Name: "l", Rune: 'l'},
+		{Name: "p", Rune: 'p'},
+		{Name: "h", Rune: 'h'},
+		{Name: "a", Rune: 'a'},
+		{Name: "enter"},
+	} {
+		if !app.handleGlobalKey(key) {
+			t.Fatalf("handleGlobalKey(%#v) = false, want true", key)
+		}
+	}
+	if got := todo.ActiveItems(app.todoStore); len(got) != 1 || got[0].Text != "alpha" {
+		t.Fatalf("active todos = %#v, want alpha", got)
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "space"}) {
+		t.Fatal("handleGlobalKey(space) = false, want true")
+	}
+	if got := todo.ActiveItems(app.todoStore); got[0].CheckedAt == nil {
+		t.Fatalf("checked_at = nil, want pending checked todo")
+	}
+}
+
+func TestRenderTodoShowsSections(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	archivedAt := now
+	app := &terminalApp{
+		view: viewTodo,
+		todoStore: todo.Store{Items: []todo.Item{
+			{ID: "1", Text: "active", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now},
+			{ID: "2", Text: "done", Status: todo.StatusDone, CreatedAt: now, UpdatedAt: now, DoneAt: &now},
+			{ID: "3", Text: "old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
+		}},
+	}
+	got := app.renderTodo(20)
+	for _, want := range []string{"Todo", "Done", "Archive", "2026-05", "active", "~done~", "~old~"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("renderTodo() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestMoveSelectedTodoKeepsSelectionOnMovedItem(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	store := todo.Store{Items: []todo.Item{
+		{ID: "a", Text: "a", Status: todo.StatusTodo, Order: 0, CreatedAt: now, UpdatedAt: now},
+		{ID: "b", Text: "b", Status: todo.StatusTodo, Order: 1, CreatedAt: now, UpdatedAt: now},
+		{ID: "c", Text: "c", Status: todo.StatusTodo, Order: 2, CreatedAt: now, UpdatedAt: now},
+	}}
+	if err := repo.Save(store); err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo, todoStore: store, todoIndex: 1}
+
+	if !app.moveSelectedTodo(1) {
+		t.Fatal("moveSelectedTodo() = false, want true")
+	}
+
+	if item, ok := app.selectedTodoItem(); !ok || item.ID != "b" {
+		t.Fatalf("selectedTodoItem() = %#v, %t; want b, true", item, ok)
+	}
+	if got := app.todoIndex; got != 2 {
+		t.Fatalf("todoIndex = %d, want moved item index 2", got)
+	}
+}
+
+func TestTodoInputCursorPointsToEditBufferEnd(t *testing.T) {
+	app := &terminalApp{view: viewTodo, todoInputMode: "edit", todoInputBuffer: "alpha"}
+
+	row, col := app.todoInputCursor()
+
+	if row != 2 {
+		t.Fatalf("row = %d, want 2", row)
+	}
+	if col != len([]rune("edit: alpha")) {
+		t.Fatalf("col = %d, want edit buffer end", col)
 	}
 }
 
@@ -1105,6 +1236,37 @@ func TestRenderSettingsShowsThemePreview(t *testing.T) {
 	}
 }
 
+func TestHandleSettingsKeyEditsTabOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	app := &terminalApp{view: viewSettings, settingIndex: 5}
+
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter) = false, want true")
+	}
+	if !app.tabOrderEditMode {
+		t.Fatal("tabOrderEditMode = false, want true")
+	}
+	if !app.handleSettingsKey(notes.Key{Name: "j", Rune: 'j'}) {
+		t.Fatal("handleSettingsKey(j) = false, want true")
+	}
+	if !app.handleSettingsKey(notes.Key{Name: "K", Rune: 'K', Shift: true}) {
+		t.Fatal("handleSettingsKey(K) = false, want true")
+	}
+	if got := settings.Inst().UI.TabOrder; len(got) < 2 || got[0] != "files" || got[1] != "notes" {
+		t.Fatalf("TabOrder = %v, want files moved before notes", got)
+	}
+	if !app.settingsDirty {
+		t.Fatal("settingsDirty = false, want true")
+	}
+	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleSettingsKey(enter done) = false, want true")
+	}
+	if app.tabOrderEditMode {
+		t.Fatal("tabOrderEditMode = true, want false")
+	}
+}
+
 func TestRenderThemePreviewUsesThemePalette(t *testing.T) {
 	preview := renderThemePreview(themeByName("gruvbox"))
 	theme := themeByName("gruvbox")
@@ -1160,7 +1322,7 @@ func TestHandleSettingsKeyTogglesTransparentBackground(t *testing.T) {
 func TestHandleSettingsKeyTogglesSpellChecking(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	app := &terminalApp{view: viewSettings, settingIndex: 5}
+	app := &terminalApp{view: viewSettings, settingIndex: 6}
 	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
 		t.Fatal("handleSettingsKey(enter) = false, want true")
 	}
@@ -1190,7 +1352,7 @@ func TestHandleSettingsKeyInstallsSpellDictionary(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
-	app := &terminalApp{view: viewSettings, settingIndex: 6}
+	app := &terminalApp{view: viewSettings, settingIndex: 7}
 	if !app.handleSettingsKey(notes.Key{Name: "enter"}) {
 		t.Fatal("handleSettingsKey(enter) = false, want true")
 	}

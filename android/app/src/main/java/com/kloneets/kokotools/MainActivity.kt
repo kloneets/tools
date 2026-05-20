@@ -6,6 +6,8 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.Intent
 import android.content.IntentSender
+import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -16,11 +18,13 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -30,6 +34,7 @@ import android.widget.ListView
 import android.widget.PopupMenu
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
@@ -44,10 +49,12 @@ import java.io.IOException
 class MainActivity : Activity() {
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var notesRepository: NotesRepository
+    private lateinit var todoRepository: TodoRepository
     private val pagesCalculator = PagesCalculator()
     private val driveRepository = DriveSnapshotRepository()
 
     private var settings = AppSettings()
+    private var todoStore = TodoStore()
     private var currentNotePath = ""
     private var noteList: List<NoteFile> = emptyList()
     private var driveAccessToken: String? = null
@@ -90,12 +97,18 @@ class MainActivity : Activity() {
     private var syncConnectButton: Button? = null
     private var syncUploadButton: Button? = null
     private var syncRefreshButton: Button? = null
+    private var todoRefreshRunnable: Runnable? = null
+    private var todoMoveMode = false
+    private val todoMoveRows = mutableMapOf<String, View>()
+    private var todoDraggingId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settingsRepository = SettingsRepository(this)
         notesRepository = NotesRepository(this)
+        todoRepository = TodoRepository(this)
         settings = settingsRepository.load()
+        todoStore = todoRepository.load()
         palette = resolvePalette()
         applySystemBars()
         currentNotePath = settings.notesApp.currentNotePath
@@ -255,6 +268,10 @@ class MainActivity : Activity() {
                 hideNavigationDrawer()
                 showPages()
             })
+            addView(drawerRow("Todo", R.id.tab_todo) {
+                hideNavigationDrawer()
+                showTodo()
+            })
             addView(drawerRow("Sync", R.id.tab_sync) {
                 hideNavigationDrawer()
                 showSync()
@@ -324,6 +341,7 @@ class MainActivity : Activity() {
         when (currentScreen) {
             Screen.Notes -> showNotesActionsMenu(actionsButton)
             Screen.Pages -> showPagesActionsMenu(actionsButton)
+            Screen.Todo -> showTodoActionsMenu(actionsButton)
             Screen.Sync -> showSyncActionsMenu(actionsButton)
             Screen.Settings -> showSettingsActionsMenu(actionsButton)
         }
@@ -762,6 +780,294 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun showTodo() {
+        currentScreen = Screen.Todo
+        setScreenHeader("Todo", if (todoMoveMode) "Move tasks" else "Tasks and archive")
+        content.removeAllViews()
+        content.orientation = LinearLayout.VERTICAL
+        content.setPadding(dp(16), dp(16), dp(16), dp(16))
+        todoStore = todoRepository.load()
+        todoMoveRows.clear()
+        todoDraggingId = null
+
+        val inputRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(10) }
+        }
+        val input = EditText(this).apply {
+            id = R.id.todo_input
+            hint = "New todo"
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT
+            setTextColor(COLOR_TEXT_PRIMARY)
+            setHintTextColor(COLOR_TEXT_MUTED)
+            background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(10).toFloat())
+            setPadding(dp(12), 0, dp(12), 0)
+            layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+        }
+        val addButton = commandButton("Add", R.id.todo_add) {
+            todoStore = todoRepository.add(input.text.toString())
+            input.setText("")
+            showTodo()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(dp(84), dp(48)).apply {
+                leftMargin = dp(8)
+            }
+        }
+        inputRow.addView(input)
+        inputRow.addView(addButton)
+        content.addView(inputRow)
+
+        val scroll = ScrollView(this).apply {
+            id = R.id.todo_list
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            )
+        }
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scroll.addView(list)
+        content.addView(scroll)
+
+        addTodoSection(list, "Todo", TodoRepository.activeItems(todoStore), archived = false)
+        addTodoSection(list, "Done", TodoRepository.doneItems(todoStore), archived = false)
+        list.addView(sectionTitle("Archive"))
+        val groups = TodoRepository.archiveGroups(todoStore)
+        if (groups.isEmpty()) {
+            list.addView(emptySectionText("No archived todos"))
+        } else {
+            groups.forEach { (month, items) ->
+                list.addView(TextView(this).apply {
+                    text = month
+                    textSize = 14f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(COLOR_TEXT_PRIMARY)
+                    setPadding(dp(2), dp(8), 0, dp(4))
+                })
+                items.forEach { list.addView(todoRow(it, archived = true)) }
+            }
+        }
+        scheduleTodoBoundaryRefresh()
+    }
+
+    private fun addTodoSection(parent: LinearLayout, title: String, items: List<TodoItem>, archived: Boolean) {
+        parent.addView(sectionTitle(title))
+        if (items.isEmpty()) {
+            parent.addView(emptySectionText("No ${title.lowercase()} todos"))
+            return
+        }
+        items.forEach { parent.addView(todoRow(it, archived)) }
+    }
+
+    private fun emptySectionText(text: String): TextView {
+        return TextView(this).apply {
+            this.text = text
+            textSize = 14f
+            setTextColor(COLOR_TEXT_MUTED)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+        }
+    }
+
+    private fun todoRow(item: TodoItem, archived: Boolean): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(6), dp(4), dp(6))
+            background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(8).toFloat())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(6) }
+
+            val checked = item.checkedAt != null || item.status == TodoRepository.STATUS_DONE || item.status == TodoRepository.STATUS_ARCHIVED
+            val reorderable = canReorderTodo(item, archived)
+            val checkBox = CheckBox(this@MainActivity).apply {
+                isChecked = checked
+                isEnabled = !archived
+                buttonTintList = ColorStateList.valueOf(COLOR_ACCENT)
+                layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+                setOnClickListener {
+                    todoStore = todoRepository.toggle(item.id)
+                    showTodo()
+                }
+            }
+            val label = TextView(this@MainActivity).apply {
+                text = item.text
+                textSize = 16f
+                setTextColor(if (archived) COLOR_TEXT_MUTED else COLOR_TEXT_PRIMARY)
+                if (checked) paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+                minLines = 1
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            addView(checkBox)
+            addView(label)
+            if (reorderable && todoMoveMode) {
+                todoMoveRows[item.id] = this
+                addView(todoDragHandle(item))
+            }
+            if (item.status == TodoRepository.STATUS_TODO && item.checkedAt == null && !archived && !todoMoveMode) {
+                addView(todoIconButton(R.drawable.ic_edit_24, "Edit todo") { promptEditTodo(item) })
+            }
+        }
+    }
+
+    private fun canReorderTodo(item: TodoItem, archived: Boolean): Boolean {
+        return !archived && item.status == TodoRepository.STATUS_TODO && item.checkedAt == null
+    }
+
+    private fun todoIconButton(icon: Int, description: String, action: () -> Unit): ImageButton {
+        return ImageButton(this).apply {
+            contentDescription = description
+            setImageResource(icon)
+            setColorFilter(COLOR_ACCENT)
+            scaleType = ImageView.ScaleType.CENTER
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            background = selectableBorderlessBackground()
+            setOnClickListener { action() }
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                leftMargin = dp(6)
+            }
+        }
+    }
+
+    private fun todoDragHandle(item: TodoItem): ImageButton {
+        return ImageButton(this).apply {
+            contentDescription = "Move todo"
+            setImageResource(R.drawable.ic_drag_handle_24)
+            setColorFilter(COLOR_ACCENT)
+            scaleType = ImageView.ScaleType.CENTER
+            setPadding(dp(9), dp(9), dp(9), dp(9))
+            background = selectableBorderlessBackground()
+            setOnTouchListener(todoMoveTouchListener(item))
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                leftMargin = dp(6)
+            }
+        }
+    }
+
+    private fun todoMoveTouchListener(item: TodoItem): View.OnTouchListener {
+        return View.OnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    todoDraggingId = item.id
+                    view.alpha = 0.58f
+                    view.parent?.requestDisallowInterceptTouchEvent(true)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    highlightTodoMoveTarget(event.rawX.toInt(), event.rawY.toInt())
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val draggedId = todoDraggingId
+                    val targetId = todoMoveTargetAt(event.rawX.toInt(), event.rawY.toInt())
+                    clearTodoMoveHighlight()
+                    todoDraggingId = null
+                    view.alpha = 1f
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                    if (draggedId != null && targetId != null && draggedId != targetId) {
+                        todoStore = todoRepository.moveTo(draggedId, targetId)
+                        showTodo()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    clearTodoMoveHighlight()
+                    todoDraggingId = null
+                    view.alpha = 1f
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun todoMoveTargetAt(rawX: Int, rawY: Int): String? {
+        val rect = Rect()
+        return todoMoveRows.entries.firstOrNull { (_, row) ->
+            row.getGlobalVisibleRect(rect) && rect.contains(rawX, rawY)
+        }?.key
+    }
+
+    private fun highlightTodoMoveTarget(rawX: Int, rawY: Int) {
+        val draggedId = todoDraggingId
+        val targetId = todoMoveTargetAt(rawX, rawY)
+        todoMoveRows.forEach { (id, row) ->
+            if (id == targetId && id != draggedId) {
+                row.background = todoMoveTargetBackground()
+            } else {
+                row.background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(8).toFloat())
+            }
+        }
+    }
+
+    private fun clearTodoMoveHighlight() {
+        todoMoveRows.values.forEach {
+            it.background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(8).toFloat())
+        }
+    }
+
+    private fun todoMoveTargetBackground(): GradientDrawable {
+        return if (palette.lightSystemBars) {
+            roundedStroke(COLOR_SURFACE_ALT, COLOR_ACCENT, dp(8).toFloat())
+        } else {
+            roundedStroke(COLOR_TEXT_PRIMARY, COLOR_ACCENT, dp(8).toFloat())
+        }
+    }
+
+    private fun promptEditTodo(item: TodoItem) {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(item.text)
+            setSingleLine(true)
+            selectAll()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Edit todo")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                todoStore = todoRepository.edit(item.id, input.text.toString())
+                showTodo()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showTodoActionsMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add(if (todoMoveMode) "Done moving" else "Move").setOnMenuItemClickListener {
+                todoMoveMode = !todoMoveMode
+                showTodo()
+                true
+            }
+            menu.add("Open sync").setOnMenuItemClickListener {
+                showSync()
+                true
+            }
+            show()
+        }
+    }
+
+    private fun scheduleTodoBoundaryRefresh() {
+        todoRefreshRunnable?.let { noteAutosaveHandler.removeCallbacks(it) }
+        val hasPending = TodoRepository.activeItems(todoStore).any { it.checkedAt != null }
+        if (!hasPending) return
+        val refresh = Runnable {
+            todoRefreshRunnable = null
+            if (currentScreen == Screen.Todo) showTodo()
+        }
+        todoRefreshRunnable = refresh
+        noteAutosaveHandler.postDelayed(refresh, (TodoRepository.CHECKED_DELAY_SECONDS + 1L) * 1000L)
+    }
+
     private fun showSync() {
         currentScreen = Screen.Sync
         setScreenHeader("Sync", "Google Drive snapshots")
@@ -945,6 +1251,7 @@ class MainActivity : Activity() {
         when (currentScreen) {
             Screen.Notes -> showNotes()
             Screen.Pages -> showPages()
+            Screen.Todo -> showTodo()
             Screen.Sync -> showSync()
             Screen.Settings -> showSettings()
         }
@@ -1057,6 +1364,8 @@ class MainActivity : Activity() {
                 folderId = folderId,
                 accessToken = token,
                 settingsData = settingsRepository.settingsPath().readBytes(),
+                todosData = todoRepository.todosPath().takeIf { it.exists() }?.readBytes()
+                    ?: "{\"version\":1,\"items\":[]}\n".toByteArray(),
                 notesRoot = notesRepository.notesPath(),
                 retain = 5,
             )
@@ -1114,12 +1423,13 @@ class MainActivity : Activity() {
     private fun restoreDriveSnapshot(snapshot: DriveSnapshotMeta) {
         val token = driveAccessToken ?: return setSyncStatus("Connect Google first")
         runDriveOperation("Restoring snapshot") {
-            val settingsData = driveRepository.restoreSnapshot(snapshot.id, token, notesRepository)
+            val settingsData = driveRepository.restoreSnapshot(snapshot.id, token, notesRepository, todoRepository)
             val restored = SettingsRepository.parse(settingsData.toString(Charsets.UTF_8))
             runOnUiThread {
                 val preservedDrive = settings.gdrive.copy(selectedSnapshotId = snapshot.id)
                 persistSettings(restored.copy(gdrive = preservedDrive))
                 currentNotePath = settings.notesApp.currentNotePath
+                todoStore = todoRepository.load()
                 selectedSnapshotId = snapshot.id
                 refreshSnapshotListView()
                 setSyncStatus("Restored snapshot ${snapshot.name}")
@@ -1567,6 +1877,7 @@ class MainActivity : Activity() {
     private enum class Screen {
         Notes,
         Pages,
+        Todo,
         Sync,
         Settings,
     }

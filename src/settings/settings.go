@@ -14,6 +14,7 @@ import (
 
 	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
+	"github.com/kloneets/tools/src/todo"
 )
 
 type UserSettings struct {
@@ -75,11 +76,12 @@ func (n *NotesAppSettings) UnmarshalJSON(data []byte) error {
 }
 
 type UISettings struct {
-	ShowPages             bool   `json:"show_pages"`
-	ShowPassword          bool   `json:"show_password"`
-	ShowNotes             bool   `json:"show_notes"`
-	Theme                 string `json:"theme,omitempty"`
-	TransparentBackground bool   `json:"transparent_background,omitempty"`
+	ShowPages             bool     `json:"show_pages"`
+	ShowPassword          bool     `json:"show_password"`
+	ShowNotes             bool     `json:"show_notes"`
+	Theme                 string   `json:"theme,omitempty"`
+	TransparentBackground bool     `json:"transparent_background,omitempty"`
+	TabOrder              []string `json:"tab_order,omitempty"`
 }
 
 func (u *UISettings) UnmarshalJSON(data []byte) error {
@@ -147,6 +149,8 @@ var statusUpdater = func(text string) {
 }
 
 const DefaultTheme = "tokyo-night"
+
+var defaultTabOrder = []string{"notes", "files", "pages", "password", "todo", "sync", "settings"}
 
 var BuiltInThemes = []string{
 	"tokyo-night",
@@ -241,7 +245,47 @@ func defaultUISettings() *UISettings {
 		ShowNotes:             true,
 		Theme:                 DefaultTheme,
 		TransparentBackground: false,
+		TabOrder:              DefaultTabOrder(),
 	}
+}
+
+func DefaultTabOrder() []string {
+	return append([]string(nil), defaultTabOrder...)
+}
+
+func NormalizeTabOrder(order []string) []string {
+	valid := make(map[string]struct{}, len(defaultTabOrder))
+	for _, id := range defaultTabOrder {
+		valid[id] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(defaultTabOrder))
+	normalized := make([]string, 0, len(defaultTabOrder))
+	for _, id := range order {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if _, ok := valid[id]; !ok {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+	for _, id := range defaultTabOrder {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		normalized = append(normalized, id)
+	}
+	return normalized
+}
+
+func UITabOrder() []string {
+	if settingsInstance == nil || settingsInstance.UI == nil {
+		return DefaultTabOrder()
+	}
+	settingsInstance.UI.TabOrder = NormalizeTabOrder(settingsInstance.UI.TabOrder)
+	return append([]string(nil), settingsInstance.UI.TabOrder...)
 }
 
 func normalizeSettings(s *UserSettings) {
@@ -268,6 +312,7 @@ func normalizeSettings(s *UserSettings) {
 	if !ValidTheme(s.UI.Theme) {
 		s.UI.Theme = DefaultTheme
 	}
+	s.UI.TabOrder = NormalizeTabOrder(s.UI.TabOrder)
 	if s.AppWindow.Width <= 0 {
 		s.AppWindow.Width = 600
 	}
@@ -762,6 +807,9 @@ func backupLocalStateSnapshot() (string, error) {
 	}
 
 	if err := copyFileIfExists(fileName(), filepath.Join(root, "settings.json")); err != nil {
+		return "", err
+	}
+	if err := copyFileIfExists(todo.DefaultPath(), filepath.Join(root, "todos.json")); err != nil {
 		return "", err
 	}
 	notesRoot := filepath.Join(filepath.Dir(fileName()), "notes")

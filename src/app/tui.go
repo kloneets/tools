@@ -26,6 +26,7 @@ import (
 	"github.com/kloneets/tools/src/pages"
 	"github.com/kloneets/tools/src/password"
 	"github.com/kloneets/tools/src/settings"
+	"github.com/kloneets/tools/src/todo"
 )
 
 type view int
@@ -35,6 +36,7 @@ const (
 	viewFiles
 	viewPages
 	viewPassword
+	viewTodo
 	viewSync
 	viewSettings
 	viewRecorder
@@ -49,6 +51,13 @@ type terminalApp struct {
 	notes              *notes.Workspace
 	pages              *pages.Model
 	password           *password.Model
+	todos              *todo.Repository
+	todoStore          todo.Store
+	todoIndex          int
+	todoInputMode      string
+	todoInputBuffer    string
+	todoEditID         string
+	todoDirty          bool
 	status             string
 	width              int
 	height             int
@@ -82,6 +91,8 @@ type terminalApp struct {
 	settingsDirty      bool
 	settingsEditMode   bool
 	settingsEditBuffer string
+	tabOrderEditMode   bool
+	tabOrderIndex      int
 	syncInProgress     bool
 	syncProgressLabel  string
 	syncOpID           atomic.Int64
@@ -107,6 +118,7 @@ type terminalApp struct {
 }
 
 type appTab struct {
+	id    string
 	label string
 	view  view
 	key   string
@@ -122,12 +134,13 @@ type recordedKeyEvent struct {
 }
 
 var baseAppTabs = []appTab{
-	{"Notes", viewNotes, "1"},
-	{"Files", viewFiles, "2"},
-	{"Pages", viewPages, "3"},
-	{"Password", viewPassword, "4"},
-	{"Sync", viewSync, "5"},
-	{"Settings", viewSettings, "6"},
+	{"notes", "Notes", viewNotes, ""},
+	{"files", "Files", viewFiles, ""},
+	{"pages", "Pages", viewPages, ""},
+	{"password", "Password", viewPassword, ""},
+	{"todo", "Todo", viewTodo, ""},
+	{"sync", "Sync", viewSync, ""},
+	{"settings", "Settings", viewSettings, ""},
 }
 
 func InitApp() {
@@ -157,11 +170,18 @@ func newTerminalApp() (*terminalApp, error) {
 		return nil, err
 	}
 	applyGlobalBackgroundStyle()
+	todoRepo := todo.NewRepository()
+	todoStore, err := todoRepo.Load()
+	if err != nil {
+		return nil, err
+	}
 	app := &terminalApp{
-		view:        viewNotes,
+		view:        defaultAppView(),
 		notes:       noteWS,
 		pages:       pages.NewModel(),
 		password:    password.NewModel(),
+		todos:       todoRepo,
+		todoStore:   todoStore,
 		width:       120,
 		height:      36,
 		syncTimeout: manualSyncTimeout,
@@ -176,6 +196,17 @@ func newTerminalApp() (*terminalApp, error) {
 		})
 	})
 	return app, nil
+}
+
+func defaultAppView() view {
+	for _, id := range settings.UITabOrder() {
+		for _, tab := range baseAppTabs {
+			if tab.id == id {
+				return tab.view
+			}
+		}
+	}
+	return viewNotes
 }
 
 func (a *terminalApp) initWidgets() {
@@ -446,7 +477,7 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 			a.requestShutdown()
 			return nil
 		case "help":
-			fmt.Println("views: notes, files, pages, password, sync, settings")
+			fmt.Println("views: notes, files, pages, password, todo, sync, settings")
 			fmt.Println("save: :w, quit: :q, save and quit: :wq")
 		case "notes":
 			a.view = viewNotes
@@ -456,6 +487,8 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 			a.view = viewPages
 		case "password":
 			a.view = viewPassword
+		case "todo":
+			a.view = viewTodo
 		case "sync":
 			a.view = viewSync
 		case "settings":
@@ -858,9 +891,21 @@ func pointInRect(x int, y int, rx int, ry int, width int, height int) bool {
 }
 
 func (a *terminalApp) visibleAppTabs() []appTab {
-	tabs := append([]appTab(nil), baseAppTabs...)
+	byID := make(map[string]appTab, len(baseAppTabs))
+	for _, tab := range baseAppTabs {
+		byID[tab.id] = tab
+	}
+	tabs := make([]appTab, 0, len(baseAppTabs)+1)
+	for _, id := range settings.UITabOrder() {
+		tab, ok := byID[id]
+		if !ok {
+			continue
+		}
+		tab.key = strconv.Itoa(len(tabs) + 1)
+		tabs = append(tabs, tab)
+	}
 	if a != nil && a.recorderVisible {
-		tabs = append(tabs, appTab{label: "Recorder", view: viewRecorder, key: "7"})
+		tabs = append(tabs, appTab{id: "recorder", label: "Recorder", view: viewRecorder, key: strconv.Itoa(len(tabs) + 1)})
 	}
 	return tabs
 }
@@ -875,10 +920,11 @@ func (a *terminalApp) appTabViewForKey(key string) (view, bool) {
 }
 
 func (a *terminalApp) appTabKeyHint() string {
-	if a != nil && a.recorderVisible {
-		return "1-7"
+	tabs := a.visibleAppTabs()
+	if len(tabs) == 0 {
+		return "1"
 	}
-	return "1-6"
+	return "1-" + tabs[len(tabs)-1].key
 }
 
 func (a *terminalApp) switchAppTab(target view) {
@@ -1062,11 +1108,10 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		case "t":
 			a.tabSelect = !a.tabSelect
 			return true
-		case "1", "2", "3", "4", "5", "6", "7":
-			if target, ok := a.appTabViewForKey(key.Name); ok {
-				a.switchAppTab(target)
-				return true
-			}
+		}
+		if target, ok := a.appTabViewForKey(key.Name); ok {
+			a.switchAppTab(target)
+			return true
 		}
 	}
 	if !key.Ctrl && !key.Shift && !key.Meta && !key.Alt && key.Name == "tab" && a.wantsPlainTabAppCycle() {
@@ -1094,30 +1139,11 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		return true
 	}
 	if a.tabSelect && !key.Meta && !key.Ctrl {
+		if target, ok := a.appTabViewForKey(key.Name); ok {
+			a.switchAppTab(target)
+			return true
+		}
 		switch key.Name {
-		case "1":
-			a.switchAppTab(viewNotes)
-			return true
-		case "2":
-			a.switchAppTab(viewFiles)
-			return true
-		case "3":
-			a.switchAppTab(viewPages)
-			return true
-		case "4":
-			a.switchAppTab(viewPassword)
-			return true
-		case "5":
-			a.switchAppTab(viewSync)
-			return true
-		case "6":
-			a.switchAppTab(viewSettings)
-			return true
-		case "7":
-			if a.recorderVisible {
-				a.switchAppTab(viewRecorder)
-				return true
-			}
 		case "left":
 			a.view = a.prevView()
 			return true
@@ -1157,6 +1183,8 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		return a.handlePagesKey(key)
 	case viewPassword:
 		return a.handlePasswordKey(key)
+	case viewTodo:
+		return a.handleTodoKey(key)
 	case viewSync:
 		return a.handleSyncKey(key)
 	case viewSettings:
@@ -1314,8 +1342,10 @@ func (a *terminalApp) wantsQuitOnQ() bool {
 		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
+	case viewTodo:
+		return a.todoInputMode == ""
 	case viewSettings:
-		return !a.settingsEditMode
+		return !a.settingsEditMode && !a.tabOrderEditMode
 	default:
 		return true
 	}
@@ -1335,8 +1365,10 @@ func (a *terminalApp) wantsPlainTabAppCycle() bool {
 		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
+	case viewTodo:
+		return a.todoInputMode == ""
 	case viewSettings:
-		return !a.settingsEditMode
+		return !a.settingsEditMode && !a.tabOrderEditMode
 	default:
 		return true
 	}
@@ -1353,8 +1385,10 @@ func (a *terminalApp) wantsHelpToggle() bool {
 		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
+	case viewTodo:
+		return a.todoInputMode == ""
 	case viewSettings:
-		return !a.settingsEditMode
+		return !a.settingsEditMode && !a.tabOrderEditMode
 	default:
 		return true
 	}
@@ -1433,6 +1467,190 @@ func (a *terminalApp) generatePasswordAndNotify() {
 		return
 	}
 	helpers.StatusBarInst().UpdateStatusBar("Password generated and copied to clipboard")
+}
+
+func (a *terminalApp) handleTodoKey(key notes.Key) bool {
+	if a.todos == nil {
+		return false
+	}
+	if a.todoInputMode != "" {
+		switch key.Name {
+		case "enter":
+			text := strings.TrimSpace(a.todoInputBuffer)
+			if text == "" {
+				a.todoInputMode = ""
+				a.todoInputBuffer = ""
+				a.todoEditID = ""
+				return true
+			}
+			var err error
+			if a.todoInputMode == "edit" {
+				a.todoStore, err = a.todos.Edit(a.todoEditID, text)
+			} else {
+				a.todoStore, _, err = a.todos.Add(text)
+			}
+			if err != nil {
+				helpers.StatusBarInst().UpdateStatusBar("Todo save failed: " + err.Error())
+			} else {
+				a.markTodoChanged()
+			}
+			a.todoInputMode = ""
+			a.todoInputBuffer = ""
+			a.todoEditID = ""
+			a.clampTodoIndex()
+			return true
+		case "esc":
+			a.todoInputMode = ""
+			a.todoInputBuffer = ""
+			a.todoEditID = ""
+			return true
+		case "backspace":
+			if len(a.todoInputBuffer) > 0 {
+				runes := []rune(a.todoInputBuffer)
+				a.todoInputBuffer = string(runes[:len(runes)-1])
+			}
+			return true
+		}
+		if key.Rune != 0 && !key.Ctrl && !key.Meta && !key.Alt {
+			a.todoInputBuffer += string(key.Rune)
+			return true
+		}
+		return true
+	}
+	a.reloadTodosForRender()
+	rows := a.todoSelectableItems()
+	switch key.Name {
+	case "down", "j":
+		if a.todoIndex < len(rows)-1 {
+			a.todoIndex++
+		}
+		return true
+	case "up", "k":
+		if a.todoIndex > 0 {
+			a.todoIndex--
+		}
+		return true
+	case "n":
+		a.todoInputMode = "new"
+		a.todoInputBuffer = ""
+		return true
+	case "e":
+		if item, ok := a.selectedTodoItem(); ok && item.Status == todo.StatusTodo && item.CheckedAt == nil {
+			a.todoInputMode = "edit"
+			a.todoInputBuffer = item.Text
+			a.todoEditID = item.ID
+		}
+		return true
+	case "enter", "space":
+		if item, ok := a.selectedTodoItem(); ok && item.Status != todo.StatusArchived {
+			store, err := a.todos.Toggle(item.ID)
+			if err != nil {
+				helpers.StatusBarInst().UpdateStatusBar("Todo update failed: " + err.Error())
+			} else {
+				a.todoStore = store
+				a.markTodoChanged()
+				a.scheduleTodoRefresh()
+			}
+		}
+		return true
+	case "J":
+		return a.moveSelectedTodo(1)
+	case "K":
+		return a.moveSelectedTodo(-1)
+	}
+	return false
+}
+
+func (a *terminalApp) moveSelectedTodo(delta int) bool {
+	item, ok := a.selectedTodoItem()
+	if !ok || item.Status != todo.StatusTodo || item.CheckedAt != nil || a.todos == nil {
+		return true
+	}
+	store, err := a.todos.Move(item.ID, delta)
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo reorder failed: " + err.Error())
+		return true
+	}
+	a.todoStore = store
+	a.markTodoChanged()
+	a.selectTodoByID(item.ID)
+	return true
+}
+
+func (a *terminalApp) reloadTodosForRender() {
+	if a == nil || a.todos == nil {
+		return
+	}
+	store, err := a.todos.Load()
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo load failed: " + err.Error())
+		return
+	}
+	a.todoStore = store
+	a.clampTodoIndex()
+}
+
+func (a *terminalApp) markTodoChanged() {
+	a.todoDirty = true
+	a.settingsDirty = true
+	settings.MarkDriveDirty()
+	helpers.StatusBarInst().UpdateStatusBar("Todo saved")
+}
+
+func (a *terminalApp) scheduleTodoRefresh() {
+	if a == nil || a.tui == nil {
+		return
+	}
+	time.AfterFunc(todo.CheckedDelay+50*time.Millisecond, func() {
+		a.tui.QueueUpdateDraw(func() {
+			a.reloadTodosForRender()
+			a.refresh()
+		})
+	})
+}
+
+func (a *terminalApp) todoSelectableItems() []todo.Item {
+	items := make([]todo.Item, 0)
+	items = append(items, todo.ActiveItems(a.todoStore)...)
+	items = append(items, todo.DoneItems(a.todoStore)...)
+	for _, month := range todo.ArchiveMonths(a.todoStore) {
+		items = append(items, todo.ArchiveGroups(a.todoStore)[month]...)
+	}
+	return items
+}
+
+func (a *terminalApp) selectedTodoItem() (todo.Item, bool) {
+	items := a.todoSelectableItems()
+	if len(items) == 0 {
+		return todo.Item{}, false
+	}
+	a.clampTodoIndex()
+	return items[a.todoIndex], true
+}
+
+func (a *terminalApp) selectTodoByID(id string) {
+	items := a.todoSelectableItems()
+	for i, item := range items {
+		if item.ID == id {
+			a.todoIndex = i
+			return
+		}
+	}
+	a.clampTodoIndex()
+}
+
+func (a *terminalApp) clampTodoIndex() {
+	items := a.todoSelectableItems()
+	if len(items) == 0 {
+		a.todoIndex = 0
+		return
+	}
+	if a.todoIndex < 0 {
+		a.todoIndex = 0
+	}
+	if a.todoIndex >= len(items) {
+		a.todoIndex = len(items) - 1
+	}
 }
 
 func (a *terminalApp) handleSyncKey(key notes.Key) bool {
@@ -1547,6 +1765,27 @@ func (a *terminalApp) syncSpinnerFrame() string {
 }
 
 func (a *terminalApp) handleSettingsKey(key notes.Key) bool {
+	if a.tabOrderEditMode {
+		switch key.Name {
+		case "esc", "enter":
+			a.tabOrderEditMode = false
+			helpers.StatusBarInst().UpdateStatusBar("Tab order edit closed")
+			return true
+		case "down", "j":
+			a.moveTabOrderSelection(1, false)
+			return true
+		case "up", "k":
+			a.moveTabOrderSelection(-1, false)
+			return true
+		case "J":
+			a.moveTabOrderSelection(1, true)
+			return true
+		case "K":
+			a.moveTabOrderSelection(-1, true)
+			return true
+		}
+		return true
+	}
 	if a.settingsEditMode {
 		switch key.Name {
 		case "esc":
@@ -1598,6 +1837,33 @@ func (a *terminalApp) handleSettingsKey(key notes.Key) bool {
 		return true
 	}
 	return false
+}
+
+func (a *terminalApp) moveTabOrderSelection(delta int, reorder bool) {
+	cfg := settings.Inst()
+	if cfg.UI == nil {
+		cfg.UI = &settings.UISettings{}
+	}
+	cfg.UI.TabOrder = settings.NormalizeTabOrder(cfg.UI.TabOrder)
+	if len(cfg.UI.TabOrder) == 0 {
+		cfg.UI.TabOrder = settings.DefaultTabOrder()
+	}
+	if a.tabOrderIndex < 0 {
+		a.tabOrderIndex = 0
+	}
+	if a.tabOrderIndex >= len(cfg.UI.TabOrder) {
+		a.tabOrderIndex = len(cfg.UI.TabOrder) - 1
+	}
+	next := a.tabOrderIndex + delta
+	if next < 0 || next >= len(cfg.UI.TabOrder) {
+		return
+	}
+	if reorder {
+		cfg.UI.TabOrder[a.tabOrderIndex], cfg.UI.TabOrder[next] = cfg.UI.TabOrder[next], cfg.UI.TabOrder[a.tabOrderIndex]
+		a.settingsDirty = true
+		helpers.StatusBarInst().UpdateStatusBar("Tab order updated")
+	}
+	a.tabOrderIndex = next
 }
 
 func (a *terminalApp) requestShutdown() {
@@ -1793,6 +2059,19 @@ func (a *terminalApp) settingsItems() []actionItem {
 			a.settingsEditMode = true
 			a.settingsEditBuffer = strconv.Itoa(cfg.NotesApp.UndoLevels)
 		}},
+		{Label: a.settingsTabOrderLabel(), Apply: func() {
+			if cfg.UI == nil {
+				cfg.UI = &settings.UISettings{}
+			}
+			cfg.UI.TabOrder = settings.NormalizeTabOrder(cfg.UI.TabOrder)
+			if a.tabOrderIndex >= len(cfg.UI.TabOrder) {
+				a.tabOrderIndex = len(cfg.UI.TabOrder) - 1
+			}
+			if a.tabOrderIndex < 0 {
+				a.tabOrderIndex = 0
+			}
+			a.tabOrderEditMode = true
+		}},
 	}
 	items = append(items, a.spellSettingsItems()...)
 	return items
@@ -1929,6 +2208,8 @@ func (a *terminalApp) refresh() {
 		a.refreshSingle("Pages", a.renderPages(maxInt(3, a.height-10)))
 	case viewPassword:
 		a.refreshSingle("Password", a.renderPassword(maxInt(3, a.height-10)))
+	case viewTodo:
+		a.refreshSingle("Todo", a.renderTodo(maxInt(3, a.height-10)))
 	case viewSync:
 		a.refreshSingle("Sync", a.renderSync(maxInt(3, a.height-10)))
 	case viewSettings:
@@ -1970,6 +2251,8 @@ func (a *terminalApp) viewDirty(v view) bool {
 		return a.pages != nil && a.pages.Dirty
 	case viewPassword:
 		return a.password != nil && a.password.Dirty
+	case viewTodo:
+		return a.todoDirty
 	case viewSettings, viewSync:
 		return a.settingsDirty
 	case viewRecorder:
@@ -2361,6 +2644,25 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 				return
 			}
 		}
+		if a.view == viewTodo && a.todoInputMode != "" {
+			x, y, width, height := a.single.GetInnerRect()
+			row, col := a.todoInputCursor()
+			if row >= height {
+				row = height - 1
+			}
+			if row < 0 {
+				row = 0
+			}
+			if col >= width {
+				col = width - 1
+			}
+			if col < 0 {
+				col = 0
+			}
+			screen.SetCursorStyle(tcell.CursorStyleSteadyBar)
+			screen.ShowCursor(x+col, y+row)
+			return
+		}
 		screen.SetCursorStyle(tcell.CursorStyleDefault)
 		screen.HideCursor()
 		return
@@ -2429,6 +2731,14 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 		col = 0
 	}
 	screen.ShowCursor(x+col, y+row)
+}
+
+func (a *terminalApp) todoInputCursor() (int, int) {
+	prefix := "new: "
+	if a.todoInputMode == "edit" {
+		prefix = "edit: "
+	}
+	return 2, len([]rune(prefix + a.todoInputBuffer))
 }
 
 func joinTViewLines(lines []string) string {
@@ -2550,6 +2860,72 @@ func (a *terminalApp) renderPassword(height int) string {
 	return strings.Join(lines[:height], "\n")
 }
 
+func (a *terminalApp) renderTodo(height int) string {
+	a.reloadTodosForRender()
+	lines := []string{"Todo", "j/k move | n new | enter/space check | e edit | J/K reorder active"}
+	if a.todoInputMode != "" {
+		label := "new"
+		if a.todoInputMode == "edit" {
+			label = "edit"
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", label, a.todoInputBuffer))
+	} else {
+		lines = append(lines, "")
+	}
+	selectedID := ""
+	if item, ok := a.selectedTodoItem(); ok {
+		selectedID = item.ID
+	}
+	addSection := func(title string, items []todo.Item, archived bool) {
+		lines = append(lines, title)
+		if len(items) == 0 {
+			lines = append(lines, "  none")
+			return
+		}
+		for _, item := range items {
+			prefix := "  "
+			if item.ID == selectedID {
+				prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, "> ")
+			}
+			box := "[ ]"
+			text := item.Text
+			if item.CheckedAt != nil || item.Status == todo.StatusDone || item.Status == todo.StatusArchived {
+				box = "[x]"
+				text = "~" + text + "~"
+			}
+			if archived {
+				box = "[-]"
+			}
+			lines = append(lines, prefix+box+" "+text)
+		}
+	}
+	addSection("Todo", todo.ActiveItems(a.todoStore), false)
+	lines = append(lines, "")
+	addSection("Done", todo.DoneItems(a.todoStore), false)
+	lines = append(lines, "")
+	lines = append(lines, "Archive")
+	months := todo.ArchiveMonths(a.todoStore)
+	if len(months) == 0 {
+		lines = append(lines, "  none")
+	} else {
+		groups := todo.ArchiveGroups(a.todoStore)
+		for _, month := range months {
+			lines = append(lines, "  "+month)
+			for _, item := range groups[month] {
+				prefix := "    "
+				if item.ID == selectedID {
+					prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, ">   ")
+				}
+				lines = append(lines, prefix+"[-] ~"+item.Text+"~")
+			}
+		}
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:height], "\n")
+}
+
 func (a *terminalApp) renderSync(height int) string {
 	cfg := settings.Inst().GDrive
 	folder := cfg.FolderName
@@ -2599,6 +2975,8 @@ func (a *terminalApp) renderSettings(height int) string {
 	header := "Settings"
 	if a.settingsEditMode {
 		header = "Settings (editing undo levels)"
+	} else if a.tabOrderEditMode {
+		header = "Settings (editing tab order)"
 	}
 	lines := []string{header, a.settingsHelpLine()}
 	for i, item := range items {
@@ -2615,11 +2993,27 @@ func (a *terminalApp) renderSettings(height int) string {
 }
 
 func (a *terminalApp) renderSettingsItemLabel(index int, label string) string {
+	if strings.HasPrefix(label, "tab order:") {
+		return a.renderSettingsTabOrderLabel()
+	}
 	escaped := tview.Escape(label)
 	if index != 0 {
 		return escaped
 	}
 	return escaped + "  " + renderThemePreview(themeByName(settings.CurrentTheme()))
+}
+
+func (a *terminalApp) renderSettingsTabOrderLabel() string {
+	order := settings.UITabOrder()
+	parts := make([]string, 0, len(order))
+	for i, id := range order {
+		label := tview.Escape(tabLabelByID(id))
+		if a.tabOrderEditMode && i == a.tabOrderIndex {
+			label = themeMarkupPair(currentTheme().SelectionFG, currentTheme().SelectionBG) + " " + label + " " + "[-:-:-]"
+		}
+		parts = append(parts, label)
+	}
+	return "tab order: " + strings.Join(parts, ", ")
 }
 
 func renderThemePreview(theme appTheme) string {
@@ -2648,7 +3042,28 @@ func (a *terminalApp) settingsUndoLevelsLabel(value int) string {
 	return fmt.Sprintf("undo levels: %d", value)
 }
 
+func (a *terminalApp) settingsTabOrderLabel() string {
+	order := settings.UITabOrder()
+	labels := make([]string, 0, len(order))
+	for _, id := range order {
+		labels = append(labels, tabLabelByID(id))
+	}
+	return "tab order: " + strings.Join(labels, ", ")
+}
+
+func tabLabelByID(id string) string {
+	for _, tab := range baseAppTabs {
+		if tab.id == id {
+			return tab.label
+		}
+	}
+	return id
+}
+
 func (a *terminalApp) settingsHelpLine() string {
+	if a.tabOrderEditMode {
+		return "tab order: j/k select tab | J/K move selected | enter/esc done"
+	}
 	if a.settingsEditMode {
 		return "digits edit value | backspace delete | enter apply | esc cancel"
 	}
@@ -2706,6 +3121,9 @@ func (a *terminalApp) hasUnsavedChanges() bool {
 	if a.password != nil && a.password.Dirty {
 		return true
 	}
+	if a.todoDirty {
+		return true
+	}
 	return a.settingsDirty
 }
 
@@ -2724,10 +3142,18 @@ func (a *terminalApp) saveLocalState() error {
 	if a.password != nil && a.password.Dirty {
 		a.password.Save()
 	}
-	if a.settingsDirty || (a.notes == nil || !a.notes.HasDirty()) && (a.pages == nil || !a.pages.Dirty) && (a.password == nil || !a.password.Dirty) {
+	if a.todos != nil {
+		store, err := a.todos.Load()
+		if err != nil {
+			return err
+		}
+		a.todoStore = store
+	}
+	if a.settingsDirty || (a.notes == nil || !a.notes.HasDirty()) && (a.pages == nil || !a.pages.Dirty) && (a.password == nil || !a.password.Dirty) && !a.todoDirty {
 		settings.SaveSettingsLocal()
 	}
 	a.settingsDirty = false
+	a.todoDirty = false
 	return nil
 }
 
@@ -2766,6 +3192,14 @@ func (a *terminalApp) helpText() string {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		return "password: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | g generate | l/n/s toggle | +/- length"
+	case viewTodo:
+		if a.tabSelect {
+			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+		}
+		if a.todoInputMode != "" {
+			return "todo/edit: text input | enter save | esc cancel"
+		}
+		return "todo: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | n new | enter/space check | e edit | J/K reorder"
 	case viewSync:
 		if a.tabSelect {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
@@ -2774,6 +3208,9 @@ func (a *terminalApp) helpText() string {
 	case viewSettings:
 		if a.tabSelect {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+		}
+		if a.tabOrderEditMode {
+			return "settings/tab order: j/k select tab | J/K move selected | enter/esc done"
 		}
 		if a.settingsEditMode {
 			return "settings/edit: digits edit | backspace delete | enter apply | esc cancel"
@@ -2823,8 +3260,8 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "q", desc: "quit when not editing"},
 		{keys: "ctrl+t", desc: "activate tab bar"},
 		{keys: "ctrl+tab", desc: "cycle to the next app tab"},
-		{keys: "ctrl+1-7", desc: "jump directly to an app tab when visible"},
-		{keys: "1-7", desc: "jump to tab while tab bar is active"},
+		{keys: "ctrl+" + a.appTabKeyHint(), desc: "jump directly to an app tab when visible"},
+		{keys: a.appTabKeyHint(), desc: "jump to tab while tab bar is active"},
 		{keys: "mouse click tab", desc: "jump directly to an app tab"},
 		{keys: "left/right", desc: "move tab selection while tab bar is active"},
 		{keys: "enter", desc: "confirm tab selection"},
@@ -2943,6 +3380,13 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "l, n, s", desc: "toggle letters, numbers, symbols"},
 		{keys: "+, -", desc: "change password length"},
 	})...)
+	lines = append(lines, renderSection("Todo:", []helpEntry{
+		{keys: "j/k, arrows", desc: "move selection"},
+		{keys: "n", desc: "create a todo"},
+		{keys: "enter, space", desc: "check or uncheck selected todo"},
+		{keys: "e", desc: "edit selected active todo"},
+		{keys: "J/K", desc: "reorder selected active unchecked todo"},
+	})...)
 	lines = append(lines, renderSection("Sync:", []helpEntry{
 		{keys: "j/k", desc: "move selection"},
 		{keys: "enter, space", desc: "run selected action"},
@@ -2951,6 +3395,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "j/k", desc: "move selection"},
 		{keys: "enter, space", desc: "change selected option"},
 		{keys: "digits, backspace, enter, esc", desc: "edit numeric setting values while a numeric field is active"},
+		{keys: "tab order J/K", desc: "move the selected app tab while editing tab order"},
 	})...)
 	return annotateHelpSearch(strings.TrimRight(strings.Join(lines, "\n"), "\n"), a.helpSearchQuery)
 }

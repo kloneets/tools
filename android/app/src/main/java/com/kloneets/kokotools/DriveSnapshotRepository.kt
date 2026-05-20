@@ -125,6 +125,7 @@ class DriveSnapshotRepository {
         folderId: String,
         accessToken: String,
         settingsData: ByteArray,
+        todosData: ByteArray,
         notesRoot: File,
         retain: Int = 5,
     ): DriveSnapshotMeta {
@@ -133,6 +134,7 @@ class DriveSnapshotRepository {
         val snapshot = createFolder(accessToken, snapshotsRootId, timestampName())
 
         uploadFile(accessToken, snapshot.id, "settings.json", "application/json", settingsData)
+        uploadFile(accessToken, snapshot.id, TodoRepository.TODOS_FILE, "application/json", todosData)
         val notesFolderId = createFolder(accessToken, snapshot.id, NOTES_DIR).id
         uploadNotesTree(accessToken, notesFolderId, notesRoot)
         pruneOldSnapshots(accessToken, snapshotsRootId, retain)
@@ -182,11 +184,18 @@ class DriveSnapshotRepository {
         snapshotId: String,
         accessToken: String,
         notesRepository: NotesRepository,
+        todoRepository: TodoRepository,
     ): ByteArray {
         require(snapshotId.isNotBlank()) { "Snapshot ID is required" }
         val settingsEntry = findFile(accessToken, snapshotId, "settings.json")
             ?: throw IllegalStateException("Snapshot settings.json not found")
         val settingsData = downloadFile(accessToken, settingsEntry.id)
+        val todosEntry = findFile(accessToken, snapshotId, TodoRepository.TODOS_FILE)
+        if (todosEntry != null) {
+            todoRepository.todosPath().writeBytes(downloadFile(accessToken, todosEntry.id))
+        } else {
+            todoRepository.save(TodoStore())
+        }
 
         val notesEntry = findFolder(accessToken, snapshotId, NOTES_DIR)
             ?: throw IllegalStateException("Snapshot notes folder not found")

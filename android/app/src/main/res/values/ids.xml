@@ -2,6 +2,7 @@
 <resources>
     <item name="tab_notes" type="id" />
     <item name="tab_pages" type="id" />
+    <item name="tab_todo" type="id" />
     <item name="tab_sync" type="id" />
     <item name="tab_settings" type="id" />
     <item name="app_title" type="id" />
@@ -25,6 +26,9 @@
     <item name="pages_second" type="id" />
     <item name="pages_result" type="id" />
     <item name="pages_calculate" type="id" />
+    <item name="todo_input" type="id" />
+    <item name="todo_add" type="id" />
+    <item name="todo_list" type="id" />
     <item name="sync_folder_id" type="id" />
     <item name="sync_select_folder" type="id" />
     <item name="sync_connect" type="id" />

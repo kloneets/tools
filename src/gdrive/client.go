@@ -25,6 +25,7 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/kloneets/tools/src/helpers"
+	"github.com/kloneets/tools/src/todo"
 )
 
 type Folder struct {
@@ -376,6 +377,9 @@ func SyncAppData(folderID string, settingsData []byte) error {
 			return err
 		}
 	}
+	if err := syncLocalTodos(service, folderID); err != nil {
+		return err
+	}
 
 	notesFolderID, err := ensureFolder(service, folderID, "notes")
 	if err != nil {
@@ -411,6 +415,9 @@ func UploadAppSnapshot(folderID string, settingsData []byte, retain int) (Snapsh
 		if err := syncBytes(service, created.Id, "settings.json", settingsData, "application/json"); err != nil {
 			return SnapshotMeta{}, err
 		}
+	}
+	if err := syncLocalTodos(service, created.Id); err != nil {
+		return SnapshotMeta{}, err
 	}
 	notesFolderID, err := ensureFolder(service, created.Id, "notes")
 	if err != nil {
@@ -491,10 +498,43 @@ func RestoreAppSnapshot(snapshotID string) ([]byte, error) {
 	if err := restoreNotesTree(service, notesFolderID, filepath.Join(appConfigDir(), "notes")); err != nil {
 		return nil, err
 	}
+	if err := restoreSnapshotTodos(service, snapshotID); err != nil {
+		return nil, err
+	}
 	if err := restoreSnapshotSpellData(service, snapshotID); err != nil {
 		return nil, err
 	}
 	return settingsData, nil
+}
+
+func syncLocalTodos(service *drive.Service, folderID string) error {
+	data, err := os.ReadFile(todo.DefaultPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			data = []byte(`{"version":1,"items":[]}` + "\n")
+		} else {
+			return fmt.Errorf("read todos: %w", err)
+		}
+	}
+	return syncBytes(service, folderID, "todos.json", data, "application/json")
+}
+
+func restoreSnapshotTodos(service *drive.Service, snapshotID string) error {
+	data, found, err := downloadDriveFile(service, snapshotID, "todos.json")
+	if err != nil {
+		return err
+	}
+	if !found {
+		data = []byte(`{"version":1,"items":[]}` + "\n")
+	}
+	path := todo.DefaultPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create todo directory: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write todos: %w", err)
+	}
+	return nil
 }
 
 func syncSnapshotSpellData(service *drive.Service, snapshotID string) error {

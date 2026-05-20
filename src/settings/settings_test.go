@@ -45,6 +45,9 @@ func TestDefaultSettings(t *testing.T) {
 	if got.UI.Theme != DefaultTheme {
 		t.Fatalf("Theme = %q, want %q", got.UI.Theme, DefaultTheme)
 	}
+	if got := got.UI.TabOrder; strings.Join(got, ",") != strings.Join(DefaultTabOrder(), ",") {
+		t.Fatalf("TabOrder = %v, want default order", got)
+	}
 }
 
 func TestNormalizeSettings(t *testing.T) {
@@ -59,6 +62,9 @@ func TestNormalizeSettings(t *testing.T) {
 	if cfg.UI.Theme != DefaultTheme {
 		t.Fatalf("Theme = %q, want %q", cfg.UI.Theme, DefaultTheme)
 	}
+	if got := cfg.UI.TabOrder; strings.Join(got, ",") != strings.Join(DefaultTabOrder(), ",") {
+		t.Fatalf("TabOrder = %v, want default order", got)
+	}
 	if cfg.NotesApp.TabSpaces != 4 {
 		t.Fatalf("TabSpaces = %d, want 4", cfg.NotesApp.TabSpaces)
 	}
@@ -72,6 +78,14 @@ func TestNormalizeSettings(t *testing.T) {
 	normalizeSettings(cfg)
 	if got := cfg.NotesApp.SpellDictionaries; len(got) != 2 || got[0] != "en" || got[1] != "lv" {
 		t.Fatalf("SpellDictionaries = %v, want normalized unique codes", got)
+	}
+}
+
+func TestNormalizeTabOrderRepairsUnknownDuplicatesAndMissing(t *testing.T) {
+	got := NormalizeTabOrder([]string{" sync ", "notes", "bogus", "sync", "todo"})
+	want := []string{"sync", "notes", "todo", "files", "pages", "password", "settings"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("NormalizeTabOrder() = %v, want %v", got, want)
 	}
 }
 
