@@ -38,6 +38,10 @@ class DriveSnapshotRepositoryTest {
             "'folder' in parents and trashed = false",
             repository.childrenQuery("folder"),
         )
+        assertEquals(
+            "'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            repository.foldersQuery(DriveSnapshotRepository.ROOT_FOLDER_ID),
+        )
     }
 
     @Test
@@ -115,5 +119,14 @@ class DriveSnapshotRepositoryTest {
         assertTrue(body.contains("Content-Type: application/json; charset=UTF-8"))
         assertTrue(body.contains("\"name\":\"settings.json\""))
         assertTrue(body.contains("--boundary--"))
+    }
+
+    @Test
+    fun buildsDriveFolderMetadata() {
+        val metadata = repository.folderMetadata("parent", " Koko Tools ")
+
+        assertEquals("Koko Tools", metadata.getString("name"))
+        assertEquals("application/vnd.google-apps.folder", metadata.getString("mimeType"))
+        assertEquals("parent", metadata.getJSONArray("parents").getString(0))
     }
 }

@@ -55,6 +55,11 @@ class DriveSnapshotRepository {
         return "'$escaped' in parents and trashed = false"
     }
 
+    fun foldersQuery(parentFolderId: String): String {
+        val escaped = escapeQueryValue(parentFolderId)
+        return "'$escaped' in parents and mimeType = '$DRIVE_FOLDER_MIME' and trashed = false"
+    }
+
     fun urlEncode(value: String): String {
         return URLEncoder.encode(value, Charsets.UTF_8.name())
     }
@@ -152,6 +157,25 @@ class DriveSnapshotRepository {
                 )
             }
             .sortedWith(snapshotMetaComparator())
+    }
+
+    fun listFolders(parentFolderId: String, accessToken: String): List<DriveEntry> {
+        require(parentFolderId.isNotBlank()) { "Drive folder ID is required" }
+        return listByQuery(accessToken, foldersQuery(parentFolderId))
+            .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+    }
+
+    fun createFolderIn(parentFolderId: String, name: String, accessToken: String): DriveEntry {
+        require(parentFolderId.isNotBlank()) { "Drive folder ID is required" }
+        require(name.isNotBlank()) { "Drive folder name is required" }
+        return createFolder(accessToken, parentFolderId, name.trim())
+    }
+
+    fun folderMetadata(parentFolderId: String, name: String): JSONObject {
+        return JSONObject()
+            .put("name", name.trim())
+            .put("mimeType", DRIVE_FOLDER_MIME)
+            .put("parents", JSONArray().put(parentFolderId))
     }
 
     fun restoreSnapshot(
@@ -259,10 +283,7 @@ class DriveSnapshotRepository {
     }
 
     private fun createFolder(accessToken: String, parentFolderId: String, name: String): DriveEntry {
-        val metadata = JSONObject()
-            .put("name", name)
-            .put("mimeType", DRIVE_FOLDER_MIME)
-            .put("parents", JSONArray().put(parentFolderId))
+        val metadata = folderMetadata(parentFolderId, name)
         val body = request(
             accessToken = accessToken,
             method = "POST",
@@ -378,6 +399,7 @@ class DriveSnapshotRepository {
     }
 
     companion object {
+        const val ROOT_FOLDER_ID = "root"
         const val DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
         const val DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
         private const val DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"

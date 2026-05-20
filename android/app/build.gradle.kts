@@ -24,6 +24,13 @@ android {
 
 dependencies {
     implementation("com.google.android.gms:play-services-auth:21.5.0")
+    implementation("io.noties:prism4j:2.0.0") {
+        exclude(group = "org.jetbrains", module = "annotations-java5")
+    }
+    implementation("io.noties.markwon:core:4.6.2")
+    implementation("io.noties.markwon:ext-tables:4.6.2")
+
+    annotationProcessor("io.noties:prism4j-bundler:2.0.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

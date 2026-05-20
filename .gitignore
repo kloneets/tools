@@ -6,3 +6,5 @@ main
 dist
 
 credentials.json
+android/client-secret.json
+android/.kotlin/

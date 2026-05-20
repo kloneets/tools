@@ -3,7 +3,9 @@ package com.kloneets.kokotools
 data class AppSettings(
     val pagesApp: PagesSettings = PagesSettings(),
     val notesApp: NotesSettings = NotesSettings(),
+    val androidApp: AndroidSettings = AndroidSettings(),
     val gdrive: GDriveSettings = GDriveSettings(),
+    val rawJson: String = "",
 )
 
 data class PagesSettings(
@@ -14,7 +16,24 @@ data class PagesSettings(
 
 data class NotesSettings(
     val currentNotePath: String = "",
+    val previewHidden: Boolean = false,
 )
+
+data class AndroidSettings(
+    val themeMode: ThemeMode = ThemeMode.System,
+)
+
+enum class ThemeMode(val value: String, val label: String) {
+    Light("light", "Light"),
+    Dark("dark", "Dark"),
+    System("system", "System");
+
+    companion object {
+        fun fromValue(value: String): ThemeMode {
+            return values().firstOrNull { it.value == value } ?: System
+        }
+    }
+}
 
 data class GDriveSettings(
     val folderId: String = "",

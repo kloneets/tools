@@ -75,6 +75,51 @@ func TestNormalizeSettings(t *testing.T) {
 	}
 }
 
+func TestNormalizeSettingsRepairsMobileSnapshotDefaults(t *testing.T) {
+	var cfg UserSettings
+	if err := json.Unmarshal([]byte(`{
+		"pages_app":{"first_book":10},
+		"notes_app":{"current_note_path":"mobile.md"},
+		"gdrive":{"folder_id":"folder-1"}
+	}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal mobile settings error = %v", err)
+	}
+
+	normalizeSettings(&cfg)
+
+	if !cfg.PasswordApp.Letters || !cfg.PasswordApp.Numbers || !cfg.PasswordApp.SpecialSymbols {
+		t.Fatalf("PasswordApp = %#v, want default character groups enabled", cfg.PasswordApp)
+	}
+	if cfg.PasswordApp.SymbolCount != 16 {
+		t.Fatalf("SymbolCount = %d, want 16", cfg.PasswordApp.SymbolCount)
+	}
+	if cfg.UI == nil || !cfg.UI.ShowNotes || !cfg.UI.ShowPages || !cfg.UI.ShowPassword {
+		t.Fatalf("UI = %#v, want default visible tools", cfg.UI)
+	}
+	if cfg.AppWindow.Width != 600 || cfg.AppWindow.Height != 300 {
+		t.Fatalf("AppWindow = %#v, want default dimensions", cfg.AppWindow)
+	}
+	if cfg.NotesApp.TabSpaces != 4 || cfg.NotesApp.UndoLevels != 1000 {
+		t.Fatalf("NotesApp = %#v, want editor defaults", cfg.NotesApp)
+	}
+}
+
+func TestUISettingsUnmarshalDefaultsMissingVisibilityFields(t *testing.T) {
+	var cfg UserSettings
+	if err := json.Unmarshal([]byte(`{"ui":{"theme":"gruvbox"}}`), &cfg); err != nil {
+		t.Fatalf("Unmarshal UI settings error = %v", err)
+	}
+
+	normalizeSettings(&cfg)
+
+	if cfg.UI == nil || !cfg.UI.ShowNotes || !cfg.UI.ShowPages || !cfg.UI.ShowPassword {
+		t.Fatalf("UI = %#v, want missing visibility fields to default true", cfg.UI)
+	}
+	if cfg.UI.Theme != "gruvbox" {
+		t.Fatalf("Theme = %q, want gruvbox", cfg.UI.Theme)
+	}
+}
+
 func TestNormalizeSettingsResetsUnknownTheme(t *testing.T) {
 	cfg := &UserSettings{UI: &UISettings{Theme: "unknown"}}
 	normalizeSettings(cfg)
@@ -403,5 +448,52 @@ func TestRestoreDriveSnapshotUsesHook(t *testing.T) {
 	}
 	if got := settingsInstance.NotesApp.CurrentNotePath; got != "Projects/Plan.md" {
 		t.Fatalf("CurrentNotePath = %q, want Projects/Plan.md", got)
+	}
+}
+
+func TestRestoreDriveSnapshotRepairsMobileSettingsSubset(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
+	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
+	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(token dir) error = %v", err)
+	}
+	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(token) error = %v", err)
+	}
+	settingsInstance = defaultSettings()
+	settingsInstance.GDrive.Enabled = true
+	settingsInstance.GDrive.FolderID = "folder-1"
+	settingsInstance.GDrive.FolderName = "Koko"
+	settingsInstance.GDrive.Snapshots = []DriveSnapshotMeta{{ID: "snap-mobile", Name: "mobile", CreatedAt: "2026-05-14T10:00:00Z"}}
+
+	origRestore := driveRestoreSnapshotFunc
+	defer func() { driveRestoreSnapshotFunc = origRestore }()
+	driveRestoreSnapshotFunc = func(snapshotID string) ([]byte, error) {
+		return []byte(`{
+			"pages_app":{"first_book":100,"second_book":200,"read_pages":10},
+			"notes_app":{"current_note_path":"mobile.md"},
+			"gdrive":{"folder_id":"mobile-folder"}
+		}`), nil
+	}
+
+	if err := RestoreDriveSnapshot("snap-mobile"); err != nil {
+		t.Fatalf("RestoreDriveSnapshot() error = %v", err)
+	}
+	if !settingsInstance.PasswordApp.Letters || !settingsInstance.PasswordApp.Numbers || !settingsInstance.PasswordApp.SpecialSymbols {
+		t.Fatalf("PasswordApp = %#v, want restored desktop-safe defaults", settingsInstance.PasswordApp)
+	}
+	if settingsInstance.PasswordApp.SymbolCount != 16 {
+		t.Fatalf("SymbolCount = %d, want 16", settingsInstance.PasswordApp.SymbolCount)
+	}
+	if settingsInstance.UI == nil || !settingsInstance.UI.ShowNotes || !settingsInstance.UI.ShowPages || !settingsInstance.UI.ShowPassword {
+		t.Fatalf("UI = %#v, want restored desktop-safe defaults", settingsInstance.UI)
+	}
+	if settingsInstance.AppWindow.Width != 600 || settingsInstance.AppWindow.Height != 300 {
+		t.Fatalf("AppWindow = %#v, want restored desktop-safe defaults", settingsInstance.AppWindow)
+	}
+	if settingsInstance.GDrive.FolderID != "folder-1" || settingsInstance.GDrive.FolderName != "Koko" {
+		t.Fatalf("GDrive = %#v, want current desktop Drive context preserved", settingsInstance.GDrive)
 	}
 }

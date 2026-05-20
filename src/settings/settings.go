@@ -82,6 +82,31 @@ type UISettings struct {
 	TransparentBackground bool   `json:"transparent_background,omitempty"`
 }
 
+func (u *UISettings) UnmarshalJSON(data []byte) error {
+	type uiAlias UISettings
+	aux := struct {
+		ShowPages    *bool `json:"show_pages"`
+		ShowPassword *bool `json:"show_password"`
+		ShowNotes    *bool `json:"show_notes"`
+		*uiAlias
+	}{
+		uiAlias: (*uiAlias)(u),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.ShowPages == nil {
+		u.ShowPages = true
+	}
+	if aux.ShowPassword == nil {
+		u.ShowPassword = true
+	}
+	if aux.ShowNotes == nil {
+		u.ShowNotes = true
+	}
+	return nil
+}
+
 type GDriveSettings struct {
 	Enabled             bool                `json:"enabled"`
 	SyncIntervalSec     int                 `json:"sync_interval_sec"`
@@ -222,6 +247,14 @@ func defaultUISettings() *UISettings {
 func normalizeSettings(s *UserSettings) {
 	if s == nil {
 		return
+	}
+	if !s.PasswordApp.Letters && !s.PasswordApp.Numbers && !s.PasswordApp.SpecialSymbols {
+		s.PasswordApp.Letters = true
+		s.PasswordApp.Numbers = true
+		s.PasswordApp.SpecialSymbols = true
+	}
+	if s.PasswordApp.SymbolCount <= 0 {
+		s.PasswordApp.SymbolCount = 16
 	}
 	if s.GDrive == nil {
 		s.GDrive = defaultGDriveSettings()
