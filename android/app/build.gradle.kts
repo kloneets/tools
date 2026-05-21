@@ -1,3 +1,5 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
 }
@@ -5,6 +7,30 @@ plugins {
 android {
     namespace = "com.kloneets.kokotools"
     compileSdk = 35
+
+    fun googleServicesConfig(): Map<String, String> {
+        val file = listOf(
+            rootProject.file("google-services.json"),
+            project.file("google-services.json"),
+        ).firstOrNull { it.isFile } ?: return emptyMap()
+        val root = JsonSlurper().parse(file) as Map<*, *>
+        val projectInfo = root["project_info"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        val client = (root["client"] as? List<*>)?.firstOrNull() as? Map<*, *> ?: emptyMap<Any, Any>()
+        val apiKey = (client["api_key"] as? List<*>)?.firstOrNull() as? Map<*, *> ?: emptyMap<Any, Any>()
+        return mapOf(
+            "KOKO_FIREBASE_API_KEY" to apiKey["current_key"].orEmptyString(),
+            "KOKO_FIREBASE_DATABASE_URL" to projectInfo["firebase_url"].orEmptyString(),
+            "KOKO_FIREBASE_PROJECT_ID" to projectInfo["project_id"].orEmptyString(),
+        )
+    }
+
+    val googleServicesConfig = googleServicesConfig()
+
+    fun firebaseBuildConfigValue(name: String): String {
+        return providers.gradleProperty(name).orElse(googleServicesConfig[name].orEmpty()).get()
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+    }
 
     defaultConfig {
         applicationId = "com.kloneets.kokotools"
@@ -14,6 +40,26 @@ android {
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "FIREBASE_API_KEY", "\"${firebaseBuildConfigValue("KOKO_FIREBASE_API_KEY")}\"")
+        buildConfigField("String", "FIREBASE_DATABASE_URL", "\"${firebaseBuildConfigValue("KOKO_FIREBASE_DATABASE_URL")}\"")
+        buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${firebaseBuildConfigValue("KOKO_FIREBASE_PROJECT_ID")}\"")
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17")
+            }
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     compileOptions {
@@ -21,6 +67,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
 }
+
+fun Any?.orEmptyString(): String = (this as? String).orEmpty()
 
 dependencies {
     implementation("com.google.android.gms:play-services-auth:21.5.0")

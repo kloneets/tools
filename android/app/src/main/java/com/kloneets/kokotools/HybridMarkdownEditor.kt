@@ -5,7 +5,6 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.view.inputmethod.InputMethodManager
 import android.text.Editable
-import android.text.InputType
 import android.text.Spannable
 import android.text.SpannableString
 import android.text.SpannableStringBuilder
@@ -66,8 +65,10 @@ object MarkdownDocumentModel {
             )
             offset = end
         }
-        return mergeInactiveMarkdownSegments(markdown, segments)
-            .let { protectListFragmentsAroundActiveLine(it) }
+        if (activeRange.isEmpty() && activeRange.first == markdown.length) {
+            segments.add(MarkdownSegment(markdown.length, markdown.length, "", active = true, codeBlock = false))
+        }
+        return protectListFragmentsAroundActiveLine(segments)
     }
 
     fun activeRange(markdown: String, activeOffset: Int): IntRange {
@@ -124,7 +125,11 @@ object MarkdownDocumentModel {
         return if (direction > 0) {
             val next = (activeRange.last + 1).coerceAtMost(markdown.length)
             when {
-                next >= markdown.length -> activeRange.first
+                next >= markdown.length -> if (markdown.endsWith('\n') && activeRange.last == markdown.length - 1) {
+                    markdown.length
+                } else {
+                    activeRange.first
+                }
                 markdown[next] == '\n' -> (next + 1).coerceAtMost(markdown.length)
                 else -> next
             }
@@ -147,42 +152,6 @@ object MarkdownDocumentModel {
     private fun lineEnd(markdown: String, start: Int): Int {
         val nextBreak = markdown.indexOf('\n', start)
         return if (nextBreak < 0) markdown.length else nextBreak + 1
-    }
-
-    private fun mergeInactiveMarkdownSegments(markdown: String, segments: List<MarkdownSegment>): List<MarkdownSegment> {
-        val merged = mutableListOf<MarkdownSegment>()
-        var index = 0
-        while (index < segments.size) {
-            val current = segments[index]
-            if (current.active || current.codeBlock) {
-                merged.add(current)
-                index += 1
-                continue
-            }
-
-            var endIndex = index
-            while (
-                endIndex + 1 < segments.size &&
-                !segments[endIndex + 1].active &&
-                !segments[endIndex + 1].codeBlock
-            ) {
-                endIndex += 1
-            }
-
-            val start = current.rawStart
-            val end = segments[endIndex].rawEnd
-            merged.add(
-                MarkdownSegment(
-                    rawStart = start,
-                    rawEnd = end,
-                    markdownText = markdown.substring(start, end).trimEnd('\n', '\r'),
-                    active = false,
-                    codeBlock = false,
-                ),
-            )
-            index = endIndex + 1
-        }
-        return merged
     }
 
     private fun protectListFragmentsAroundActiveLine(segments: List<MarkdownSegment>): List<MarkdownSegment> {
@@ -208,6 +177,8 @@ object MarkdownDocumentModel {
 class HybridMarkdownEditor(
     context: Context,
     private val palette: AppPalette = AppPalette.light(),
+    initialSpellCheckEnabled: Boolean = false,
+    initialSpellDictionaries: List<String> = emptyList(),
 ) : ScrollView(context) {
     private val markwon = Markwon.builder(context)
         .usePlugin(TablePlugin.create(context))
@@ -222,14 +193,23 @@ class HybridMarkdownEditor(
     private var activeRange = 0 until 0
     private var keyboardVisible = false
     private var suppressChanges = false
+    private var spellCheckEnabled = initialSpellCheckEnabled
+    private var spellDictionaries = initialSpellDictionaries
     private var activeSegment: MarkdownSegment = MarkdownSegment(0, 0, "", active = true, codeBlock = false)
     private val activeEditText: EditText = createActiveEditor()
+    private val spellChecker = AndroidSpellChecker(context, activeEditText)
     var onMarkdownChanged: ((String) -> Unit)? = null
 
     init {
         setBackgroundColor(Color.TRANSPARENT)
         isFillViewport = true
+        clipToPadding = false
+        setPadding(0, 0, 0, dp(120))
         addView(container)
+        spellChecker.setConfig(spellCheckEnabled, spellDictionaries)
+        setOnClickListener {
+            focusEndOfNote()
+        }
     }
 
     fun setMarkdown(text: String, activeOffset: Int = 0) {
@@ -239,6 +219,17 @@ class HybridMarkdownEditor(
     }
 
     fun getMarkdown(): String = markdown
+
+    fun setSpellCheckEnabled(enabled: Boolean) {
+        spellCheckEnabled = enabled
+        activeEditText.inputType = NoteEditorInputTypes.forSpellCheck(enabled)
+        spellChecker.setConfig(enabled, spellDictionaries)
+    }
+
+    fun setSpellDictionaries(codes: List<String>) {
+        spellDictionaries = codes
+        spellChecker.setConfig(spellCheckEnabled, spellDictionaries)
+    }
 
     fun scrollEditorToTop() {
         post { scrollTo(0, 0) }
@@ -266,9 +257,7 @@ class HybridMarkdownEditor(
             id = R.id.note_editor
             textSize = 16f
             gravity = Gravity.TOP or Gravity.START
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            inputType = NoteEditorInputTypes.forSpellCheck(spellCheckEnabled)
             setTextColor(palette.textPrimary)
             setHintTextColor(palette.textMuted)
             includeFontPadding = true
@@ -279,6 +268,7 @@ class HybridMarkdownEditor(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
+            minHeight = dp(42)
             addTextChangedListener(MarkdownHighlightingTextWatcher(highlighter))
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -290,6 +280,7 @@ class HybridMarkdownEditor(
                     activeRange = activeRange.first until (activeRange.first + replacement.length)
                     activeOffset = activeRange.first + selectionStart.coerceAtLeast(0)
                     onMarkdownChanged?.invoke(markdown)
+                    spellChecker.onTextChanged()
                 }
             })
             setOnKeyListener { _, keyCode, event ->
@@ -306,6 +297,9 @@ class HybridMarkdownEditor(
                 if (hasFocus) {
                     keyboardVisible = true
                 }
+            }
+            setOnTouchListener { _, event ->
+                spellChecker.handleTouchEvent(event)
             }
         }
     }
@@ -337,7 +331,8 @@ class HybridMarkdownEditor(
         if (nextOffset == activeRange.first) return false
         activeOffset = nextOffset
         rebuild()
-        activeEditText.requestFocus()
+        focusActiveEditor(showKeyboard = keyboardVisible)
+        scrollActiveEditorIntoView()
         return true
     }
 
@@ -348,8 +343,9 @@ class HybridMarkdownEditor(
         activeOffset = nextOffset
         onMarkdownChanged?.invoke(markdown)
         rebuild()
-        activeEditText.requestFocus()
+        focusActiveEditor(showKeyboard = keyboardVisible)
         activeEditText.setSelection((nextOffset - activeSegment.rawStart).coerceAtLeast(0).coerceAtMost(activeEditText.length()))
+        scrollActiveEditorIntoView()
         return true
     }
 
@@ -360,8 +356,9 @@ class HybridMarkdownEditor(
         activeOffset = nextOffset
         onMarkdownChanged?.invoke(markdown)
         rebuild()
-        activeEditText.requestFocus()
+        focusActiveEditor(showKeyboard = keyboardVisible)
         activeEditText.setSelection(activeEditText.length())
+        scrollActiveEditorIntoView()
         return true
     }
 
@@ -373,6 +370,40 @@ class HybridMarkdownEditor(
             val inputMethodManager = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             inputMethodManager?.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
         }
+    }
+
+    private fun focusEndOfNote() {
+        activeOffset = markdown.length
+        rebuild()
+        activeEditText.setSelection(activeEditText.length())
+        focusActiveEditor(showKeyboard = true)
+        scrollActiveEditorIntoView()
+    }
+
+    private fun scrollActiveEditorIntoView() {
+        activeEditText.post {
+            val editorTop = activeEditText.top
+            val editorBottom = activeEditText.bottom
+            val visibleTop = scrollY
+            val visibleBottom = scrollY + height - paddingBottom
+            when {
+                editorTop < visibleTop -> smoothScrollTo(0, editorTop)
+                editorBottom > visibleBottom -> smoothScrollTo(0, editorBottom - (height - paddingBottom))
+            }
+        }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.action == MotionEvent.ACTION_UP && event.y + scrollY >= container.bottom) {
+            focusEndOfNote()
+            return true
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun onDetachedFromWindow() {
+        spellChecker.close()
+        super.onDetachedFromWindow()
     }
 
     private fun renderedSegment(segment: MarkdownSegment): TextView {
@@ -397,19 +428,23 @@ class HybridMarkdownEditor(
             setOnTouchListener { view, event ->
                 if (event.action != MotionEvent.ACTION_UP) return@setOnTouchListener false
                 val textView = view as TextView
-                val renderedOffset = textView.layout?.let { layout ->
-                    val x = event.x - textView.totalPaddingLeft + textView.scrollX
-                    val y = event.y.toInt() - textView.totalPaddingTop + textView.scrollY
-                    val line = layout.getLineForVertical(y.coerceAtLeast(0))
-                    layout.getOffsetForHorizontal(line, x.coerceAtLeast(0f))
-                } ?: 0
+                val renderedOffset = textView.renderedOffsetForTouch(event)
                 activeOffset = MarkdownDocumentModel.rawOffsetForRenderedOffset(segment, renderedOffset)
                 rebuild()
                 focusActiveEditor(showKeyboard = true)
+                scrollActiveEditorIntoView()
                 textView.performClick()
                 true
             }
         }
+    }
+
+    private fun TextView.renderedOffsetForTouch(event: MotionEvent): Int {
+        val layout = layout ?: return 0
+        val x = event.x - totalPaddingLeft + scrollX
+        val y = event.y - totalPaddingTop + scrollY
+        val line = layout.getLineForVertical(y.toInt().coerceIn(0, layout.height))
+        return layout.getOffsetForHorizontal(line, x.coerceAtLeast(0f))
     }
 
     private fun dp(value: Int): Int {

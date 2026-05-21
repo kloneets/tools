@@ -21,6 +21,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -78,6 +79,7 @@ class MainActivity : Activity() {
     private var noteSelector: TextView? = null
     private var noteEditor: HybridMarkdownEditor? = null
     private var rawNoteEditor: EditText? = null
+    private var rawNoteSpellChecker: AndroidSpellChecker? = null
     private var loadedNoteText = ""
     private val noteAutosaveHandler = Handler(Looper.getMainLooper())
     private var pendingNoteAutosave: Runnable? = null
@@ -102,6 +104,7 @@ class MainActivity : Activity() {
     private var todoRefreshRunnable: Runnable? = null
     private var firebasePullRunnable: Runnable? = null
     private var todoDraftText = ""
+    private val pendingRemoteNotes = mutableMapOf<String, FirebaseRemoteNote>()
     private var todoMoveMode = false
     private val todoMoveRows = mutableMapOf<String, View>()
     private var todoDraggingId: String? = null
@@ -362,6 +365,8 @@ class MainActivity : Activity() {
 
         noteListView = null
         noteSelector = null
+        rawNoteSpellChecker?.close()
+        rawNoteSpellChecker = null
         rawNoteEditor = null
 
         if (settings.notesApp.previewHidden) {
@@ -369,7 +374,12 @@ class MainActivity : Activity() {
             rawNoteEditor = buildRawNoteEditor()
             content.addView(rawNoteEditor)
         } else {
-            noteEditor = HybridMarkdownEditor(this, palette).apply {
+            noteEditor = HybridMarkdownEditor(
+                this,
+                palette,
+                settings.notesApp.spellCheckEnabled,
+                settings.notesApp.spellDictionaries,
+            ).apply {
                 background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, 0f)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -390,12 +400,13 @@ class MainActivity : Activity() {
             minLines = 10
             textSize = 16f
             gravity = Gravity.TOP or Gravity.START
-            inputType = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            inputType = NoteEditorInputTypes.forSpellCheck(settings.notesApp.spellCheckEnabled)
+            rawNoteSpellChecker = AndroidSpellChecker(this@MainActivity, this).also {
+                it.setConfig(settings.notesApp.spellCheckEnabled, settings.notesApp.spellDictionaries)
+            }
             setTextColor(COLOR_TEXT_PRIMARY)
             setHintTextColor(COLOR_TEXT_MUTED)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setPadding(dp(14), dp(12), dp(14), dp(120))
             background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, 0f)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -408,8 +419,15 @@ class MainActivity : Activity() {
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
                 override fun afterTextChanged(s: Editable?) {
                     scheduleNoteAutosave()
+                    rawNoteSpellChecker?.onTextChanged()
                 }
             })
+            setOnTouchListener { view, event ->
+                if (rawNoteSpellChecker?.handleTouchEvent(event) == true) {
+                    return@setOnTouchListener true
+                }
+                false
+            }
         }
     }
 
@@ -606,7 +624,12 @@ class MainActivity : Activity() {
             afterSwitch()
             return
         }
+        val previousPath = currentNotePath
         saveCurrentNoteSilently()
+        if (previousPath.isNotBlank()) {
+            applyPendingRemoteNoteToFile(previousPath, notesRepository.read(previousPath), updateEditor = false)
+        }
+        applyPendingRemoteNoteToFile(relativePath, notesRepository.read(relativePath), updateEditor = false)
         selectNote(relativePath)
         afterSwitch()
     }
@@ -627,6 +650,7 @@ class MainActivity : Activity() {
                 val path = NotesRepository.normalizePath(input.text.toString())
                 currentNotePath = path
                 notesRepository.save(path, "")
+                pushNoteToFirebase(path, "")
                 loadedNoteText = ""
                 refreshNotes()
                 selectNote(path)
@@ -649,12 +673,14 @@ class MainActivity : Activity() {
 
     private fun saveCurrentNoteInternal(showToast: Boolean, refreshList: Boolean) {
         val path = currentNotePath.ifBlank { "untitled.md" }
-        val saved = notesRepository.save(path, noteEditorText())
+        val text = noteEditorText()
+        val saved = notesRepository.save(path, text)
         currentNotePath = saved.relativePath
         persistSettings(
             settings.copy(notesApp = settings.notesApp.copy(currentNotePath = saved.relativePath)),
         )
-        loadedNoteText = noteEditorText()
+        loadedNoteText = text
+        pushNoteToFirebase(saved.relativePath, text)
         if (refreshList) {
             refreshNotes()
         } else {
@@ -695,6 +721,7 @@ class MainActivity : Activity() {
             .setMessage("Delete $path?")
             .setPositiveButton("Delete") { _, _ ->
                 notesRepository.delete(path)
+                pushNoteDeleteToFirebase(path)
                 currentNotePath = ""
                 loadedNoteText = ""
                 persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
@@ -1090,7 +1117,7 @@ class MainActivity : Activity() {
 
     private fun showSync() {
         currentScreen = Screen.Sync
-        setScreenHeader("Sync", "Google Drive snapshots")
+        setScreenHeader("Sync", "Firebase sync")
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
         content.setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -1104,25 +1131,33 @@ class MainActivity : Activity() {
             background = roundedFill(COLOR_STATUS, dp(10).toFloat())
         }
         content.addView(syncStatusText)
-        content.addView(sectionTitle("Firebase realtime"))
+        content.addView(sectionTitle("Firebase"))
         content.addView(commandButton(if (settings.firebase.enabled) "Disable Firebase realtime" else "Enable Firebase realtime", View.generateViewId()) {
             val next = settings.firebase.copy(enabled = !settings.firebase.enabled, realtime = true)
             persistSettings(settings.copy(firebase = next))
             if (next.enabled) startFirebaseRealtimeIfEnabled()
             showSync()
         })
-        content.addView(commandButton("Configure Firebase", View.generateViewId()) {
-            promptFirebaseConfig()
+        content.addView(commandButton("Create Firebase account", View.generateViewId()) {
+            promptFirebaseLogin(register = true)
         })
         content.addView(commandButton("Login Firebase", View.generateViewId()) {
-            promptFirebaseLogin()
+            promptFirebaseLogin(register = false)
         })
         content.addView(commandButton("Pull todos now", View.generateViewId()) {
             pullTodosFromFirebase()
         })
+        content.addView(commandButton("Replace local from Firebase", View.generateViewId()) {
+            replaceLocalFromFirebase()
+        })
         content.addView(commandButton("Push todos now", View.generateViewId()) {
             pushTodosToFirebase()
         })
+        if (BuildConfig.DEBUG || !FirebaseDefaults.bundled.ready) {
+            content.addView(commandButton("Advanced custom Firebase config", View.generateViewId()) {
+                promptFirebaseConfig()
+            })
+        }
         content.addView(TextView(this).apply {
             text = "Google Drive below is legacy manual snapshot backup."
             textSize = 13f
@@ -1235,6 +1270,37 @@ class MainActivity : Activity() {
             }
         }
         content.addView(group)
+
+        content.addView(sectionTitle("Notes"))
+        val spellCheck = CheckBox(this).apply {
+            id = R.id.settings_spell_check
+            text = "Spell checking"
+            textSize = 16f
+            setTextColor(COLOR_TEXT_PRIMARY)
+            buttonTintList = ColorStateList.valueOf(COLOR_ACCENT)
+            background = selectableFillBackground(COLOR_SURFACE)
+            setPadding(dp(12), 0, dp(12), 0)
+            isChecked = settings.notesApp.spellCheckEnabled
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48),
+            ).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(8)
+            }
+            setOnCheckedChangeListener { _, checked ->
+                if (checked != settings.notesApp.spellCheckEnabled) {
+                    changeSpellCheckEnabled(checked)
+                }
+            }
+        }
+        content.addView(spellCheck)
+
+        content.addView(sectionTitle("Spell dictionaries"))
+        val selectedSpellDictionaries = SpellLanguages.normalizeCodes(settings.notesApp.spellDictionaries).toSet()
+        SpellLanguages.supported.forEach { language ->
+            content.addView(spellDictionaryCheckBox(language, selectedSpellDictionaries))
+        }
     }
 
     private fun showSettingsActionsMenu(anchor: View) {
@@ -1261,6 +1327,28 @@ class MainActivity : Activity() {
                 dp(48),
             ).apply {
                 bottomMargin = dp(8)
+            }
+        }
+    }
+
+    private fun spellDictionaryCheckBox(language: SpellLanguage, selectedCodes: Set<String>): CheckBox {
+        return CheckBox(this).apply {
+            text = language.label
+            textSize = 16f
+            setTextColor(if (settings.notesApp.spellCheckEnabled) COLOR_TEXT_PRIMARY else COLOR_TEXT_MUTED)
+            buttonTintList = ColorStateList.valueOf(COLOR_ACCENT)
+            background = selectableFillBackground(COLOR_SURFACE)
+            setPadding(dp(12), 0, dp(12), 0)
+            isEnabled = settings.notesApp.spellCheckEnabled
+            isChecked = language.code in selectedCodes
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44),
+            ).apply {
+                bottomMargin = dp(6)
+            }
+            setOnCheckedChangeListener { _, checked ->
+                changeSpellDictionaryEnabled(language.code, checked)
             }
         }
     }
@@ -1296,6 +1384,33 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun changeSpellCheckEnabled(enabled: Boolean) {
+        persistSettings(settings.copy(notesApp = settings.notesApp.copy(spellCheckEnabled = enabled)))
+        noteEditor?.setSpellCheckEnabled(enabled)
+        rawNoteEditor?.inputType = NoteEditorInputTypes.forSpellCheck(enabled)
+        rawNoteSpellChecker?.setConfig(enabled, settings.notesApp.spellDictionaries)
+        if (currentScreen == Screen.Settings) showSettings()
+    }
+
+    private fun changeSpellDictionaryEnabled(code: String, enabled: Boolean) {
+        val current = SpellLanguages.normalizeCodes(settings.notesApp.spellDictionaries).toMutableList()
+        if (enabled) {
+            if (code !in current) current.add(code)
+        } else {
+            current.remove(code)
+        }
+        val nextCodes = current.ifEmpty { mutableListOf("en") }
+        persistSettings(settings.copy(notesApp = settings.notesApp.copy(spellDictionaries = nextCodes)))
+        noteEditor?.setSpellDictionaries(nextCodes)
+        rawNoteSpellChecker?.setConfig(settings.notesApp.spellCheckEnabled, nextCodes)
+        if (currentScreen == Screen.Settings) showSettings()
+    }
+
+    private fun hideKeyboardForView(view: View) {
+        val inputMethodManager = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+        inputMethodManager?.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+
     private fun persistSettings(next: AppSettings) {
         settings = next
         settingsRepository.save(settings)
@@ -1328,9 +1443,11 @@ class MainActivity : Activity() {
         }
         val apiKey = dialogEditText("Web API key", settings.firebase.apiKey, false)
         val databaseUrl = dialogEditText("Database URL", settings.firebase.databaseUrl, false)
+        val projectId = dialogEditText("Project ID", settings.firebase.projectId, false)
         val workspaceId = dialogEditText("Workspace ID", settings.firebase.workspaceId, false)
         form.addView(apiKey)
         form.addView(databaseUrl)
+        form.addView(projectId)
         form.addView(workspaceId)
         AlertDialog.Builder(this)
             .setTitle("Firebase config")
@@ -1343,6 +1460,7 @@ class MainActivity : Activity() {
                             realtime = true,
                             apiKey = apiKey.text.toString().trim(),
                             databaseUrl = databaseUrl.text.toString().trim(),
+                            projectId = projectId.text.toString().trim(),
                             workspaceId = workspaceId.text.toString().trim(),
                             workspaceName = workspaceId.text.toString().trim(),
                         ),
@@ -1355,7 +1473,11 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun promptFirebaseLogin() {
+    private fun promptFirebaseLogin(register: Boolean) {
+        if (!firebaseSyncRepository.backendConfigured(settings.firebase.copy(enabled = true, realtime = true))) {
+            setSyncStatus("Firebase config unavailable. Add bundled defaults or advanced custom config.")
+            return
+        }
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(4), dp(8), dp(4))
@@ -1365,9 +1487,9 @@ class MainActivity : Activity() {
         form.addView(email)
         form.addView(password)
         AlertDialog.Builder(this)
-            .setTitle("Firebase login")
+            .setTitle(if (register) "Create Firebase account" else "Firebase login")
             .setView(form)
-            .setPositiveButton("Login") { _, _ ->
+            .setPositiveButton(if (register) "Create account" else "Login") { _, _ ->
                 val next = settings.firebase.copy(
                     enabled = true,
                     realtime = true,
@@ -1376,15 +1498,24 @@ class MainActivity : Activity() {
                 persistSettings(settings.copy(firebase = next))
                 Thread {
                     runCatching {
-                        firebaseSyncRepository.login(next, email.text.toString().trim(), password.text.toString())
-                    }.onSuccess { session ->
+                        val session = if (register) {
+                            firebaseSyncRepository.register(next, email.text.toString().trim(), password.text.toString())
+                        } else {
+                            firebaseSyncRepository.login(next, email.text.toString().trim(), password.text.toString())
+                        }
+                        val workspaceSettings = firebaseSyncRepository.ensurePersonalWorkspace(next, session)
+                        Pair(session, workspaceSettings)
+                    }.onSuccess { (session, workspaceSettings) ->
                         firebaseSession = session
                         runOnUiThread {
-                            setSyncStatus("Firebase logged in")
+                            persistSettings(settings.copy(firebase = workspaceSettings))
+                            setSyncStatus("Firebase workspace: ${workspaceSettings.workspaceName}")
                             scheduleFirebasePull()
+                            pullTodosFromFirebase()
                         }
                     }.onFailure { error ->
-                        runOnUiThread { setSyncStatus("Firebase login failed: ${error.message}") }
+                        val label = if (register) "account creation" else "login"
+                        runOnUiThread { setSyncStatus("Firebase $label failed: ${error.message}") }
                     }
                 }.start()
             }
@@ -1424,6 +1555,38 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun pushNoteToFirebase(path: String, text: String) {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                firebaseSyncRepository.pushNote(settings.firebase, path, text, session)
+            }.onSuccess {
+                runOnUiThread { setSyncStatus("Firebase note pushed") }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase note push failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun pushNoteDeleteToFirebase(path: String) {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase) ?: return@Thread
+            firebaseSession = session
+            runCatching {
+                firebaseSyncRepository.pushNoteDelete(settings.firebase, path, session)
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase note delete failed: ${error.message}") }
+            }
+        }.start()
+    }
+
     private fun pullTodosFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
@@ -1439,19 +1602,132 @@ class MainActivity : Activity() {
                 if (merged != local) {
                     todoRepository.save(merged)
                 }
-                merged
-            }.onSuccess { merged ->
+                val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
+                FirebasePullResult(
+                    todos = merged,
+                    remoteNotes = remoteNotes,
+                    remoteTodoCount = merged.items.size,
+                    remoteNoteCount = remoteNotes.count { !it.deleted },
+                )
+            }.onSuccess { result ->
                 runOnUiThread {
-                    todoStore = merged
+                    applyRemoteNotes(result.remoteNotes)
+                    todoStore = result.todos
                     if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
                         showTodo()
                     }
-                    setSyncStatus("Firebase todos pulled")
+                    setSyncStatus(
+                        "Firebase sync: ${result.remoteTodoCount} todo(s), ${result.remoteNoteCount} remote note(s) in ${settings.firebase.workspaceId}",
+                    )
                 }
             }.onFailure { error ->
                 runOnUiThread { setSyncStatus("Firebase pull failed: ${error.message}") }
             }
         }.start()
+    }
+
+    private fun replaceLocalFromFirebase() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                val remoteTodos = firebaseSyncRepository.pullRemoteTodoStore(settings.firebase, session)
+                val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
+                Pair(remoteTodos, remoteNotes)
+            }.onSuccess { (remoteTodos, remoteNotes) ->
+                runOnUiThread {
+                    todoRepository.save(remoteTodos)
+                    todoStore = remoteTodos
+                    notesRepository.clearAll()
+                    applyRemoteNotes(remoteNotes)
+                    if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
+                        showTodo()
+                    }
+                    if (currentScreen == Screen.Notes) {
+                        refreshNotes()
+                        if (currentNotePath.isNotBlank()) {
+                            selectNote(currentNotePath)
+                        }
+                    }
+                    setSyncStatus(
+                        "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s)",
+                    )
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase replace failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun applyRemoteNotes(remoteNotes: List<FirebaseRemoteNote>) {
+        remoteNotes.forEach { remote ->
+            val path = NotesRepository.normalizePath(remote.path)
+            val isCurrent = path == currentNotePath
+            if (isCurrent && currentScreen == Screen.Notes) {
+                pendingRemoteNotes[path] = remote
+                return@forEach
+            }
+            if (remote.deleted) {
+                if (isCurrent) {
+                    currentNotePath = ""
+                    loadedNoteText = ""
+                    setEditorTextFromNote("")
+                    persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
+                }
+                notesRepository.delete(path)
+                return@forEach
+            }
+            val localText = notesRepository.read(path)
+            if (localText == remote.text) return@forEach
+            notesRepository.save(path, remote.text)
+            if (isCurrent) {
+                loadedNoteText = remote.text
+                setEditorTextFromNote(remote.text)
+            }
+        }
+        noteList = notesRepository.listNotes()
+        updateNoteSelector()
+    }
+
+    private fun applyPendingRemoteNoteToFile(path: String, savedText: String, updateEditor: Boolean) {
+        val remote = pendingRemoteNotes.remove(path) ?: return
+        if (remote.deleted) {
+            if (savedText.isNotBlank()) {
+                val conflictPath = conflictNotePath(path)
+                notesRepository.save(conflictPath, savedText)
+                pushNoteToFirebase(conflictPath, savedText)
+            }
+            notesRepository.delete(path)
+            if (updateEditor) {
+                currentNotePath = ""
+                loadedNoteText = ""
+                setEditorTextFromNote("")
+            }
+            return
+        }
+        if (remote.text != savedText) {
+            val conflictPath = conflictNotePath(path)
+            notesRepository.save(conflictPath, savedText)
+            pushNoteToFirebase(conflictPath, savedText)
+            notesRepository.save(path, remote.text)
+            if (updateEditor) {
+                loadedNoteText = remote.text
+                setEditorTextFromNote(remote.text)
+            }
+        }
+    }
+
+    private fun conflictNotePath(path: String): String {
+        val normalized = NotesRepository.normalizePath(path)
+        val dot = normalized.lastIndexOf('.')
+        val stem = if (dot >= 0) normalized.substring(0, dot) else normalized
+        val ext = if (dot >= 0) normalized.substring(dot) else ".md"
+        return "$stem.conflict-android-${System.currentTimeMillis()}$ext"
     }
 
     private fun canRebuildTodoAfterRemotePull(): Boolean {
@@ -1702,11 +1978,18 @@ class MainActivity : Activity() {
         if (settings.firebase.enabled) {
             val workspace = settings.firebase.workspaceName.ifBlank { settings.firebase.workspaceId }
             return if (firebaseSyncRepository.configured(settings.firebase)) {
-                "Firebase realtime: ${workspace.ifBlank { "configured" }}"
+                "Firebase realtime: ${workspace.ifBlank { "configured" }} (${settings.firebase.workspaceId})"
+            } else if (firebaseSyncRepository.backendConfigured(settings.firebase)) {
+                if (firebaseSyncRepository.hasSavedSession()) {
+                    "Firebase: ready, workspace setup pending"
+                } else {
+                    "Firebase: ready. Create account or login."
+                }
             } else {
-                "Firebase realtime needs API key, database URL, workspace ID, and login"
+                "Firebase config unavailable. Add bundled defaults or advanced custom config."
             }
         }
+        if (FirebaseDefaults.bundled.ready) return "Firebase: ready. Create account or login."
         if (driveAccessToken == null) return "Not connected"
         val folderName = settings.gdrive.folderName.ifBlank { settings.gdrive.folderId }
         return if (folderName.isBlank()) "Connected, no folder selected" else "Synced to $folderName"

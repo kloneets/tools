@@ -18,6 +18,12 @@ type FirebaseConfig struct {
 	Email       string `json:"email,omitempty"`
 }
 
+const (
+	DefaultAPIKey      = "AIzaSyDE4odh6mws0Qu62JT5StK236gwypfRC-E"
+	DefaultDatabaseURL = "https://koko-tools-default-rtdb.europe-west1.firebasedatabase.app"
+	DefaultProjectID   = "koko-tools"
+)
+
 func ConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -41,7 +47,18 @@ func LoadConfig(path string) (FirebaseConfig, error) {
 	if cfg.Realtime == false {
 		cfg.Realtime = true
 	}
+	cfg = ApplyDefaults(cfg)
 	return cfg, nil
+}
+
+func ApplyDefaults(cfg FirebaseConfig) FirebaseConfig {
+	if cfg.APIKey == "" {
+		cfg.APIKey = DefaultAPIKey
+	}
+	if cfg.DatabaseURL == "" {
+		cfg.DatabaseURL = DefaultDatabaseURL
+	}
+	return cfg
 }
 
 func SaveConfig(path string, cfg FirebaseConfig) error {

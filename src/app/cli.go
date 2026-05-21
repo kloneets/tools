@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,10 +9,21 @@ import (
 
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/notes"
+	kokosync "github.com/kloneets/tools/src/sync"
+	"github.com/kloneets/tools/src/todo"
 )
 
 func RunCLI(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) (int, bool) {
-	if len(args) == 0 || args[0] != "ol" {
+	if len(args) == 0 {
+		return 0, false
+	}
+	if args[0] == "firebase-migrate" {
+		return runFirebaseMigrateCLI(args[1:], stdout, stderr), true
+	}
+	if args[0] == "firebase-push-local" {
+		return runFirebasePushLocalCLI(args[1:], stdout, stderr), true
+	}
+	if args[0] != "ol" {
 		return 0, false
 	}
 	if stdin == nil {
@@ -34,6 +46,146 @@ func RunCLI(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) 
 	}
 	fmt.Fprintf(stdout, "opened %d link(s)\n", len(links))
 	return 0, true
+}
+
+func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) int {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "usage: koko-tools firebase-push-local")
+		return 1
+	}
+	cfg, err := kokosync.LoadConfig(kokosync.ConfigPath())
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("KOKO_FIREBASE_API_KEY"))
+	}
+	if apiKey == "" {
+		apiKey = kokosync.DefaultAPIKey
+	}
+	databaseURL := strings.TrimSpace(cfg.DatabaseURL)
+	if databaseURL == "" {
+		databaseURL = strings.TrimSpace(os.Getenv("KOKO_FIREBASE_DATABASE_URL"))
+	}
+	if databaseURL == "" {
+		databaseURL = kokosync.DefaultDatabaseURL
+	}
+	provider := kokosync.NewFirebaseRESTProvider(apiKey, databaseURL)
+	session, err := firebaseSession(context.Background(), provider)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	workspaceID := strings.TrimSpace(cfg.WorkspaceID)
+	if workspaceID == "" {
+		workspaceID = kokosync.PersonalWorkspaceID(session.UID)
+	}
+	todoRepo := todo.NewRepository()
+	store, err := todoRepo.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	todoSyncer := kokosync.TodoSyncer{
+		Provider:    provider,
+		WorkspaceID: workspaceID,
+		StatePath:   kokosync.StatePath(),
+		TokenPath:   kokosync.TokenPath(),
+		Session:     session,
+	}
+	if err := todoSyncer.PushStore(context.Background(), store); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	cfg.Enabled = true
+	cfg.Realtime = true
+	cfg.APIKey = apiKey
+	cfg.DatabaseURL = databaseURL
+	cfg.WorkspaceID = workspaceID
+	cfg.Email = session.Email
+	if err := kokosync.SaveConfig(kokosync.ConfigPath(), cfg); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "pushed %d local todo(s) to %s\n", len(store.Items), workspaceID)
+	return 0
+}
+
+func runFirebaseMigrateCLI(args []string, stdout io.Writer, stderr io.Writer) int {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	if len(args) != 2 || strings.TrimSpace(args[0]) == "" || strings.TrimSpace(args[1]) != "--confirm-owner-copy" {
+		fmt.Fprintln(stderr, "usage: koko-tools firebase-migrate <old-workspace-id> --confirm-owner-copy")
+		return 1
+	}
+	cfg, err := kokosync.LoadConfig(kokosync.ConfigPath())
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("KOKO_FIREBASE_API_KEY"))
+	}
+	if apiKey == "" {
+		apiKey = kokosync.DefaultAPIKey
+	}
+	databaseURL := strings.TrimSpace(cfg.DatabaseURL)
+	if databaseURL == "" {
+		databaseURL = strings.TrimSpace(os.Getenv("KOKO_FIREBASE_DATABASE_URL"))
+	}
+	if databaseURL == "" {
+		databaseURL = kokosync.DefaultDatabaseURL
+	}
+	provider := kokosync.NewFirebaseRESTProvider(apiKey, databaseURL)
+	session, err := firebaseSession(context.Background(), provider)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	sourceWorkspaceID := strings.TrimSpace(args[0])
+	targetWorkspaceID := kokosync.PersonalWorkspaceID(session.UID)
+	if sourceWorkspaceID == targetWorkspaceID {
+		fmt.Fprintln(stderr, "source workspace is already the personal workspace")
+		return 1
+	}
+	fmt.Fprintf(stderr, "copying from %s to %s as %s\n", sourceWorkspaceID, targetWorkspaceID, session.Email)
+	result, err := provider.MigrateWorkspaceToPersonal(context.Background(), sourceWorkspaceID, session)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	cfg.Enabled = true
+	cfg.Realtime = true
+	cfg.APIKey = apiKey
+	cfg.DatabaseURL = databaseURL
+	cfg.WorkspaceID = result.TargetWorkspaceID
+	cfg.Email = session.Email
+	if err := kokosync.SaveConfig(kokosync.ConfigPath(), cfg); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(
+		stdout,
+		"migrated %d note(s) and %d todo(s) from %s to %s\n",
+		result.Notes,
+		result.Todos,
+		result.SourceWorkspaceID,
+		result.TargetWorkspaceID,
+	)
+	return 0
 }
 
 func readOpenLinksInput(paths []string, stdin io.Reader) (string, error) {

@@ -18,6 +18,8 @@ data class PagesSettings(
 data class NotesSettings(
     val currentNotePath: String = "",
     val previewHidden: Boolean = false,
+    val spellCheckEnabled: Boolean = false,
+    val spellDictionaries: List<String> = emptyList(),
 )
 
 data class AndroidSettings(
@@ -54,6 +56,7 @@ data class FirebaseSettings(
     val realtime: Boolean = true,
     val apiKey: String = "",
     val databaseUrl: String = "",
+    val projectId: String = "",
     val userEmail: String = "",
     val workspaceId: String = "",
     val workspaceName: String = "",

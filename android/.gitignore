@@ -3,4 +3,6 @@
 local.properties
 build/
 app/build/
+app/.cxx/
+app/.externalNativeBuild/
 gradle/gradle-daemon-jvm.properties

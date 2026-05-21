@@ -10,8 +10,12 @@ class SettingsRepository(private val context: Context) {
         get() = File(context.filesDir, SETTINGS_FILE)
 
     fun load(): AppSettings {
-        val raw = settingsFile.takeIf { it.isFile }?.readText() ?: return AppSettings()
-        return runCatching { parse(raw) }.getOrDefault(AppSettings())
+        val raw = settingsFile.takeIf { it.isFile }?.readText() ?: return AppSettings(
+            firebase = FirebaseDefaults.applyBundledDefaults(FirebaseSettings()),
+        )
+        return runCatching { parse(raw) }.getOrElse {
+            AppSettings(firebase = FirebaseDefaults.applyBundledDefaults(FirebaseSettings()))
+        }
     }
 
     fun save(settings: AppSettings) {
@@ -24,7 +28,10 @@ class SettingsRepository(private val context: Context) {
     companion object {
         const val SETTINGS_FILE = "settings.json"
 
-        fun parse(raw: String): AppSettings {
+        fun parse(
+            raw: String,
+            firebaseDefaults: FirebaseBundledDefaults = FirebaseDefaults.bundled,
+        ): AppSettings {
             val root = JSONObject(raw)
             val pages = root.optJSONObject("pages_app") ?: JSONObject()
             val notes = root.optJSONObject("notes_app") ?: JSONObject()
@@ -42,6 +49,8 @@ class SettingsRepository(private val context: Context) {
                 notesApp = NotesSettings(
                     currentNotePath = notes.optString("current_note_path", ""),
                     previewHidden = notes.optBoolean("preview_hidden", false),
+                    spellCheckEnabled = notes.optBoolean("spell_check_enabled", false),
+                    spellDictionaries = parseStringArray(notes.optJSONArray("spell_dictionaries")),
                 ),
                 androidApp = AndroidSettings(
                     themeMode = ThemeMode.fromValue(android.optString("theme_mode", ThemeMode.System.value)),
@@ -52,14 +61,18 @@ class SettingsRepository(private val context: Context) {
                     selectedSnapshotId = gdrive.optString("selected_snapshot_id", ""),
                     snapshots = parseSnapshots(snapshots),
                 ),
-                firebase = FirebaseSettings(
-                    enabled = firebase.optBoolean("enabled", false),
-                    realtime = firebase.optBoolean("realtime", true),
-                    apiKey = firebase.optString("api_key", ""),
-                    databaseUrl = firebase.optString("database_url", ""),
-                    userEmail = firebase.optString("user_email", ""),
-                    workspaceId = firebase.optString("workspace_id", ""),
-                    workspaceName = firebase.optString("workspace_name", ""),
+                firebase = FirebaseDefaults.applyBundledDefaults(
+                    FirebaseSettings(
+                        enabled = firebase.optBoolean("enabled", false),
+                        realtime = firebase.optBoolean("realtime", true),
+                        apiKey = firebase.optString("api_key", ""),
+                        databaseUrl = firebase.optString("database_url", ""),
+                        projectId = firebase.optString("project_id", ""),
+                        userEmail = firebase.optString("user_email", ""),
+                        workspaceId = firebase.optString("workspace_id", ""),
+                        workspaceName = firebase.optString("workspace_name", ""),
+                    ),
+                    firebaseDefaults,
                 ),
                 rawJson = root.toString(),
             )
@@ -79,6 +92,8 @@ class SettingsRepository(private val context: Context) {
             val notes = root.objectOrPut("notes_app")
             notes.put("current_note_path", settings.notesApp.currentNotePath)
             notes.put("preview_hidden", settings.notesApp.previewHidden)
+            notes.put("spell_check_enabled", settings.notesApp.spellCheckEnabled)
+            notes.put("spell_dictionaries", JSONArray(settings.notesApp.spellDictionaries))
             notes.putIfMissing("tab_spaces", 4)
             notes.putIfMissing("undo_levels", 1000)
             notes.putIfMissing("sidebar_visible", true)
@@ -138,6 +153,7 @@ class SettingsRepository(private val context: Context) {
             firebase.put("realtime", settings.firebase.realtime)
             firebase.put("api_key", settings.firebase.apiKey)
             firebase.put("database_url", settings.firebase.databaseUrl)
+            firebase.put("project_id", settings.firebase.projectId)
             firebase.put("user_email", settings.firebase.userEmail)
             firebase.put("workspace_id", settings.firebase.workspaceId)
             firebase.put("workspace_name", settings.firebase.workspaceName)
@@ -157,6 +173,13 @@ class SettingsRepository(private val context: Context) {
                         createdAt = it.optString("created_at", ""),
                     )
                 }
+            }
+        }
+
+        private fun parseStringArray(values: JSONArray?): List<String> {
+            if (values == null) return emptyList()
+            return (0 until values.length()).mapNotNull { index ->
+                values.optString(index, "").trim().takeIf { it.isNotEmpty() }
             }
         }
 
@@ -183,6 +206,8 @@ class SettingsRepository(private val context: Context) {
                         .put("tab_spaces", 4)
                         .put("undo_levels", 1000)
                         .put("current_note_path", "")
+                        .put("spell_check_enabled", false)
+                        .put("spell_dictionaries", JSONArray())
                         .put("sidebar_visible", true)
                         .put("vim_mode", true),
                 )
@@ -233,6 +258,7 @@ class SettingsRepository(private val context: Context) {
                         .put("realtime", true)
                         .put("api_key", "")
                         .put("database_url", "")
+                        .put("project_id", "")
                         .put("user_email", "")
                         .put("workspace_id", "")
                         .put("workspace_name", "")
@@ -255,5 +281,34 @@ class SettingsRepository(private val context: Context) {
                 put(name, value)
             }
         }
+    }
+}
+
+data class FirebaseBundledDefaults(
+    val apiKey: String = "",
+    val databaseUrl: String = "",
+    val projectId: String = "",
+) {
+    val ready: Boolean
+        get() = apiKey.isNotBlank() && databaseUrl.isNotBlank()
+}
+
+object FirebaseDefaults {
+    val bundled: FirebaseBundledDefaults
+        get() = FirebaseBundledDefaults(
+            apiKey = BuildConfig.FIREBASE_API_KEY,
+            databaseUrl = BuildConfig.FIREBASE_DATABASE_URL,
+            projectId = BuildConfig.FIREBASE_PROJECT_ID,
+        )
+
+    fun applyBundledDefaults(
+        settings: FirebaseSettings,
+        defaults: FirebaseBundledDefaults = bundled,
+    ): FirebaseSettings {
+        return settings.copy(
+            apiKey = settings.apiKey.ifBlank { defaults.apiKey },
+            databaseUrl = settings.databaseUrl.ifBlank { defaults.databaseUrl },
+            projectId = settings.projectId.ifBlank { defaults.projectId },
+        )
     }
 }

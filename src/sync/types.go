@@ -74,6 +74,7 @@ type Snapshot struct {
 type Mutation struct {
 	EventID   string         `json:"event_id"`
 	DeviceID  string         `json:"device_id"`
+	Kind      string         `json:"kind"`
 	Note      *NoteRecord    `json:"note,omitempty"`
 	Todo      *TodoRecord    `json:"todo,omitempty"`
 	Settings  map[string]any `json:"settings,omitempty"`

@@ -18,6 +18,9 @@ func TestSecurityRulesRestrictWorkspaceToMembersAndOwnersManageMembers(t *testin
 		"\".write\": false",
 		"== 'editor'",
 		"child('role').val() == 'owner'",
+		"\".validate\"",
+		"$workspace == 'user_' + auth.uid",
+		"newData.child('updated_by').val() == auth.uid",
 	} {
 		if !strings.Contains(rules, want) {
 			t.Fatalf("security rules missing %q: %s", want, rules)

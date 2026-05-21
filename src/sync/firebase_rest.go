@@ -85,6 +85,108 @@ func (p *FirebaseRESTProvider) Refresh(ctx context.Context, refreshToken string)
 	return session, nil
 }
 
+func PersonalWorkspaceID(uid string) string {
+	return "user_" + strings.TrimSpace(uid)
+}
+
+func (p *FirebaseRESTProvider) EnsurePersonalWorkspace(ctx context.Context, session Session, name string) (WorkspaceMeta, error) {
+	if session.UID == "" {
+		return WorkspaceMeta{}, errors.New("firebase uid is required")
+	}
+	if session.IDToken != "" {
+		p.session = session
+	}
+	workspaceID := PersonalWorkspaceID(session.UID)
+	workspaceName := strings.TrimSpace(name)
+	if workspaceName == "" {
+		workspaceName = "Personal workspace"
+	}
+	now := time.Now().UTC()
+	member := map[string]any{
+		"email":     session.Email,
+		"role":      RoleOwner,
+		"joined_at": now.Format(time.RFC3339),
+	}
+	if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/members/%s", url.PathEscape(workspaceID), url.PathEscape(session.UID)), member, nil); err != nil {
+		return WorkspaceMeta{}, err
+	}
+	meta := WorkspaceMeta{
+		ID:        workspaceID,
+		Name:      workspaceName,
+		CreatedAt: now,
+		OwnerUID:  session.UID,
+	}
+	if err := p.putRTDB(ctx, "workspaces/"+url.PathEscape(workspaceID)+"/meta", map[string]any{
+		"name":       meta.Name,
+		"owner":      meta.OwnerUID,
+		"created_at": meta.CreatedAt.Format(time.RFC3339),
+	}, nil); err != nil {
+		return WorkspaceMeta{}, err
+	}
+	return meta, nil
+}
+
+type MigrationResult struct {
+	SourceWorkspaceID string
+	TargetWorkspaceID string
+	Notes             int
+	Todos             int
+}
+
+func (p *FirebaseRESTProvider) MigrateWorkspaceToPersonal(ctx context.Context, sourceWorkspaceID string, session Session) (MigrationResult, error) {
+	sourceWorkspaceID = strings.TrimSpace(sourceWorkspaceID)
+	if sourceWorkspaceID == "" {
+		return MigrationResult{}, errors.New("source workspace id is required")
+	}
+	targetWorkspaceID := PersonalWorkspaceID(session.UID)
+	if sourceWorkspaceID == targetWorkspaceID {
+		return MigrationResult{}, errors.New("source workspace is already the personal workspace")
+	}
+	if _, err := p.EnsurePersonalWorkspace(ctx, session, "Personal workspace"); err != nil {
+		return MigrationResult{}, err
+	}
+	snapshot, err := p.PullSnapshot(ctx, sourceWorkspaceID)
+	if err != nil {
+		return MigrationResult{}, err
+	}
+	member, ok := snapshot.Members[session.UID]
+	if !ok || member.Role != RoleOwner {
+		return MigrationResult{}, fmt.Errorf("migration requires owner role in source workspace %q", sourceWorkspaceID)
+	}
+	result := MigrationResult{SourceWorkspaceID: sourceWorkspaceID, TargetWorkspaceID: targetWorkspaceID}
+	for id, note := range snapshot.Notes {
+		if note.ID == "" {
+			note.ID = id
+		}
+		if note.UpdatedAt.IsZero() {
+			note.UpdatedAt = time.Now().UTC()
+		}
+		note.UpdatedBy = session.UID
+		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/notes/%s", url.PathEscape(targetWorkspaceID), url.PathEscape(note.ID)), note, nil); err != nil {
+			return result, err
+		}
+		result.Notes++
+	}
+	for id, todo := range snapshot.Todos {
+		if todo.Item.ID == "" {
+			todo.Item.ID = id
+		}
+		todo.UpdatedBy = session.UID
+		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/todos/%s", url.PathEscape(targetWorkspaceID), url.PathEscape(todo.Item.ID)), todo, nil); err != nil {
+			return result, err
+		}
+		result.Todos++
+	}
+	event := map[string]any{
+		"device_id":  "desktop",
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"kind":       "workspace_migration",
+		"source":     sourceWorkspaceID,
+	}
+	_ = p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/events/migration-%d", url.PathEscape(targetWorkspaceID), time.Now().UnixNano()), event, nil)
+	return result, nil
+}
+
 func (p *FirebaseRESTProvider) WatchWorkspace(ctx context.Context, workspaceID string, sinceToken string, onChange func(Change) error) error {
 	if onChange == nil {
 		return errors.New("change callback is required")
@@ -102,6 +204,18 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 	}
 	if mutation.CreatedAt.IsZero() {
 		mutation.CreatedAt = time.Now().UTC()
+	}
+	if mutation.Kind == "" {
+		switch {
+		case mutation.Note != nil:
+			mutation.Kind = "note_push"
+		case mutation.Todo != nil:
+			mutation.Kind = "todo_push"
+		case mutation.Settings != nil:
+			mutation.Kind = "settings_push"
+		default:
+			mutation.Kind = "sync"
+		}
 	}
 	if mutation.Note != nil {
 		path := fmt.Sprintf("workspaces/%s/notes/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Note.ID))

@@ -74,6 +74,35 @@ cat extra.md | ./koko-tools ol saved.md -
 
 Supported link schemes are `http`, `https`, `ftp`, and `file`. Duplicate links are opened once, preserving first-seen order.
 
+### Firebase Push Local
+
+`firebase-push-local` pushes the current desktop todo list to the configured Firebase personal workspace. Use this when the desktop list is the source of truth and another device needs to pull the latest data.
+
+```sh
+./koko-tools firebase-push-local
+```
+
+The command uses the saved Firebase refresh token when available. If the token is missing or expired, run it once with:
+
+```sh
+KOKO_FIREBASE_EMAIL="you@example.com" KOKO_FIREBASE_PASSWORD="password" ./koko-tools firebase-push-local
+```
+
+### Firebase Migrate
+
+`firebase-migrate` copies notes and todos from an old workspace into the current Firebase user's personal workspace, named `user_<uid>`, and updates the desktop Firebase config to use that personal workspace.
+
+```sh
+KOKO_FIREBASE_EMAIL="you@example.com" KOKO_FIREBASE_PASSWORD="password" ./koko-tools firebase-migrate <old-workspace-id> --confirm-owner-copy
+```
+
+Safety checks:
+
+- The explicit `--confirm-owner-copy` flag is required.
+- The source workspace must be different from the target personal workspace.
+- The logged-in Firebase user must be an `owner` in `workspaces/<old-workspace-id>/members/<uid>`.
+- The command copies data into `user_<uid>` and does not delete the source workspace.
+
 ## Terminal UI
 
 The app has six main views:
@@ -228,10 +257,13 @@ Useful keys:
 
 ## Sync
 
-The Sync view handles optional Google Drive sync operations for app state.
+The Sync view handles Firebase realtime sync and optional Google Drive snapshot backup.
 
 It shows:
 
+- Whether Firebase realtime sync is enabled.
+- The effective Firebase workspace ID.
+- Last Firebase sync status.
 - Whether Drive sync is enabled.
 - Credential and token availability.
 - Selected Drive folder.
@@ -241,13 +273,16 @@ It shows:
 
 Actions include:
 
+- Toggle Firebase realtime sync.
+- Pull or push todos through Firebase.
+- Pull or push notes through Firebase.
 - Toggle Drive sync.
 - Select or clear a Drive folder.
 - Upload local state to Drive.
 - Refresh the snapshot list.
 - Restore a selected Drive snapshot.
 
-The app can save locally without uploading to Drive. Drive sync is optional.
+Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Google Drive remains a legacy manual snapshot backup. The app can save locally without uploading to either backend.
 
 ## Settings
 

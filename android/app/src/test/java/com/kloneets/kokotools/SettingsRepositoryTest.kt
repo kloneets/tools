@@ -1,6 +1,8 @@
 package com.kloneets.kokotools
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsRepositoryTest {
@@ -10,7 +12,12 @@ class SettingsRepositoryTest {
             """
             {
               "pages_app": {"first_book": 100, "second_book": 320, "read_pages": 25},
-              "notes_app": {"current_note_path": "books/current.md", "preview_hidden": true},
+              "notes_app": {
+                "current_note_path": "books/current.md",
+                "preview_hidden": true,
+                "spell_check_enabled": true,
+                "spell_dictionaries": ["EN", "lv"]
+              },
               "android_app": {"theme_mode": "dark"},
               "firebase": {"enabled": true, "realtime": true, "workspace_id": "ws-1", "workspace_name": "Team"},
               "gdrive": {
@@ -28,6 +35,8 @@ class SettingsRepositoryTest {
         assertEquals(25, settings.pagesApp.readPages)
         assertEquals("books/current.md", settings.notesApp.currentNotePath)
         assertEquals(true, settings.notesApp.previewHidden)
+        assertEquals(true, settings.notesApp.spellCheckEnabled)
+        assertEquals(listOf("EN", "lv"), settings.notesApp.spellDictionaries)
         assertEquals(ThemeMode.Dark, settings.androidApp.themeMode)
         assertEquals(true, settings.firebase.enabled)
         assertEquals("ws-1", settings.firebase.workspaceId)
@@ -40,7 +49,12 @@ class SettingsRepositoryTest {
         val json = SettingsRepository.toJson(
             AppSettings(
                 pagesApp = PagesSettings(firstBook = 10, secondBook = 20, readPages = 2),
-                notesApp = NotesSettings(currentNotePath = "a.md", previewHidden = true),
+                notesApp = NotesSettings(
+                    currentNotePath = "a.md",
+                    previewHidden = true,
+                    spellCheckEnabled = true,
+                    spellDictionaries = listOf("en", "lv"),
+                ),
                 androidApp = AndroidSettings(themeMode = ThemeMode.Light),
                 gdrive = GDriveSettings(
                     folderId = "folder",
@@ -51,6 +65,7 @@ class SettingsRepositoryTest {
                 firebase = FirebaseSettings(
                     enabled = true,
                     realtime = true,
+                    projectId = "project",
                     workspaceId = "ws",
                     workspaceName = "Team",
                 ),
@@ -62,11 +77,66 @@ class SettingsRepositoryTest {
         assertEquals(2, json.getJSONObject("pages_app").getInt("read_pages"))
         assertEquals("a.md", json.getJSONObject("notes_app").getString("current_note_path"))
         assertEquals(true, json.getJSONObject("notes_app").getBoolean("preview_hidden"))
+        assertEquals(true, json.getJSONObject("notes_app").getBoolean("spell_check_enabled"))
+        assertEquals("en", json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").getString(0))
+        assertEquals("lv", json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").getString(1))
         assertEquals("light", json.getJSONObject("android_app").getString("theme_mode"))
         assertEquals(true, json.getJSONObject("firebase").getBoolean("enabled"))
+        assertEquals("project", json.getJSONObject("firebase").getString("project_id"))
         assertEquals("ws", json.getJSONObject("firebase").getString("workspace_id"))
         assertEquals("folder", json.getJSONObject("gdrive").getString("folder_id"))
         assertEquals("snapshot", json.getJSONObject("gdrive").getJSONArray("snapshots").getJSONObject(0).getString("id"))
+    }
+
+    @Test
+    fun missingFirebaseConfigUsesBundledDefaults() {
+        val settings = SettingsRepository.parse(
+            """{"firebase": {"enabled": true, "realtime": true}}""",
+            FirebaseBundledDefaults(
+                apiKey = "bundled-key",
+                databaseUrl = "https://bundled.firebaseio.com",
+                projectId = "bundled-project",
+            ),
+        )
+
+        assertEquals("bundled-key", settings.firebase.apiKey)
+        assertEquals("https://bundled.firebaseio.com", settings.firebase.databaseUrl)
+        assertEquals("bundled-project", settings.firebase.projectId)
+    }
+
+    @Test
+    fun customFirebaseConfigIsPreservedOverBundledDefaults() {
+        val settings = SettingsRepository.parse(
+            """
+            {
+              "firebase": {
+                "api_key": "custom-key",
+                "database_url": "https://custom.firebaseio.com",
+                "project_id": "custom-project"
+              }
+            }
+            """.trimIndent(),
+            FirebaseBundledDefaults(
+                apiKey = "bundled-key",
+                databaseUrl = "https://bundled.firebaseio.com",
+                projectId = "bundled-project",
+            ),
+        )
+
+        assertEquals("custom-key", settings.firebase.apiKey)
+        assertEquals("https://custom.firebaseio.com", settings.firebase.databaseUrl)
+        assertEquals("custom-project", settings.firebase.projectId)
+    }
+
+    @Test
+    fun bundledFirebaseDefaultsArePresentInBuild() {
+        assertTrue(FirebaseDefaults.bundled.ready)
+        assertEquals("koko-tools", FirebaseDefaults.bundled.projectId)
+    }
+
+    @Test
+    fun personalFirebaseWorkspaceIdIsStableForUid() {
+        assertEquals("user_uid-123", FirebaseSyncRepository.personalWorkspaceId("uid-123"))
     }
 
     @Test
@@ -89,6 +159,8 @@ class SettingsRepositoryTest {
         assertEquals(4, json.getJSONObject("notes_app").getInt("tab_spaces"))
         assertEquals(1000, json.getJSONObject("notes_app").getInt("undo_levels"))
         assertEquals("mobile.md", json.getJSONObject("notes_app").getString("current_note_path"))
+        assertEquals(false, json.getJSONObject("notes_app").getBoolean("spell_check_enabled"))
+        assertEquals(0, json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").length())
         assertEquals(true, json.getJSONObject("firebase").getBoolean("realtime"))
         assertEquals(10, json.getJSONObject("gdrive").getInt("sync_interval_sec"))
     }
@@ -105,6 +177,8 @@ class SettingsRepositoryTest {
                 "undo_levels": 50,
                 "editor_width": 42,
                 "preview_hidden": true,
+                "spell_check_enabled": true,
+                "spell_dictionaries": ["en"],
                 "open_note_paths": ["a.md"],
                 "current_note_path": "a.md",
                 "sidebar_visible": false,
@@ -128,6 +202,8 @@ class SettingsRepositoryTest {
         assertEquals(24, json.getJSONObject("password_app").getInt("symbol_count"))
         assertEquals(42, json.getJSONObject("notes_app").getInt("editor_width"))
         assertEquals(true, json.getJSONObject("notes_app").getBoolean("preview_hidden"))
+        assertEquals(true, json.getJSONObject("notes_app").getBoolean("spell_check_enabled"))
+        assertEquals("en", json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").getString(0))
         assertEquals("b.md", json.getJSONObject("notes_app").getString("current_note_path"))
         assertEquals("dark", json.getJSONObject("android_app").getString("theme_mode"))
         assertEquals(true, json.getJSONObject("android_app").getBoolean("unknown_mobile_field"))
@@ -143,5 +219,29 @@ class SettingsRepositoryTest {
         val settings = SettingsRepository.parse("""{"android_app": {"theme_mode": "neon"}}""")
 
         assertEquals(ThemeMode.System, settings.androidApp.themeMode)
+    }
+
+    @Test
+    fun missingSpellSettingsDefaultToDisabled() {
+        val settings = SettingsRepository.parse("""{"notes_app": {"current_note_path": "a.md"}}""")
+
+        assertFalse(settings.notesApp.spellCheckEnabled)
+        assertEquals(emptyList<String>(), settings.notesApp.spellDictionaries)
+    }
+
+    @Test
+    fun noteInputTypeUsesNativeSpellCheckWhenEnabled() {
+        val inputType = NoteEditorInputTypes.forSpellCheck(enabled = true)
+
+        assertTrue(inputType and android.text.InputType.TYPE_TEXT_FLAG_AUTO_CORRECT != 0)
+        assertFalse(inputType and android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
+    }
+
+    @Test
+    fun noteInputTypeDisablesSuggestionsWhenSpellCheckIsOff() {
+        val inputType = NoteEditorInputTypes.forSpellCheck(enabled = false)
+
+        assertTrue(inputType and android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
+        assertFalse(inputType and android.text.InputType.TYPE_TEXT_FLAG_AUTO_CORRECT != 0)
     }
 }

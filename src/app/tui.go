@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,6 +101,7 @@ type terminalApp struct {
 	syncSpinnerTick    atomic.Int64
 	syncTimeout        time.Duration
 	firebaseTodoSyncer *kokosync.TodoSyncer
+	firebaseNoteSyncer *kokosync.NoteSyncer
 	openLinks          []string
 	deleteNotePath     string
 	deleteNoteLabel    string
@@ -317,6 +319,7 @@ func (a *terminalApp) initWidgets() {
 					helpers.StatusBarInst().UpdateStatusBar("Deleted folder: " + target)
 				} else {
 					helpers.StatusBarInst().UpdateStatusBar("Deleted note: " + target)
+					a.pushNoteDeleteToFirebaseSoon(a.deleteNotePath)
 				}
 			} else if a.deleteNoteFolder {
 				helpers.StatusBarInst().UpdateStatusBar("Delete folder failed")
@@ -1991,6 +1994,24 @@ func (a *terminalApp) syncItems() []actionItem {
 				helpers.StatusBarInst().UpdateStatusBar("Firebase push failed: " + err.Error())
 			})
 		}},
+		{Label: "pull notes from firebase", Apply: func() {
+			a.startSyncOperation("pull notes from firebase", func() error {
+				return a.pullNotesFromFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase notes pulled")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase notes pull failed: " + err.Error())
+			})
+		}},
+		{Label: "push notes to firebase", Apply: func() {
+			a.startSyncOperation("push notes to firebase", func() error {
+				return a.pushNotesToFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase notes pushed")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase notes push failed: " + err.Error())
+			})
+		}},
 		{Label: "legacy drive manual backup", Apply: func() {
 			helpers.StatusBarInst().UpdateStatusBar("Google Drive is legacy manual snapshot backup")
 		}},
@@ -2074,14 +2095,9 @@ func (a *terminalApp) syncItems() []actionItem {
 }
 
 func firebaseWorkspaceLabel(cfg *settings.FirebaseSettings) string {
-	if cfg == nil {
-		return "not configured"
-	}
-	if strings.TrimSpace(cfg.WorkspaceName) != "" {
-		return cfg.WorkspaceName
-	}
-	if strings.TrimSpace(cfg.WorkspaceID) != "" {
-		return cfg.WorkspaceID
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if id := firebaseWorkspaceID(cfg, fileCfg); id != "" {
+		return id
 	}
 	return "not configured"
 }
@@ -3236,6 +3252,7 @@ func (a *terminalApp) saveLocalState() error {
 	a.settingsDirty = false
 	a.todoDirty = false
 	a.pushTodosToFirebaseSoon()
+	a.pushNotesToFirebaseSoon()
 	return nil
 }
 
@@ -3247,6 +3264,7 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 		return
 	}
 	go func() {
+		_ = a.pushNotesToFirebase(ctx)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -3255,6 +3273,7 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 				return
 			case <-ticker.C:
 				_ = a.pullTodosFromFirebase(ctx)
+				_ = a.pullNotesFromFirebase(ctx)
 			}
 		}
 	}()
@@ -3272,20 +3291,34 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 	}
 	apiKey := firebaseAPIKey(cfg, fileCfg)
 	databaseURL := firebaseDatabaseURL(cfg, fileCfg)
-	workspaceID := firebaseWorkspaceID(cfg, fileCfg)
-	if apiKey == "" || databaseURL == "" || workspaceID == "" {
-		return fmt.Errorf("api_key, database_url, and workspace_id are required")
+	if apiKey == "" || databaseURL == "" {
+		return fmt.Errorf("api_key and database_url are required")
 	}
 	provider := kokosync.NewFirebaseRESTProvider(apiKey, databaseURL)
 	session, err := firebaseSession(ctx, provider)
 	if err != nil {
 		return err
 	}
+	workspaceID := firebaseWorkspaceID(cfg, fileCfg)
+	if workspaceID == "" {
+		meta, err := provider.EnsurePersonalWorkspace(ctx, session, "Personal workspace")
+		if err != nil {
+			return err
+		}
+		workspaceID = meta.ID
+	}
 	a.firebaseTodoSyncer = &kokosync.TodoSyncer{
 		Provider:    provider,
 		WorkspaceID: workspaceID,
 		StatePath:   kokosync.StatePath(),
 		TokenPath:   kokosync.TokenPath(),
+		Session:     session,
+		DeviceID:    "",
+	}
+	a.firebaseNoteSyncer = &kokosync.NoteSyncer{
+		Provider:    provider,
+		WorkspaceID: workspaceID,
+		StatePath:   kokosync.StatePath(),
 		Session:     session,
 		DeviceID:    "",
 	}
@@ -3297,16 +3330,21 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 }
 
 func firebaseSession(ctx context.Context, provider *kokosync.FirebaseRESTProvider) (kokosync.Session, error) {
+	var refreshErr error
 	if token, err := kokosync.LoadToken(kokosync.TokenPath()); err == nil && token.RefreshToken != "" {
 		session, err := provider.Refresh(ctx, token.RefreshToken)
 		if err == nil {
 			session.Email = token.Email
 			return session, nil
 		}
+		refreshErr = err
 	}
 	email := strings.TrimSpace(os.Getenv("KOKO_FIREBASE_EMAIL"))
 	password := os.Getenv("KOKO_FIREBASE_PASSWORD")
 	if email == "" || password == "" {
+		if refreshErr != nil {
+			return kokosync.Session{}, fmt.Errorf("refresh saved Firebase token failed: %w; set KOKO_FIREBASE_EMAIL and KOKO_FIREBASE_PASSWORD once", refreshErr)
+		}
 		return kokosync.Session{}, fmt.Errorf("login requires KOKO_FIREBASE_EMAIL and KOKO_FIREBASE_PASSWORD once")
 	}
 	session, err := provider.Login(ctx, email, password)
@@ -3391,6 +3429,241 @@ func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
 	return nil
 }
 
+func (a *terminalApp) pullNotesFromFirebase(ctx context.Context) error {
+	if a.firebaseNoteSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.firebaseNoteSyncer == nil || !a.firebaseNoteSyncer.Ready() {
+		return nil
+	}
+	local, err := a.localNoteMap()
+	if err != nil {
+		return err
+	}
+	result, err := a.firebaseNoteSyncer.PullNotes(ctx, local)
+	if err != nil {
+		return err
+	}
+	if !result.Changed {
+		return nil
+	}
+	for _, rel := range result.Deletes {
+		if err := os.Remove(a.noteAbsPath(rel)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		a.removeOpenNoteTab(rel)
+	}
+	for _, note := range result.Upserts {
+		if strings.ToLower(filepath.Ext(note.Path)) != ".md" {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(a.noteAbsPath(note.Path)), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(a.noteAbsPath(note.Path), []byte(note.Text), 0o644); err != nil {
+			return err
+		}
+		a.updateOpenCleanNote(note.Path, note.Text)
+	}
+	for _, conflict := range result.ConflictCopy {
+		path := a.noteAbsPath(conflict.Path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(conflict.Text), 0o644); err != nil {
+			return err
+		}
+	}
+	if err := a.firebaseNoteSyncer.SaveState(result.State); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase notes pulled"
+		settings.SaveSettingsLocal()
+	}
+	a.queueUIDraw(func() {
+		if a.notes != nil {
+			a.notes.Refresh()
+		}
+		a.refresh()
+	})
+	return nil
+}
+
+func (a *terminalApp) pushNotesToFirebaseSoon() {
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		return
+	}
+	go func() {
+		_ = a.pushNotesToFirebase(context.Background())
+	}()
+}
+
+func (a *terminalApp) pushNotesToFirebase(ctx context.Context) error {
+	if a.firebaseNoteSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.firebaseNoteSyncer == nil || !a.firebaseNoteSyncer.Ready() {
+		return nil
+	}
+	files, err := a.localNoteFiles()
+	if err != nil {
+		return err
+	}
+	if err := a.firebaseNoteSyncer.PushNotes(ctx, files); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase notes pushed"
+		settings.SaveSettingsLocal()
+	}
+	return nil
+}
+
+func (a *terminalApp) pushNoteDeleteToFirebaseSoon(absPath string) {
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		return
+	}
+	rel := a.noteRelPath(absPath)
+	go func() {
+		if a.firebaseNoteSyncer == nil {
+			if err := a.configureFirebaseTodoSyncer(context.Background()); err != nil {
+				return
+			}
+		}
+		if a.firebaseNoteSyncer != nil {
+			_ = a.firebaseNoteSyncer.PushDelete(context.Background(), rel)
+		}
+	}()
+}
+
+func (a *terminalApp) localNoteFiles() ([]kokosync.NoteFile, error) {
+	root := a.notesRootPath()
+	files := make([]kokosync.NoteFile, 0)
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(path)) != ".md" {
+			return nil
+		}
+		rel := a.noteRelPath(path)
+		if rel == "" || settings.IsTrashRelativePath(rel) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files = append(files, kokosync.NoteFile{ID: kokosync.NoteID(rel), Path: rel, Text: string(data)})
+		return nil
+	}); err != nil {
+		if os.IsNotExist(err) {
+			return files, nil
+		}
+		return nil, err
+	}
+	sort.SliceStable(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return files, nil
+}
+
+func (a *terminalApp) localNoteMap() (map[string]kokosync.LocalNote, error) {
+	files, err := a.localNoteFiles()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]kokosync.LocalNote, len(files))
+	for _, file := range files {
+		out[file.Path] = kokosync.LocalNote{ID: file.ID, Path: file.Path, Text: file.Text}
+	}
+	if a.notes != nil {
+		for _, tab := range a.notes.Tabs {
+			if tab == nil {
+				continue
+			}
+			rel := a.noteRelPath(tab.Path)
+			if rel == "" || strings.ToLower(filepath.Ext(rel)) != ".md" {
+				continue
+			}
+			out[rel] = kokosync.LocalNote{ID: kokosync.NoteID(rel), Path: rel, Text: tab.Text, Dirty: tab.Dirty}
+		}
+	}
+	return out, nil
+}
+
+func (a *terminalApp) updateOpenCleanNote(rel string, text string) {
+	if a.notes == nil {
+		return
+	}
+	abs := a.noteAbsPath(rel)
+	for _, tab := range a.notes.Tabs {
+		if tab == nil || tab.Path != abs || tab.Dirty {
+			continue
+		}
+		tab.Text = text
+		tab.Dirty = false
+	}
+}
+
+func (a *terminalApp) removeOpenNoteTab(rel string) {
+	if a.notes == nil {
+		return
+	}
+	abs := a.noteAbsPath(rel)
+	next := a.notes.Tabs[:0]
+	removedBeforeCurrent := 0
+	for i, tab := range a.notes.Tabs {
+		if tab != nil && tab.Path == abs && !tab.Dirty {
+			if i < a.notes.CurrentTab {
+				removedBeforeCurrent++
+			}
+			continue
+		}
+		next = append(next, tab)
+	}
+	a.notes.Tabs = next
+	a.notes.CurrentTab -= removedBeforeCurrent
+	if a.notes.CurrentTab >= len(a.notes.Tabs) {
+		a.notes.CurrentTab = len(a.notes.Tabs) - 1
+	}
+	if a.notes.CurrentTab < 0 {
+		a.notes.CurrentTab = 0
+	}
+}
+
+func (a *terminalApp) notesRootPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "notes"
+	}
+	return filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes")
+}
+
+func (a *terminalApp) noteRelPath(path string) string {
+	rel, err := filepath.Rel(a.notesRootPath(), path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return kokosync.NormalizeNotePath(filepath.ToSlash(rel))
+}
+
+func (a *terminalApp) noteAbsPath(rel string) string {
+	return filepath.Join(a.notesRootPath(), filepath.FromSlash(kokosync.NormalizeNotePath(rel)))
+}
+
 func firebaseEnabled(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) bool {
 	if fileCfg.Enabled && fileCfg.Realtime {
 		return true
@@ -3405,7 +3678,10 @@ func firebaseAPIKey(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseCon
 	if cfg != nil && strings.TrimSpace(cfg.APIKey) != "" {
 		return strings.TrimSpace(cfg.APIKey)
 	}
-	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_API_KEY"))
+	if env := strings.TrimSpace(os.Getenv("KOKO_FIREBASE_API_KEY")); env != "" {
+		return env
+	}
+	return kokosync.DefaultAPIKey
 }
 
 func firebaseDatabaseURL(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) string {
@@ -3415,7 +3691,10 @@ func firebaseDatabaseURL(cfg *settings.FirebaseSettings, fileCfg kokosync.Fireba
 	if cfg != nil && strings.TrimSpace(cfg.DatabaseURL) != "" {
 		return strings.TrimSpace(cfg.DatabaseURL)
 	}
-	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_DATABASE_URL"))
+	if env := strings.TrimSpace(os.Getenv("KOKO_FIREBASE_DATABASE_URL")); env != "" {
+		return env
+	}
+	return kokosync.DefaultDatabaseURL
 }
 
 func firebaseWorkspaceID(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) string {

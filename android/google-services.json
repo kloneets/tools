@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "863485242223",
+    "firebase_url": "https://koko-tools-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "koko-tools",
+    "storage_bucket": "koko-tools.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:863485242223:android:29cca74e8d47f4ca1a569a",
+        "android_client_info": {
+          "package_name": "com.kloneets.kokotools"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "863485242223-572skgr49ttjc61e9sfei7ff0h0d2jb5.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDE4odh6mws0Qu62JT5StK236gwypfRC-E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "863485242223-572skgr49ttjc61e9sfei7ff0h0d2jb5.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

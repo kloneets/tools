@@ -1,13 +1,23 @@
 package com.kloneets.kokotools
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
+import java.security.KeyStore
+import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 data class FirebaseSession(
     val uid: String,
@@ -16,16 +26,45 @@ data class FirebaseSession(
     val refreshToken: String,
 )
 
+data class FirebaseRemoteNote(
+    val id: String,
+    val path: String,
+    val text: String,
+    val rev: Long,
+    val deleted: Boolean,
+)
+
+data class FirebaseRemoteTodo(
+    val item: TodoItem,
+    val rev: Long,
+    val deleted: Boolean,
+)
+
+data class FirebasePullResult(
+    val todos: TodoStore,
+    val remoteNotes: List<FirebaseRemoteNote>,
+    val remoteTodoCount: Int,
+    val remoteNoteCount: Int,
+)
+
 class FirebaseSyncRepository(private val context: Context) {
     private val tokenFile: File
         get() = File(context.filesDir, TOKEN_FILE)
+    private val tokenStore = EncryptedFirebaseTokenStore(context) { tokenFile }
 
-    fun configured(settings: FirebaseSettings): Boolean {
+    fun backendConfigured(settings: FirebaseSettings): Boolean {
         return settings.enabled &&
             settings.realtime &&
             settings.apiKey.isNotBlank() &&
-            settings.databaseUrl.isNotBlank() &&
-            settings.workspaceId.isNotBlank()
+            settings.databaseUrl.isNotBlank()
+    }
+
+    fun configured(settings: FirebaseSettings): Boolean {
+        return backendConfigured(settings) && settings.workspaceId.isNotBlank()
+    }
+
+    fun hasSavedSession(): Boolean {
+        return tokenStore.load() != null
     }
 
     fun currentSession(settings: FirebaseSettings): FirebaseSession? {
@@ -34,12 +73,42 @@ class FirebaseSyncRepository(private val context: Context) {
     }
 
     fun login(settings: FirebaseSettings, email: String, password: String): FirebaseSession {
+        return authenticate(settings, email, password, signUp = false)
+    }
+
+    fun register(settings: FirebaseSettings, email: String, password: String): FirebaseSession {
+        return authenticate(settings, email, password, signUp = true)
+    }
+
+    fun ensurePersonalWorkspace(settings: FirebaseSettings, session: FirebaseSession): FirebaseSettings {
+        val personalWorkspaceId = personalWorkspaceId(session.uid)
+        if (settings.workspaceId.isNotBlank() && settings.workspaceId != personalWorkspaceId) {
+            return settings
+        }
+        val workspaceId = settings.workspaceId.ifBlank { personalWorkspaceId }
+        val workspaceName = settings.workspaceName.ifBlank { "Personal workspace" }
+        val workspaceSettings = settings.copy(workspaceId = workspaceId, workspaceName = workspaceName)
+        val member = JSONObject()
+            .put("email", session.email)
+            .put("role", "owner")
+            .put("joined_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+        putDatabase(workspaceSettings, "workspaces/$workspaceId/members/${session.uid}", member, session.idToken)
+        val meta = JSONObject()
+            .put("name", workspaceName)
+            .put("owner", session.uid)
+            .put("created_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+        putDatabase(workspaceSettings, "workspaces/$workspaceId/meta", meta, session.idToken)
+        return workspaceSettings
+    }
+
+    private fun authenticate(settings: FirebaseSettings, email: String, password: String, signUp: Boolean): FirebaseSession {
         val body = JSONObject()
             .put("email", email)
             .put("password", password)
             .put("returnSecureToken", true)
+        val endpoint = if (signUp) "accounts:signUp" else "accounts:signInWithPassword"
         val response = postJson(
-            "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encode(settings.apiKey)}",
+            "https://identitytoolkit.googleapis.com/v1/$endpoint?key=${encode(settings.apiKey)}",
             body,
         )
         val session = FirebaseSession(
@@ -95,50 +164,113 @@ class FirebaseSyncRepository(private val context: Context) {
         )
     }
 
+    fun pushNote(settings: FirebaseSettings, path: String, text: String, session: FirebaseSession) {
+        val normalized = NotesRepository.normalizePath(path).replace('\\', '/')
+        val rev = System.currentTimeMillis()
+        val id = noteId(normalized)
+        val record = JSONObject()
+            .put("id", id)
+            .put("path", normalized)
+            .put("text", text)
+            .put("rev", rev)
+            .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+            .put("updated_by", session.uid)
+            .put("deleted", false)
+        putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
+        putDatabase(
+            settings,
+            "workspaces/${settings.workspaceId}/events/android-note-$rev",
+            JSONObject()
+                .put("device_id", "android")
+                .put("created_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+                .put("kind", "note_push")
+                .put("note_id", id),
+            session.idToken,
+        )
+    }
+
+    fun pushNoteDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
+        val normalized = NotesRepository.normalizePath(path).replace('\\', '/')
+        val rev = System.currentTimeMillis()
+        val id = noteId(normalized)
+        val record = JSONObject()
+            .put("id", id)
+            .put("path", normalized)
+            .put("text", "")
+            .put("rev", rev)
+            .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+            .put("updated_by", session.uid)
+            .put("deleted", true)
+        putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
+    }
+
+    fun pullNotes(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteNote> {
+        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/notes", session.idToken) ?: return emptyList()
+        val notes = mutableListOf<FirebaseRemoteNote>()
+        remote.keys().forEach { id ->
+            val record = remote.optJSONObject(id) ?: return@forEach
+            val path = record.optString("path", "")
+            if (path.isBlank()) return@forEach
+            notes += FirebaseRemoteNote(
+                id = record.optString("id", id),
+                path = NotesRepository.normalizePath(path).replace('\\', '/'),
+                text = record.optString("text", ""),
+                rev = record.optLong("rev", 0L),
+                deleted = record.optBoolean("deleted", false),
+            )
+        }
+        return notes.sortedBy { it.path.lowercase() }
+    }
+
     fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession): TodoStore {
-        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todos", session.idToken)
+        val remoteItems = pullRemoteTodos(settings, session)
         val byId = local.items.associateBy { it.id }.toMutableMap()
+        remoteItems.forEach { record ->
+            val item = record.item
+            if (record.deleted) {
+                byId.remove(item.id)
+                return@forEach
+            }
+            val localItem = byId[item.id]
+            if (localItem == null || !item.updatedAt.isBefore(localItem.updatedAt)) {
+                byId[item.id] = item
+            }
+        }
+        return local.copy(items = sortedTodos(byId.values))
+    }
+
+    fun pullRemoteTodoStore(settings: FirebaseSettings, session: FirebaseSession): TodoStore {
+        return TodoStore(items = sortedTodos(pullRemoteTodos(settings, session).filterNot { it.deleted }.map { it.item }))
+    }
+
+    private fun pullRemoteTodos(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteTodo> {
+        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todos", session.idToken)
+        val records = mutableListOf<FirebaseRemoteTodo>()
         if (remote != null) {
             remote.keys().forEach { id ->
                 val record = remote.optJSONObject(id) ?: return@forEach
-                if (record.optBoolean("deleted", false)) {
-                    byId.remove(id)
-                    return@forEach
-                }
                 val itemJson = record.optJSONObject("item") ?: return@forEach
                 val item = TodoRepository.parseItem(itemJson)
-                val localItem = byId[item.id]
-                if (localItem == null || !item.updatedAt.isBefore(localItem.updatedAt)) {
-                    byId[item.id] = item
-                }
+                records += FirebaseRemoteTodo(
+                    item = item,
+                    rev = record.optLong("rev", 0L),
+                    deleted = record.optBoolean("deleted", false),
+                )
             }
         }
-        return local.copy(items = byId.values.sortedWith(compareBy<TodoItem> { it.status }.thenBy { it.order }.thenBy { it.createdAt }))
+        return records
+    }
+
+    private fun sortedTodos(items: Collection<TodoItem>): List<TodoItem> {
+        return items.sortedWith(compareBy<TodoItem> { it.status }.thenBy { it.order }.thenBy { it.createdAt })
     }
 
     private fun loadToken(): FirebaseSession? {
-        if (!tokenFile.isFile) return null
-        return runCatching {
-            val json = JSONObject(tokenFile.readText())
-            FirebaseSession(
-                uid = json.optString("uid"),
-                email = json.optString("email"),
-                idToken = json.optString("id_token"),
-                refreshToken = json.optString("refresh_token"),
-            )
-        }.getOrNull()
+        return tokenStore.load()
     }
 
     private fun saveToken(session: FirebaseSession) {
-        context.filesDir.mkdirs()
-        tokenFile.writeText(
-            JSONObject()
-                .put("uid", session.uid)
-                .put("email", session.email)
-                .put("id_token", session.idToken)
-                .put("refresh_token", session.refreshToken)
-                .toString(2),
-        )
+        tokenStore.save(session)
     }
 
     private fun postJson(url: String, body: JSONObject): JSONObject {
@@ -186,7 +318,113 @@ class FirebaseSyncRepository(private val context: Context) {
         return URLEncoder.encode(value, Charsets.UTF_8.name())
     }
 
+    private fun noteId(path: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(path.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
     companion object {
         const val TOKEN_FILE = "firebase_token.json"
+
+        fun personalWorkspaceId(uid: String): String = "user_$uid"
+    }
+}
+
+private class EncryptedFirebaseTokenStore(
+    private val context: Context,
+    private val legacyTokenFile: () -> File,
+) {
+    private val preferences: SharedPreferences
+        get() = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    fun load(): FirebaseSession? {
+        migrateLegacyToken()
+        val payload = preferences.getString(KEY_PAYLOAD, null) ?: return null
+        return runCatching {
+            val json = JSONObject(decrypt(payload))
+            FirebaseSession(
+                uid = json.optString("uid"),
+                email = json.optString("email"),
+                idToken = "",
+                refreshToken = json.optString("refresh_token"),
+            )
+        }.getOrNull()
+    }
+
+    fun save(session: FirebaseSession) {
+        val json = JSONObject()
+            .put("uid", session.uid)
+            .put("email", session.email)
+            .put("refresh_token", session.refreshToken)
+        preferences.edit()
+            .putString(KEY_PAYLOAD, encrypt(json.toString()))
+            .apply()
+    }
+
+    private fun migrateLegacyToken() {
+        if (preferences.contains(KEY_PAYLOAD)) return
+        val legacy = legacyTokenFile()
+        if (!legacy.isFile) return
+        runCatching {
+            val json = JSONObject(legacy.readText())
+            val session = FirebaseSession(
+                uid = json.optString("uid"),
+                email = json.optString("email"),
+                idToken = json.optString("id_token"),
+                refreshToken = json.optString("refresh_token"),
+            )
+            if (session.refreshToken.isNotBlank()) save(session)
+            legacy.delete()
+        }
+    }
+
+    private fun encrypt(value: String): String {
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        return JSONObject()
+            .put("iv", encodeBytes(cipher.iv))
+            .put("data", encodeBytes(encrypted))
+            .toString()
+    }
+
+    private fun decrypt(value: String): String {
+        val json = JSONObject(value)
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            secretKey(),
+            GCMParameterSpec(128, decodeBytes(json.getString("iv"))),
+        )
+        return String(cipher.doFinal(decodeBytes(json.getString("data"))), Charsets.UTF_8)
+    }
+
+    private fun secretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE)
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build(),
+        )
+        return generator.generateKey()
+    }
+
+    private fun encodeBytes(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+    private fun decodeBytes(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
+    companion object {
+        private const val ANDROID_KEY_STORE = "AndroidKeyStore"
+        private const val KEY_ALIAS = "koko_tools_firebase_refresh_token"
+        private const val KEY_PAYLOAD = "token_payload"
+        private const val PREFERENCES_NAME = "firebase_token_store"
+        private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
 }

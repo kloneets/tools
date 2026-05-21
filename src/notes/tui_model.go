@@ -537,6 +537,15 @@ func (w *Workspace) Open(path string) error {
 	return nil
 }
 
+func (w *Workspace) Refresh() {
+	if w == nil {
+		return
+	}
+	w.refreshTree()
+	w.refreshFiles()
+	w.syncOpenSelectionToActive()
+}
+
 func (w *Workspace) OpenFolderNotes(folder string) error {
 	if w == nil {
 		return fmt.Errorf("no workspace")

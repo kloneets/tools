@@ -43,4 +43,5 @@
     <item name="settings_theme_light" type="id" />
     <item name="settings_theme_dark" type="id" />
     <item name="settings_theme_system" type="id" />
+    <item name="settings_spell_check" type="id" />
 </resources>

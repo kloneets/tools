@@ -31,13 +31,14 @@ class MarkdownDocumentModelTest {
     }
 
     @Test
-    fun mergesAdjacentInactiveMarkdownLinesIntoOneRenderedBlock() {
+    fun keepsInactiveMarkdownLinesSeparatelyTargetable() {
         val markdown = "first\nsecond\nthird"
         val segments = MarkdownDocumentModel.segments(markdown, 0)
 
-        assertEquals(2, segments.size)
+        assertEquals(3, segments.size)
         assertTrue(segments[0].active)
-        assertEquals("second\nthird", segments[1].markdownText)
+        assertEquals("second", segments[1].markdownText)
+        assertEquals("third", segments[2].markdownText)
     }
 
     @Test
@@ -58,12 +59,13 @@ class MarkdownDocumentModelTest {
         val markdown = "- first\n    - second\n    - third\n- fourth"
         val segments = MarkdownDocumentModel.segments(markdown, markdown.indexOf("second"))
 
-        assertEquals(3, segments.size)
+        assertEquals(4, segments.size)
         assertEquals("- first", segments[0].markdownText)
         assertTrue(segments[0].renderAsSource)
         assertTrue(segments[1].active)
-        assertEquals("    - third\n- fourth", segments[2].markdownText)
+        assertEquals("    - third", segments[2].markdownText)
         assertTrue(segments[2].renderAsSource)
+        assertEquals("- fourth", segments[3].markdownText)
     }
 
     @Test
@@ -111,9 +113,9 @@ class MarkdownDocumentModelTest {
     @Test
     fun renderedOffsetMapsToRawOffsetForInactiveMarkdown() {
         val markdown = "first\nsecond\nthird"
-        val segment = MarkdownDocumentModel.segments(markdown, markdown.indexOf("third")).first()
+        val segment = MarkdownDocumentModel.segments(markdown, markdown.indexOf("third"))[1]
 
-        assertEquals(markdown.indexOf("second"), MarkdownDocumentModel.rawOffsetForRenderedOffset(segment, "first\n".length))
+        assertEquals(markdown.indexOf("second"), MarkdownDocumentModel.rawOffsetForRenderedOffset(segment, 0))
     }
 
     @Test
@@ -153,12 +155,32 @@ class MarkdownDocumentModelTest {
     }
 
     @Test
+    fun trailingEmptyLineCanBecomeActive() {
+        val markdown = "first\n"
+        val active = MarkdownDocumentModel.segments(markdown, markdown.length).single { it.active }
+
+        assertEquals(markdown.length, active.rawStart)
+        assertEquals(markdown.length, active.rawEnd)
+        assertEquals("", MarkdownDocumentModel.editableText(active))
+        assertEquals("second", MarkdownDocumentModel.replacementText(active, "second"))
+        assertEquals("first\nsecond", MarkdownDocumentModel.replaceRange(markdown, active.rawStart until active.rawEnd, "second"))
+    }
+
+    @Test
     fun adjacentActiveOffsetMovesBetweenLines() {
         val markdown = "first\nsecond\nthird"
         val second = MarkdownDocumentModel.activeRange(markdown, markdown.indexOf("second"))
 
         assertEquals(markdown.indexOf("third"), MarkdownDocumentModel.adjacentActiveOffset(markdown, second, 1))
         assertEquals(markdown.indexOf("first"), MarkdownDocumentModel.adjacentActiveOffset(markdown, second, -1))
+    }
+
+    @Test
+    fun adjacentActiveOffsetMovesToTrailingEmptyLine() {
+        val markdown = "first\nsecond\n"
+        val second = MarkdownDocumentModel.activeRange(markdown, markdown.indexOf("second"))
+
+        assertEquals(markdown.length, MarkdownDocumentModel.adjacentActiveOffset(markdown, second, 1))
     }
 
     @Test

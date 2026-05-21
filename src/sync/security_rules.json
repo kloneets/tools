@@ -3,27 +3,45 @@
     "workspaces": {
       "$workspace": {
         ".read": "auth != null && data.child('members').child(auth.uid).exists()",
-        ".write": false,
         "meta": {
-          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          ".validate": "newData.hasChildren(['name', 'owner', 'created_at']) && newData.child('name').isString() && newData.child('owner').isString() && newData.child('created_at').isString()"
         },
         "members": {
-          ".write": "auth != null && root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner'"
+          "$uid": {
+            ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || (!data.exists() && $workspace == 'user_' + auth.uid && $uid == auth.uid && newData.child('role').val() == 'owner'))",
+            ".validate": "newData.hasChildren(['email', 'role', 'joined_at']) && newData.child('email').isString() && (newData.child('role').val() == 'owner' || newData.child('role').val() == 'editor' || newData.child('role').val() == 'viewer') && newData.child('joined_at').isString()"
+          }
         },
         "member_invites": {
-          ".write": "auth != null && root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner'"
+          ".write": "auth != null && root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner'",
+          "$invite": {
+            ".validate": "newData.hasChildren(['email', 'role', 'created_at']) && newData.child('email').isString() && (newData.child('role').val() == 'editor' || newData.child('role').val() == 'viewer') && newData.child('created_at').isString()"
+          }
         },
         "notes": {
-          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          "$note": {
+            ".validate": "newData.hasChildren(['id', 'path', 'text', 'rev', 'updated_at', 'updated_by', 'deleted']) && newData.child('id').isString() && newData.child('path').isString() && newData.child('text').isString() && newData.child('rev').isNumber() && newData.child('updated_at').isString() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
+          }
         },
         "todos": {
-          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          "$todo": {
+            ".validate": "newData.hasChildren(['item', 'rev', 'updated_by', 'deleted']) && newData.child('item').hasChildren(['id', 'text', 'status']) && newData.child('item').child('id').isString() && newData.child('item').child('text').isString() && newData.child('item').child('status').isString() && newData.child('rev').isNumber() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
+          }
         },
         "settings": {
           ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
         },
         "events": {
-          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          "$event": {
+            ".validate": "newData.hasChildren(['device_id', 'created_at', 'kind']) && newData.child('device_id').isString() && newData.child('created_at').isString() && newData.child('kind').isString()"
+          }
+        },
+        "$other": {
+          ".write": false
         }
       }
     }

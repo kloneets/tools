@@ -65,3 +65,45 @@ func TestRunCLIOpenLinksMissingFileFails(t *testing.T) {
 		t.Fatal("stderr is empty, want read error")
 	}
 }
+
+func TestRunCLIFirebaseMigrateRequiresWorkspaceID(t *testing.T) {
+	var stderr bytes.Buffer
+	code, handled := RunCLI([]string{"firebase-migrate"}, nil, nil, &stderr)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if code == 0 {
+		t.Fatal("code = 0, want failure")
+	}
+	if !strings.Contains(stderr.String(), "firebase-migrate <old-workspace-id> --confirm-owner-copy") {
+		t.Fatalf("stderr = %q, want usage", stderr.String())
+	}
+}
+
+func TestRunCLIFirebaseMigrateRequiresConfirmation(t *testing.T) {
+	var stderr bytes.Buffer
+	code, handled := RunCLI([]string{"firebase-migrate", "old-workspace"}, nil, nil, &stderr)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if code == 0 {
+		t.Fatal("code = 0, want failure")
+	}
+	if !strings.Contains(stderr.String(), "--confirm-owner-copy") {
+		t.Fatalf("stderr = %q, want confirmation flag", stderr.String())
+	}
+}
+
+func TestRunCLIFirebasePushLocalRejectsArguments(t *testing.T) {
+	var stderr bytes.Buffer
+	code, handled := RunCLI([]string{"firebase-push-local", "extra"}, nil, nil, &stderr)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	if code == 0 {
+		t.Fatal("code = 0, want failure")
+	}
+	if !strings.Contains(stderr.String(), "firebase-push-local") {
+		t.Fatalf("stderr = %q, want usage", stderr.String())
+	}
+}
