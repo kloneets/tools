@@ -48,6 +48,9 @@ func TestDefaultSettings(t *testing.T) {
 	if got := got.UI.TabOrder; strings.Join(got, ",") != strings.Join(DefaultTabOrder(), ",") {
 		t.Fatalf("TabOrder = %v, want default order", got)
 	}
+	if got.Firebase == nil || !got.Firebase.Realtime || got.Firebase.Enabled {
+		t.Fatalf("Firebase = %#v, want disabled realtime defaults", got.Firebase)
+	}
 }
 
 func TestNormalizeSettings(t *testing.T) {
@@ -55,6 +58,9 @@ func TestNormalizeSettings(t *testing.T) {
 	normalizeSettings(cfg)
 	if cfg.GDrive == nil || cfg.GDrive.SyncIntervalSec != 10 {
 		t.Fatalf("GDrive = %#v, want initialized interval 10", cfg.GDrive)
+	}
+	if cfg.Firebase == nil || !cfg.Firebase.Realtime {
+		t.Fatalf("Firebase = %#v, want initialized realtime settings", cfg.Firebase)
 	}
 	if cfg.UI == nil || !cfg.UI.ShowNotes || !cfg.UI.ShowPages || !cfg.UI.ShowPassword {
 		t.Fatalf("UI = %#v, want all widgets visible", cfg.UI)

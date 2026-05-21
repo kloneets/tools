@@ -5,6 +5,7 @@ data class AppSettings(
     val notesApp: NotesSettings = NotesSettings(),
     val androidApp: AndroidSettings = AndroidSettings(),
     val gdrive: GDriveSettings = GDriveSettings(),
+    val firebase: FirebaseSettings = FirebaseSettings(),
     val rawJson: String = "",
 )
 
@@ -46,6 +47,16 @@ data class DriveSnapshotMeta(
     val id: String,
     val name: String,
     val createdAt: String,
+)
+
+data class FirebaseSettings(
+    val enabled: Boolean = false,
+    val realtime: Boolean = true,
+    val apiKey: String = "",
+    val databaseUrl: String = "",
+    val userEmail: String = "",
+    val workspaceId: String = "",
+    val workspaceName: String = "",
 )
 
 data class NoteFile(

@@ -50,6 +50,7 @@ class MainActivity : Activity() {
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var notesRepository: NotesRepository
     private lateinit var todoRepository: TodoRepository
+    private lateinit var firebaseSyncRepository: FirebaseSyncRepository
     private val pagesCalculator = PagesCalculator()
     private val driveRepository = DriveSnapshotRepository()
 
@@ -60,6 +61,7 @@ class MainActivity : Activity() {
     private var driveAccessToken: String? = null
     private var driveAuthInProgress = false
     private var selectedSnapshotId = ""
+    private var firebaseSession: FirebaseSession? = null
     private var currentScreen = Screen.Notes
     private var palette = AppPalette.light()
 
@@ -98,6 +100,8 @@ class MainActivity : Activity() {
     private var syncUploadButton: Button? = null
     private var syncRefreshButton: Button? = null
     private var todoRefreshRunnable: Runnable? = null
+    private var firebasePullRunnable: Runnable? = null
+    private var todoDraftText = ""
     private var todoMoveMode = false
     private val todoMoveRows = mutableMapOf<String, View>()
     private var todoDraggingId: String? = null
@@ -107,6 +111,7 @@ class MainActivity : Activity() {
         settingsRepository = SettingsRepository(this)
         notesRepository = NotesRepository(this)
         todoRepository = TodoRepository(this)
+        firebaseSyncRepository = FirebaseSyncRepository(this)
         settings = settingsRepository.load()
         todoStore = todoRepository.load()
         palette = resolvePalette()
@@ -115,6 +120,7 @@ class MainActivity : Activity() {
         selectedSnapshotId = settings.gdrive.selectedSnapshotId
         buildRoot()
         showNotes()
+        startFirebaseRealtimeIfEnabled()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -803,14 +809,25 @@ class MainActivity : Activity() {
             hint = "New todo"
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT
+            setText(todoDraftText)
+            setSelection(text.length)
             setTextColor(COLOR_TEXT_PRIMARY)
             setHintTextColor(COLOR_TEXT_MUTED)
             background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(10).toFloat())
             setPadding(dp(12), 0, dp(12), 0)
             layoutParams = LinearLayout.LayoutParams(0, dp(48), 1f)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    todoDraftText = s?.toString().orEmpty()
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
         }
         val addButton = commandButton("Add", R.id.todo_add) {
             todoStore = todoRepository.add(input.text.toString())
+            pushTodosToFirebase()
+            todoDraftText = ""
             input.setText("")
             showTodo()
         }.apply {
@@ -895,6 +912,7 @@ class MainActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
                 setOnClickListener {
                     todoStore = todoRepository.toggle(item.id)
+                    pushTodosToFirebase()
                     showTodo()
                 }
             }
@@ -974,6 +992,7 @@ class MainActivity : Activity() {
                     view.parent?.requestDisallowInterceptTouchEvent(false)
                     if (draggedId != null && targetId != null && draggedId != targetId) {
                         todoStore = todoRepository.moveTo(draggedId, targetId)
+                        pushTodosToFirebase()
                         showTodo()
                     }
                     true
@@ -1035,6 +1054,7 @@ class MainActivity : Activity() {
             .setView(input)
             .setPositiveButton("Save") { _, _ ->
                 todoStore = todoRepository.edit(item.id, input.text.toString())
+                pushTodosToFirebase()
                 showTodo()
             }
             .setNegativeButton("Cancel", null)
@@ -1084,8 +1104,27 @@ class MainActivity : Activity() {
             background = roundedFill(COLOR_STATUS, dp(10).toFloat())
         }
         content.addView(syncStatusText)
+        content.addView(sectionTitle("Firebase realtime"))
+        content.addView(commandButton(if (settings.firebase.enabled) "Disable Firebase realtime" else "Enable Firebase realtime", View.generateViewId()) {
+            val next = settings.firebase.copy(enabled = !settings.firebase.enabled, realtime = true)
+            persistSettings(settings.copy(firebase = next))
+            if (next.enabled) startFirebaseRealtimeIfEnabled()
+            showSync()
+        })
+        content.addView(commandButton("Configure Firebase", View.generateViewId()) {
+            promptFirebaseConfig()
+        })
+        content.addView(commandButton("Login Firebase", View.generateViewId()) {
+            promptFirebaseLogin()
+        })
+        content.addView(commandButton("Pull todos now", View.generateViewId()) {
+            pullTodosFromFirebase()
+        })
+        content.addView(commandButton("Push todos now", View.generateViewId()) {
+            pushTodosToFirebase()
+        })
         content.addView(TextView(this).apply {
-            text = "Emulator requirement: use a Google Play system image, sign into a Google account, and complete any Google screen-lock prompt before connecting."
+            text = "Google Drive below is legacy manual snapshot backup."
             textSize = 13f
             setTextColor(COLOR_TEXT_SECONDARY)
             setPadding(dp(4), dp(8), dp(4), dp(4))
@@ -1260,6 +1299,165 @@ class MainActivity : Activity() {
     private fun persistSettings(next: AppSettings) {
         settings = next
         settingsRepository.save(settings)
+    }
+
+    private fun startFirebaseRealtimeIfEnabled() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            firebaseSession = firebaseSyncRepository.currentSession(settings.firebase)
+            runOnUiThread { scheduleFirebasePull() }
+        }.start()
+    }
+
+    private fun scheduleFirebasePull() {
+        firebasePullRunnable?.let { noteAutosaveHandler.removeCallbacks(it) }
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        val runnable = Runnable {
+            firebasePullRunnable = null
+            pullTodosFromFirebase()
+            scheduleFirebasePull()
+        }
+        firebasePullRunnable = runnable
+        noteAutosaveHandler.postDelayed(runnable, FIREBASE_PULL_INTERVAL_MS)
+    }
+
+    private fun promptFirebaseConfig() {
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        val apiKey = dialogEditText("Web API key", settings.firebase.apiKey, false)
+        val databaseUrl = dialogEditText("Database URL", settings.firebase.databaseUrl, false)
+        val workspaceId = dialogEditText("Workspace ID", settings.firebase.workspaceId, false)
+        form.addView(apiKey)
+        form.addView(databaseUrl)
+        form.addView(workspaceId)
+        AlertDialog.Builder(this)
+            .setTitle("Firebase config")
+            .setView(form)
+            .setPositiveButton("Save") { _, _ ->
+                persistSettings(
+                    settings.copy(
+                        firebase = settings.firebase.copy(
+                            enabled = true,
+                            realtime = true,
+                            apiKey = apiKey.text.toString().trim(),
+                            databaseUrl = databaseUrl.text.toString().trim(),
+                            workspaceId = workspaceId.text.toString().trim(),
+                            workspaceName = workspaceId.text.toString().trim(),
+                        ),
+                    ),
+                )
+                startFirebaseRealtimeIfEnabled()
+                showSync()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptFirebaseLogin() {
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        val email = dialogEditText("Email", settings.firebase.userEmail, false)
+        val password = dialogEditText("Password", "", true)
+        form.addView(email)
+        form.addView(password)
+        AlertDialog.Builder(this)
+            .setTitle("Firebase login")
+            .setView(form)
+            .setPositiveButton("Login") { _, _ ->
+                val next = settings.firebase.copy(
+                    enabled = true,
+                    realtime = true,
+                    userEmail = email.text.toString().trim(),
+                )
+                persistSettings(settings.copy(firebase = next))
+                Thread {
+                    runCatching {
+                        firebaseSyncRepository.login(next, email.text.toString().trim(), password.text.toString())
+                    }.onSuccess { session ->
+                        firebaseSession = session
+                        runOnUiThread {
+                            setSyncStatus("Firebase logged in")
+                            scheduleFirebasePull()
+                        }
+                    }.onFailure { error ->
+                        runOnUiThread { setSyncStatus("Firebase login failed: ${error.message}") }
+                    }
+                }.start()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun dialogEditText(hintText: String, value: String, password: Boolean): EditText {
+        return EditText(this).apply {
+            hint = hintText
+            setText(value)
+            inputType = if (password) {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            } else {
+                InputType.TYPE_CLASS_TEXT
+            }
+            setSingleLine(true)
+        }
+    }
+
+    private fun pushTodosToFirebase() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
+            }.onSuccess {
+                runOnUiThread { setSyncStatus("Firebase todos pushed") }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase push failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun pullTodosFromFirebase() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                val local = todoRepository.load()
+                val merged = firebaseSyncRepository.pullTodos(settings.firebase, local, session)
+                if (merged != local) {
+                    todoRepository.save(merged)
+                }
+                merged
+            }.onSuccess { merged ->
+                runOnUiThread {
+                    todoStore = merged
+                    if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
+                        showTodo()
+                    }
+                    setSyncStatus("Firebase todos pulled")
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase pull failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun canRebuildTodoAfterRemotePull(): Boolean {
+        val input = currentFocus as? EditText
+        if (input?.id == R.id.todo_input) return false
+        return todoDraftText.isBlank()
     }
 
     private fun saveSelectedDriveFolder(folder: DriveSnapshotRepository.DriveEntry) {
@@ -1501,6 +1699,14 @@ class MainActivity : Activity() {
     }
 
     private fun currentSyncStatus(): String {
+        if (settings.firebase.enabled) {
+            val workspace = settings.firebase.workspaceName.ifBlank { settings.firebase.workspaceId }
+            return if (firebaseSyncRepository.configured(settings.firebase)) {
+                "Firebase realtime: ${workspace.ifBlank { "configured" }}"
+            } else {
+                "Firebase realtime needs API key, database URL, workspace ID, and login"
+            }
+        }
         if (driveAccessToken == null) return "Not connected"
         val folderName = settings.gdrive.folderName.ifBlank { settings.gdrive.folderId }
         return if (folderName.isBlank()) "Connected, no folder selected" else "Synced to $folderName"
@@ -1887,5 +2093,6 @@ class MainActivity : Activity() {
         private const val PLAY_SERVICES_REQUEST_CODE = 4202
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
+        private const val FIREBASE_PULL_INTERVAL_MS = 5_000L
     }
 }

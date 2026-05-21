@@ -214,7 +214,7 @@ class TodoRepository(private val context: Context) {
                 .maxOfOrNull { it.order + 1 } ?: 0
         }
 
-        private fun parseItem(json: JSONObject): TodoItem {
+        fun parseItem(json: JSONObject): TodoItem {
             val created = parseTime(json.optString("created_at")) ?: OffsetDateTime.now(ZoneOffset.UTC)
             return TodoItem(
                 id = json.optString("id"),
@@ -229,7 +229,7 @@ class TodoRepository(private val context: Context) {
             )
         }
 
-        private fun itemJson(item: TodoItem): JSONObject {
+        fun itemJson(item: TodoItem): JSONObject {
             return JSONObject()
                 .put("id", item.id)
                 .put("text", item.text)
@@ -242,12 +242,12 @@ class TodoRepository(private val context: Context) {
                 .put("archived_at", item.archivedAt?.let { formatTime(it) })
         }
 
-        private fun parseTime(value: String): OffsetDateTime? {
+        fun parseTime(value: String): OffsetDateTime? {
             if (value.isBlank() || value == "null") return null
             return runCatching { OffsetDateTime.parse(value) }.getOrNull()
         }
 
-        private fun formatTime(value: OffsetDateTime): String {
+        fun formatTime(value: OffsetDateTime): String {
             return value.withOffsetSameInstant(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
         }
     }

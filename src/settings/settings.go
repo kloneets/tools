@@ -24,6 +24,7 @@ type UserSettings struct {
 	AppWindow   AppWindowSettings   `json:"app_window"`
 	UI          *UISettings         `json:"ui"`
 	GDrive      *GDriveSettings     `json:"gdrive"`
+	Firebase    *FirebaseSettings   `json:"firebase,omitempty"`
 }
 
 type AppWindowSettings struct {
@@ -133,6 +134,19 @@ type DriveSnapshotMeta struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type FirebaseSettings struct {
+	Enabled         bool   `json:"enabled"`
+	Realtime        bool   `json:"realtime"`
+	APIKey          string `json:"api_key,omitempty"`
+	DatabaseURL     string `json:"database_url,omitempty"`
+	UserEmail       string `json:"user_email,omitempty"`
+	WorkspaceID     string `json:"workspace_id"`
+	WorkspaceName   string `json:"workspace_name"`
+	LastSyncAt      string `json:"last_sync_at"`
+	LastSyncStatus  string `json:"last_sync_status"`
+	LastSyncMessage string `json:"last_sync_message"`
+}
+
 var settingsInstance *UserSettings
 var saveHooks []func(*UserSettings)
 var driveSyncInFlight atomic.Bool
@@ -227,14 +241,21 @@ func defaultSettings() *UserSettings {
 			SidebarVisible: true,
 			VimMode:        true,
 		},
-		UI:     defaultUISettings(),
-		GDrive: defaultGDriveSettings(),
+		UI:       defaultUISettings(),
+		GDrive:   defaultGDriveSettings(),
+		Firebase: defaultFirebaseSettings(),
 	}
 }
 
 func defaultGDriveSettings() *GDriveSettings {
 	return &GDriveSettings{
 		SyncIntervalSec: 10,
+	}
+}
+
+func defaultFirebaseSettings() *FirebaseSettings {
+	return &FirebaseSettings{
+		Realtime: true,
 	}
 }
 
@@ -305,6 +326,9 @@ func normalizeSettings(s *UserSettings) {
 	}
 	if s.GDrive.SyncIntervalSec <= 0 {
 		s.GDrive.SyncIntervalSec = 10
+	}
+	if s.Firebase == nil {
+		s.Firebase = defaultFirebaseSettings()
 	}
 	if s.UI == nil {
 		s.UI = defaultUISettings()

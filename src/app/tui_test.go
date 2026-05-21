@@ -202,6 +202,7 @@ func TestMapTCellKey(t *testing.T) {
 		{tcell.NewEventKey(tcell.KeyCtrlN, 0, tcell.ModCtrl), notes.Key{Name: "n", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlD, 0, tcell.ModCtrl), notes.Key{Name: "d", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 'a', tcell.ModNone), notes.Key{Name: "a", Rune: 'a'}},
+		{tcell.NewEventKey(tcell.KeyRune, ' ', tcell.ModNone), notes.Key{Name: "space", Rune: ' '}},
 		{tcell.NewEventKey(tcell.KeyCtrlE, 0, tcell.ModCtrl), notes.Key{Name: "e", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModCtrl), notes.Key{Name: "tab", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyCtrlA, 0, tcell.ModCtrl), notes.Key{Name: "a", Ctrl: true}},
@@ -663,6 +664,25 @@ func TestHandleGlobalKeyTodoNewAndToggle(t *testing.T) {
 	}
 	if !app.handleGlobalKey(notes.Key{Name: "space"}) {
 		t.Fatal("handleGlobalKey(space) = false, want true")
+	}
+	if got := todo.ActiveItems(app.todoStore); got[0].CheckedAt == nil {
+		t.Fatalf("checked_at = nil, want pending checked todo")
+	}
+}
+
+func TestHandleGlobalKeyTodoSpaceRuneToggles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	app := &terminalApp{view: viewTodo, todos: repo}
+	store, _, err := repo.Add("alpha")
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	app.todoStore = store
+
+	if !app.handleGlobalKey(notes.Key{Name: "space", Rune: ' '}) {
+		t.Fatal("handleGlobalKey(space rune) = false, want true")
 	}
 	if got := todo.ActiveItems(app.todoStore); got[0].CheckedAt == nil {
 		t.Fatalf("checked_at = nil, want pending checked todo")

@@ -1,0 +1,31 @@
+{
+  "rules": {
+    "workspaces": {
+      "$workspace": {
+        ".read": "auth != null && data.child('members').child(auth.uid).exists()",
+        ".write": false,
+        "meta": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+        },
+        "members": {
+          ".write": "auth != null && root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner'"
+        },
+        "member_invites": {
+          ".write": "auth != null && root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner'"
+        },
+        "notes": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+        },
+        "todos": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+        },
+        "settings": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+        },
+        "events": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+        }
+      }
+    }
+  }
+}

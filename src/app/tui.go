@@ -26,6 +26,7 @@ import (
 	"github.com/kloneets/tools/src/pages"
 	"github.com/kloneets/tools/src/password"
 	"github.com/kloneets/tools/src/settings"
+	kokosync "github.com/kloneets/tools/src/sync"
 	"github.com/kloneets/tools/src/todo"
 )
 
@@ -98,6 +99,7 @@ type terminalApp struct {
 	syncOpID           atomic.Int64
 	syncSpinnerTick    atomic.Int64
 	syncTimeout        time.Duration
+	firebaseTodoSyncer *kokosync.TodoSyncer
 	openLinks          []string
 	deleteNotePath     string
 	deleteNoteLabel    string
@@ -374,6 +376,7 @@ func (a *terminalApp) Run(ctx context.Context) error {
 		a.showCursor(screen)
 	})
 	go a.watchStatus(ctx)
+	a.startFirebaseTodoPolling(ctx)
 	a.refresh()
 	return app.Run()
 }
@@ -966,6 +969,9 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 		if key, ok := mapControlRune(r); ok {
 			return key, true
 		}
+		if r == ' ' && event.Modifiers() == tcell.ModNone {
+			return notes.Key{Name: "space", Rune: ' '}, true
+		}
 		if event.Modifiers()&tcell.ModCtrl != 0 {
 			return notes.Key{Ctrl: true, Name: string(r), Rune: r}, true
 		}
@@ -1541,7 +1547,7 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 			a.todoEditID = item.ID
 		}
 		return true
-	case "enter", "space":
+	case "enter", "space", " ":
 		if item, ok := a.selectedTodoItem(); ok && item.Status != todo.StatusArchived {
 			store, err := a.todos.Toggle(item.ID)
 			if err != nil {
@@ -1595,6 +1601,7 @@ func (a *terminalApp) markTodoChanged() {
 	a.settingsDirty = true
 	settings.MarkDriveDirty()
 	helpers.StatusBarInst().UpdateStatusBar("Todo saved")
+	a.pushTodosToFirebaseSoon()
 }
 
 func (a *terminalApp) scheduleTodoRefresh() {
@@ -1943,7 +1950,50 @@ type actionItem struct {
 
 func (a *terminalApp) syncItems() []actionItem {
 	cfg := settings.Inst().GDrive
+	firebase := settings.Inst().Firebase
+	if firebase == nil {
+		firebase = &settings.FirebaseSettings{Realtime: true}
+		settings.Inst().Firebase = firebase
+	}
 	items := []actionItem{
+		{Label: fmt.Sprintf("firebase realtime enabled: %t", firebase.Enabled), Apply: func() {
+			firebase.Enabled = !firebase.Enabled
+			if firebase.Realtime == false {
+				firebase.Realtime = true
+			}
+			a.settingsDirty = true
+			if firebase.Enabled {
+				if err := a.configureFirebaseTodoSyncer(context.Background()); err != nil {
+					helpers.StatusBarInst().UpdateStatusBar("Firebase sync not ready: " + err.Error())
+				} else {
+					helpers.StatusBarInst().UpdateStatusBar("Firebase realtime sync enabled")
+				}
+			}
+		}},
+		{Label: fmt.Sprintf("firebase workspace: %s", firebaseWorkspaceLabel(firebase)), Apply: func() {
+			helpers.StatusBarInst().UpdateStatusBar("Set firebase.workspace_id in settings.json or KOKO_FIREBASE_WORKSPACE_ID")
+		}},
+		{Label: "pull todos from firebase", Apply: func() {
+			a.startSyncOperation("pull todos from firebase", func() error {
+				return a.pullTodosFromFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase todos pulled")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase pull failed: " + err.Error())
+			})
+		}},
+		{Label: "push todos to firebase", Apply: func() {
+			a.startSyncOperation("push todos to firebase", func() error {
+				return a.pushTodosToFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase todos pushed")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase push failed: " + err.Error())
+			})
+		}},
+		{Label: "legacy drive manual backup", Apply: func() {
+			helpers.StatusBarInst().UpdateStatusBar("Google Drive is legacy manual snapshot backup")
+		}},
 		{Label: fmt.Sprintf("drive sync enabled: %t", cfg.Enabled), Apply: func() {
 			cfg.Enabled = !cfg.Enabled
 			a.settingsDirty = true
@@ -2021,6 +2071,19 @@ func (a *terminalApp) syncItems() []actionItem {
 		}})
 	}
 	return items
+}
+
+func firebaseWorkspaceLabel(cfg *settings.FirebaseSettings) string {
+	if cfg == nil {
+		return "not configured"
+	}
+	if strings.TrimSpace(cfg.WorkspaceName) != "" {
+		return cfg.WorkspaceName
+	}
+	if strings.TrimSpace(cfg.WorkspaceID) != "" {
+		return cfg.WorkspaceID
+	}
+	return "not configured"
 }
 
 func (a *terminalApp) settingsItems() []actionItem {
@@ -2928,6 +2991,10 @@ func (a *terminalApp) renderTodo(height int) string {
 
 func (a *terminalApp) renderSync(height int) string {
 	cfg := settings.Inst().GDrive
+	firebase := settings.Inst().Firebase
+	if firebase == nil {
+		firebase = &settings.FirebaseSettings{Realtime: true}
+	}
 	folder := cfg.FolderName
 	if strings.TrimSpace(folder) == "" {
 		folder = cfg.FolderID
@@ -2936,7 +3003,13 @@ func (a *terminalApp) renderSync(height int) string {
 		folder = "not selected"
 	}
 	lines := []string{
-		"Google Drive sync",
+		"Firebase realtime sync",
+		fmt.Sprintf("enabled: %t", firebase.Enabled),
+		fmt.Sprintf("configured: %t", firebaseConfigured(firebase)),
+		fmt.Sprintf("workspace: %s", firebaseWorkspaceLabel(firebase)),
+		fmt.Sprintf("last firebase action: %s", strings.TrimSpace(firebase.LastSyncStatus+" "+firebase.LastSyncMessage)),
+		"",
+		"Google Drive legacy manual backup",
 		fmt.Sprintf("enabled: %t", cfg.Enabled),
 		fmt.Sprintf("credentials: %t", gdrive.HasCredentials()),
 		fmt.Sprintf("token: %t", gdrive.HasToken()),
@@ -2953,6 +3026,9 @@ func (a *terminalApp) renderSync(height int) string {
 	}
 	lines = append(lines, "")
 	lines = append(lines, fmt.Sprintf("snapshots: %d", len(cfg.Snapshots)))
+	if cfg.SelectedSnapshotID != "" {
+		lines = append(lines, helpers.ANSI(helpers.ANSIReverse+helpers.ANSIBold, fmt.Sprintf("selected snapshot: %s [selected]", a.selectedSnapshotLabel())))
+	}
 	lines = append(lines, "Actions")
 	items := a.syncItems()
 	for i, item := range items {
@@ -2968,6 +3044,11 @@ func (a *terminalApp) renderSync(height int) string {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:height], "\n")
+}
+
+func firebaseConfigured(cfg *settings.FirebaseSettings) bool {
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	return firebaseAPIKey(cfg, fileCfg) != "" && firebaseDatabaseURL(cfg, fileCfg) != "" && firebaseWorkspaceID(cfg, fileCfg) != ""
 }
 
 func (a *terminalApp) renderSettings(height int) string {
@@ -3154,7 +3235,197 @@ func (a *terminalApp) saveLocalState() error {
 	}
 	a.settingsDirty = false
 	a.todoDirty = false
+	a.pushTodosToFirebaseSoon()
 	return nil
+}
+
+func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
+	if a == nil {
+		return
+	}
+	if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = a.pullTodosFromFirebase(ctx)
+			}
+		}
+	}()
+}
+
+func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
+	cfg := settings.Inst().Firebase
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if cfg == nil {
+		cfg = &settings.FirebaseSettings{Realtime: true}
+		settings.Inst().Firebase = cfg
+	}
+	if !firebaseEnabled(cfg, fileCfg) {
+		return fmt.Errorf("firebase realtime is disabled")
+	}
+	apiKey := firebaseAPIKey(cfg, fileCfg)
+	databaseURL := firebaseDatabaseURL(cfg, fileCfg)
+	workspaceID := firebaseWorkspaceID(cfg, fileCfg)
+	if apiKey == "" || databaseURL == "" || workspaceID == "" {
+		return fmt.Errorf("api_key, database_url, and workspace_id are required")
+	}
+	provider := kokosync.NewFirebaseRESTProvider(apiKey, databaseURL)
+	session, err := firebaseSession(ctx, provider)
+	if err != nil {
+		return err
+	}
+	a.firebaseTodoSyncer = &kokosync.TodoSyncer{
+		Provider:    provider,
+		WorkspaceID: workspaceID,
+		StatePath:   kokosync.StatePath(),
+		TokenPath:   kokosync.TokenPath(),
+		Session:     session,
+		DeviceID:    "",
+	}
+	cfg.WorkspaceID = workspaceID
+	cfg.LastSyncStatus = "ok"
+	cfg.LastSyncMessage = "Firebase sync configured"
+	settings.SaveSettingsLocal()
+	return nil
+}
+
+func firebaseSession(ctx context.Context, provider *kokosync.FirebaseRESTProvider) (kokosync.Session, error) {
+	if token, err := kokosync.LoadToken(kokosync.TokenPath()); err == nil && token.RefreshToken != "" {
+		session, err := provider.Refresh(ctx, token.RefreshToken)
+		if err == nil {
+			session.Email = token.Email
+			return session, nil
+		}
+	}
+	email := strings.TrimSpace(os.Getenv("KOKO_FIREBASE_EMAIL"))
+	password := os.Getenv("KOKO_FIREBASE_PASSWORD")
+	if email == "" || password == "" {
+		return kokosync.Session{}, fmt.Errorf("login requires KOKO_FIREBASE_EMAIL and KOKO_FIREBASE_PASSWORD once")
+	}
+	session, err := provider.Login(ctx, email, password)
+	if err != nil {
+		return kokosync.Session{}, err
+	}
+	if err := kokosync.SaveToken(kokosync.TokenPath(), kokosync.TokenFile{UID: session.UID, Email: session.Email, RefreshToken: session.RefreshToken}); err != nil {
+		return kokosync.Session{}, err
+	}
+	return session, nil
+}
+
+func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
+	if a.firebaseTodoSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
+		return nil
+	}
+	local, err := a.todos.Load()
+	if err != nil {
+		return err
+	}
+	merged, changed, err := a.firebaseTodoSyncer.PullStore(ctx, local)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	if err := a.todos.Save(merged); err != nil {
+		return err
+	}
+	a.todoStore = merged
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase todos pulled"
+		settings.SaveSettingsLocal()
+	}
+	a.queueUIDraw(func() {
+		a.reloadTodosForRender()
+		a.refresh()
+	})
+	return nil
+}
+
+func (a *terminalApp) pushTodosToFirebaseSoon() {
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		return
+	}
+	go func() {
+		_ = a.pushTodosToFirebase(context.Background())
+	}()
+}
+
+func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
+	if a.firebaseTodoSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
+		return nil
+	}
+	store, err := a.todos.Load()
+	if err != nil {
+		return err
+	}
+	if err := a.firebaseTodoSyncer.PushStore(ctx, store); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase todos pushed"
+		settings.SaveSettingsLocal()
+	}
+	return nil
+}
+
+func firebaseEnabled(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) bool {
+	if fileCfg.Enabled && fileCfg.Realtime {
+		return true
+	}
+	return cfg != nil && cfg.Enabled && cfg.Realtime
+}
+
+func firebaseAPIKey(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) string {
+	if strings.TrimSpace(fileCfg.APIKey) != "" {
+		return strings.TrimSpace(fileCfg.APIKey)
+	}
+	if cfg != nil && strings.TrimSpace(cfg.APIKey) != "" {
+		return strings.TrimSpace(cfg.APIKey)
+	}
+	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_API_KEY"))
+}
+
+func firebaseDatabaseURL(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) string {
+	if strings.TrimSpace(fileCfg.DatabaseURL) != "" {
+		return strings.TrimSpace(fileCfg.DatabaseURL)
+	}
+	if cfg != nil && strings.TrimSpace(cfg.DatabaseURL) != "" {
+		return strings.TrimSpace(cfg.DatabaseURL)
+	}
+	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_DATABASE_URL"))
+}
+
+func firebaseWorkspaceID(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) string {
+	if strings.TrimSpace(fileCfg.WorkspaceID) != "" {
+		return strings.TrimSpace(fileCfg.WorkspaceID)
+	}
+	if cfg != nil && strings.TrimSpace(cfg.WorkspaceID) != "" {
+		return strings.TrimSpace(cfg.WorkspaceID)
+	}
+	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_WORKSPACE_ID"))
 }
 
 func formatSnapshotLabel(name string, createdAt string) string {

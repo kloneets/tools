@@ -30,6 +30,7 @@ class SettingsRepository(private val context: Context) {
             val notes = root.optJSONObject("notes_app") ?: JSONObject()
             val android = root.optJSONObject("android_app") ?: JSONObject()
             val gdrive = root.optJSONObject("gdrive") ?: JSONObject()
+            val firebase = root.optJSONObject("firebase") ?: JSONObject()
             val snapshots = gdrive.optJSONArray("snapshots") ?: JSONArray()
 
             return AppSettings(
@@ -50,6 +51,15 @@ class SettingsRepository(private val context: Context) {
                     folderName = gdrive.optString("folder_name", ""),
                     selectedSnapshotId = gdrive.optString("selected_snapshot_id", ""),
                     snapshots = parseSnapshots(snapshots),
+                ),
+                firebase = FirebaseSettings(
+                    enabled = firebase.optBoolean("enabled", false),
+                    realtime = firebase.optBoolean("realtime", true),
+                    apiKey = firebase.optString("api_key", ""),
+                    databaseUrl = firebase.optString("database_url", ""),
+                    userEmail = firebase.optString("user_email", ""),
+                    workspaceId = firebase.optString("workspace_id", ""),
+                    workspaceName = firebase.optString("workspace_name", ""),
                 ),
                 rawJson = root.toString(),
             )
@@ -122,6 +132,18 @@ class SettingsRepository(private val context: Context) {
                         .put("created_at", snapshot.createdAt)
                 }),
             )
+
+            val firebase = root.objectOrPut("firebase")
+            firebase.put("enabled", settings.firebase.enabled)
+            firebase.put("realtime", settings.firebase.realtime)
+            firebase.put("api_key", settings.firebase.apiKey)
+            firebase.put("database_url", settings.firebase.databaseUrl)
+            firebase.put("user_email", settings.firebase.userEmail)
+            firebase.put("workspace_id", settings.firebase.workspaceId)
+            firebase.put("workspace_name", settings.firebase.workspaceName)
+            firebase.putIfMissing("last_sync_at", "")
+            firebase.putIfMissing("last_sync_status", "")
+            firebase.putIfMissing("last_sync_message", "")
 
             return root
         }
@@ -203,6 +225,20 @@ class SettingsRepository(private val context: Context) {
                         .put("last_drive_refresh_at", "")
                         .put("selected_snapshot_id", "")
                         .put("snapshots", JSONArray()),
+                )
+                .put(
+                    "firebase",
+                    JSONObject()
+                        .put("enabled", false)
+                        .put("realtime", true)
+                        .put("api_key", "")
+                        .put("database_url", "")
+                        .put("user_email", "")
+                        .put("workspace_id", "")
+                        .put("workspace_name", "")
+                        .put("last_sync_at", "")
+                        .put("last_sync_status", "")
+                        .put("last_sync_message", ""),
                 )
         }
 

@@ -48,4 +48,38 @@ class SyncUiStateTest {
         assertTrue(visibility.upload)
         assertTrue(visibility.refresh)
     }
+
+    @Test
+    fun firebaseRealtimeShowsLoginBeforeAuth() {
+        val visibility = SyncUiState.actionVisibility(
+            connected = false,
+            authInProgress = false,
+            hasFolder = false,
+            hasSelectedSnapshot = false,
+            mode = SyncMode.FirebaseRealtime,
+            firebaseLoggedIn = false,
+            hasWorkspace = false,
+        )
+
+        assertTrue(visibility.realtimeLogin)
+        assertFalse(visibility.connect)
+        assertFalse(visibility.upload)
+    }
+
+    @Test
+    fun firebaseRealtimeShowsWorkspaceAndMembersAfterLogin() {
+        val visibility = SyncUiState.actionVisibility(
+            connected = false,
+            authInProgress = false,
+            hasFolder = false,
+            hasSelectedSnapshot = false,
+            mode = SyncMode.FirebaseRealtime,
+            firebaseLoggedIn = true,
+            hasWorkspace = true,
+        )
+
+        assertFalse(visibility.realtimeLogin)
+        assertTrue(visibility.workspaceSelection)
+        assertTrue(visibility.memberManagement)
+    }
 }

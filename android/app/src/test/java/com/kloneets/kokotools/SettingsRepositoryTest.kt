@@ -12,6 +12,7 @@ class SettingsRepositoryTest {
               "pages_app": {"first_book": 100, "second_book": 320, "read_pages": 25},
               "notes_app": {"current_note_path": "books/current.md", "preview_hidden": true},
               "android_app": {"theme_mode": "dark"},
+              "firebase": {"enabled": true, "realtime": true, "workspace_id": "ws-1", "workspace_name": "Team"},
               "gdrive": {
                 "folder_id": "folder-1",
                 "folder_name": "Koko",
@@ -28,6 +29,8 @@ class SettingsRepositoryTest {
         assertEquals("books/current.md", settings.notesApp.currentNotePath)
         assertEquals(true, settings.notesApp.previewHidden)
         assertEquals(ThemeMode.Dark, settings.androidApp.themeMode)
+        assertEquals(true, settings.firebase.enabled)
+        assertEquals("ws-1", settings.firebase.workspaceId)
         assertEquals("folder-1", settings.gdrive.folderId)
         assertEquals("snap-1", settings.gdrive.snapshots.single().id)
     }
@@ -45,6 +48,12 @@ class SettingsRepositoryTest {
                     selectedSnapshotId = "snapshot",
                     snapshots = listOf(DriveSnapshotMeta("snapshot", "2026", "now")),
                 ),
+                firebase = FirebaseSettings(
+                    enabled = true,
+                    realtime = true,
+                    workspaceId = "ws",
+                    workspaceName = "Team",
+                ),
             ),
         )
 
@@ -54,6 +63,8 @@ class SettingsRepositoryTest {
         assertEquals("a.md", json.getJSONObject("notes_app").getString("current_note_path"))
         assertEquals(true, json.getJSONObject("notes_app").getBoolean("preview_hidden"))
         assertEquals("light", json.getJSONObject("android_app").getString("theme_mode"))
+        assertEquals(true, json.getJSONObject("firebase").getBoolean("enabled"))
+        assertEquals("ws", json.getJSONObject("firebase").getString("workspace_id"))
         assertEquals("folder", json.getJSONObject("gdrive").getString("folder_id"))
         assertEquals("snapshot", json.getJSONObject("gdrive").getJSONArray("snapshots").getJSONObject(0).getString("id"))
     }
@@ -78,6 +89,7 @@ class SettingsRepositoryTest {
         assertEquals(4, json.getJSONObject("notes_app").getInt("tab_spaces"))
         assertEquals(1000, json.getJSONObject("notes_app").getInt("undo_levels"))
         assertEquals("mobile.md", json.getJSONObject("notes_app").getString("current_note_path"))
+        assertEquals(true, json.getJSONObject("firebase").getBoolean("realtime"))
         assertEquals(10, json.getJSONObject("gdrive").getInt("sync_interval_sec"))
     }
 
