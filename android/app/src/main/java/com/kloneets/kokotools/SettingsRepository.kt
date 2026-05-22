@@ -175,7 +175,6 @@ class SettingsRepository(private val context: Context) {
                     JSONObject()
                         .copyIfPresent(notes, "tab_spaces")
                         .copyIfPresent(notes, "undo_levels")
-                        .copyIfPresent(notes, "preview_hidden")
                         .copyIfPresent(notes, "vim_mode")
                         .copyIfPresent(notes, "spell_check_enabled")
                         .copyIfPresent(notes, "spell_dictionaries"),
@@ -193,7 +192,6 @@ class SettingsRepository(private val context: Context) {
                 listOf(
                     "tab_spaces",
                     "undo_levels",
-                    "preview_hidden",
                     "vim_mode",
                     "spell_check_enabled",
                     "spell_dictionaries",

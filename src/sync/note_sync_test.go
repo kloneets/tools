@@ -19,7 +19,7 @@ func TestNoteIDStableForNormalizedPath(t *testing.T) {
 
 func TestNoteSyncerPullAppliesCleanRemoteNote(t *testing.T) {
 	id := NoteID("Work/Plan.md")
-	provider := fakeNoteProvider{snapshot: Snapshot{Notes: map[string]NoteRecord{
+	provider := &fakeNoteProvider{snapshot: Snapshot{Notes: map[string]NoteRecord{
 		id: {ID: id, Path: "Work/Plan.md", Text: "remote", Rev: 2},
 	}}}
 	syncer := NoteSyncer{
@@ -46,7 +46,7 @@ func TestNoteSyncerPullAppliesCleanRemoteNote(t *testing.T) {
 
 func TestNoteSyncerPullDefersDirtyRemoteNote(t *testing.T) {
 	id := NoteID("Work/Plan.md")
-	provider := fakeNoteProvider{snapshot: Snapshot{Notes: map[string]NoteRecord{
+	provider := &fakeNoteProvider{snapshot: Snapshot{Notes: map[string]NoteRecord{
 		id: {ID: id, Path: "Work/Plan.md", Text: "remote", Rev: 2},
 	}}}
 	syncer := NoteSyncer{
@@ -67,8 +67,59 @@ func TestNoteSyncerPullDefersDirtyRemoteNote(t *testing.T) {
 	}
 }
 
+func TestNoteSyncerPushSkipsUnchangedNoteContent(t *testing.T) {
+	provider := &fakeNoteProvider{}
+	syncer := NoteSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		StatePath:   t.TempDir() + "/state.json",
+		Session:     Session{IDToken: "token"},
+		Now:         func() time.Time { return time.Unix(10, 0).UTC() },
+	}
+	files := []NoteFile{{Path: "Work/Plan.md", Text: "same"}}
+
+	first, err := syncer.PushNotes(context.Background(), files)
+	if err != nil {
+		t.Fatalf("first PushNotes() error = %v", err)
+	}
+	second, err := syncer.PushNotes(context.Background(), files)
+	if err != nil {
+		t.Fatalf("second PushNotes() error = %v", err)
+	}
+
+	if first.Pushed != 1 || second.Pushed != 0 {
+		t.Fatalf("push results = %#v then %#v, want one push then no-op", first, second)
+	}
+	if len(provider.mutations) != 1 {
+		t.Fatalf("mutations len = %d, want unchanged note skipped", len(provider.mutations))
+	}
+}
+
+func TestNoteSyncerPullRecordsAppliedNoteHash(t *testing.T) {
+	id := NoteID("Work/Plan.md")
+	provider := &fakeNoteProvider{snapshot: Snapshot{Notes: map[string]NoteRecord{
+		id: {ID: id, Path: "Work/Plan.md", Text: "remote", Rev: 2},
+	}}}
+	syncer := NoteSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		StatePath:   t.TempDir() + "/state.json",
+		Session:     Session{IDToken: "token"},
+	}
+
+	got, err := syncer.PullNotes(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("PullNotes() error = %v", err)
+	}
+
+	if got.State.NoteHashes[id] != NoteContentHash("remote") {
+		t.Fatalf("note hash = %q, want remote content hash", got.State.NoteHashes[id])
+	}
+}
+
 type fakeNoteProvider struct {
-	snapshot Snapshot
+	snapshot  Snapshot
+	mutations []Mutation
 }
 
 func (p fakeNoteProvider) Login(context.Context, string, string) (Session, error) {
@@ -79,11 +130,12 @@ func (p fakeNoteProvider) WatchWorkspace(context.Context, string, string, func(C
 	return nil
 }
 
-func (p fakeNoteProvider) PushMutation(context.Context, string, Mutation) error {
+func (p *fakeNoteProvider) PushMutation(_ context.Context, _ string, mutation Mutation) error {
+	p.mutations = append(p.mutations, mutation)
 	return nil
 }
 
-func (p fakeNoteProvider) PullSnapshot(context.Context, string) (Snapshot, error) {
+func (p *fakeNoteProvider) PullSnapshot(context.Context, string) (Snapshot, error) {
 	return p.snapshot, nil
 }
 

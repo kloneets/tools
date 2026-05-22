@@ -286,7 +286,7 @@ Actions include:
 - Refresh the snapshot list.
 - Restore a selected Drive snapshot.
 
-Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, managed note assets, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as preview visibility, Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Firebase credentials, Drive config, and the currently open note session. Google Drive remains a legacy manual snapshot backup. The app can save locally without uploading to either backend.
+Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, managed note assets, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Markdown rendering mode, Firebase credentials, Drive config, and the currently open note session. Google Drive remains a legacy manual snapshot backup. The app can save locally without uploading to either backend.
 
 Remote Firebase data is not applied over active local edits. If pages, notes, todos, settings, or managed files are currently being edited or have unsaved local changes, the app defers the remote apply and retries on a later sync after the local action is saved or finished.
 

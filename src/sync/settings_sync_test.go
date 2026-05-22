@@ -16,12 +16,15 @@ func TestSettingsSyncerPushWritesSharedSettingsRecord(t *testing.T) {
 		Now:         func() time.Time { return time.Unix(10, 0).UTC() },
 	}
 
-	err := syncer.PushSettings(context.Background(), map[string]any{
+	result, err := syncer.PushSettings(context.Background(), map[string]any{
 		"pages_app": map[string]any{"first_book": 10},
 		"ui":        map[string]any{"theme": "gruvbox"},
 	})
 	if err != nil {
 		t.Fatalf("PushSettings() error = %v", err)
+	}
+	if !result.Pushed {
+		t.Fatal("Pushed = false, want true")
 	}
 
 	if len(provider.mutations) != 1 || provider.mutations[0].Settings == nil {
@@ -56,5 +59,40 @@ func TestSettingsSyncerPullReturnsNewerSharedSettings(t *testing.T) {
 	}
 	if _, ok := result.Values["pages_app"]; !ok {
 		t.Fatalf("Values = %#v, want pages_app", result.Values)
+	}
+}
+
+func TestSettingsSyncerPushSkipsUnchangedSharedSettings(t *testing.T) {
+	provider := &fakeAssetProvider{}
+	syncer := SettingsSyncer{
+		Provider:    provider,
+		WorkspaceID: "workspace",
+		StatePath:   t.TempDir() + "/state.json",
+		Session:     Session{UID: "uid", IDToken: "token"},
+		Now:         func() time.Time { return time.Unix(10, 0).UTC() },
+	}
+	settings := map[string]any{
+		"pages_app": map[string]any{"first_book": 10},
+		"notes_app": map[string]any{
+			"current_note_path": "local.md",
+			"preview_hidden":    true,
+		},
+	}
+
+	if _, err := syncer.PushSettings(context.Background(), settings); err != nil {
+		t.Fatalf("first PushSettings() error = %v", err)
+	}
+	settings["notes_app"].(map[string]any)["current_note_path"] = "other.md"
+	settings["notes_app"].(map[string]any)["preview_hidden"] = false
+	result, err := syncer.PushSettings(context.Background(), settings)
+	if err != nil {
+		t.Fatalf("second PushSettings() error = %v", err)
+	}
+	if result.Pushed {
+		t.Fatal("second Pushed = true, want unchanged shared settings skipped")
+	}
+
+	if len(provider.mutations) != 1 {
+		t.Fatalf("mutations len = %d, want unchanged local-only settings push skipped", len(provider.mutations))
 	}
 }

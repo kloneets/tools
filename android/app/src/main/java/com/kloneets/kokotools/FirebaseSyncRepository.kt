@@ -65,6 +65,8 @@ class FirebaseSyncRepository(private val context: Context) {
     private val tokenFile: File
         get() = File(context.filesDir, TOKEN_FILE)
     private val tokenStore = EncryptedFirebaseTokenStore(context) { tokenFile }
+    private val syncState: SharedPreferences
+        get() = context.getSharedPreferences(SYNC_STATE_PREFERENCES, Context.MODE_PRIVATE)
 
     fun backendConfigured(settings: FirebaseSettings): Boolean {
         return settings.enabled &&
@@ -257,11 +259,14 @@ class FirebaseSyncRepository(private val context: Context) {
         return TodoStore(items = sortedTodos(pullRemoteTodos(settings, session).filterNot { it.deleted }.map { it.item }))
     }
 
-    fun pushSharedSettings(settings: FirebaseSettings, appSettings: AppSettings, session: FirebaseSession) {
+    fun pushSharedSettings(settings: FirebaseSettings, appSettings: AppSettings, session: FirebaseSession): Boolean {
+        val values = SettingsRepository.sharedSettingsJson(appSettings)
+        val hash = sharedSettingsHash(values)
+        if (lastSharedSettingsHash(settings) == hash) return false
         val now = OffsetDateTime.now(ZoneOffset.UTC)
         val rev = System.currentTimeMillis()
         val record = JSONObject()
-            .put("values", SettingsRepository.sharedSettingsJson(appSettings))
+            .put("values", values)
             .put("rev", rev)
             .put("updated_at", TodoRepository.formatTime(now))
             .put("updated_by", session.uid)
@@ -275,12 +280,28 @@ class FirebaseSyncRepository(private val context: Context) {
                 .put("kind", "settings_push"),
             session.idToken,
         )
+        markSharedSettingsSynced(settings, values)
+        return true
     }
 
     fun pullSharedSettings(settings: FirebaseSettings, session: FirebaseSession): FirebaseSharedSettings? {
         val record = getDatabase(settings, "workspaces/${settings.workspaceId}/settings/shared", session.idToken) ?: return null
         val values = record.optJSONObject("values") ?: return null
         return FirebaseSharedSettings(values = values, rev = record.optLong("rev", 0L))
+    }
+
+    fun markSharedSettingsSynced(settings: FirebaseSettings, values: JSONObject) {
+        syncState.edit()
+            .putString(sharedSettingsHashKey(settings), sharedSettingsHash(values))
+            .apply()
+    }
+
+    fun localSharedSettingsHash(settings: AppSettings): String {
+        return sharedSettingsHash(SettingsRepository.sharedSettingsJson(settings))
+    }
+
+    private fun lastSharedSettingsHash(settings: FirebaseSettings): String? {
+        return syncState.getString(sharedSettingsHashKey(settings), null)
     }
 
     fun pushAssets(settings: FirebaseSettings, assets: List<LocalAssetFile>, session: FirebaseSession): Int {
@@ -450,8 +471,38 @@ class FirebaseSyncRepository(private val context: Context) {
     companion object {
         const val TOKEN_FILE = "firebase_token.json"
         const val MAX_ASSET_BYTES = 1 * 1024 * 1024
+        private const val SYNC_STATE_PREFERENCES = "firebase_sync_state"
 
         fun personalWorkspaceId(uid: String): String = "user_$uid"
+
+        fun sharedSettingsHash(values: JSONObject): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(canonicalJson(values).toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
+
+        private fun canonicalJson(value: Any?): String {
+            return when (value) {
+                null, JSONObject.NULL -> "null"
+                is JSONObject -> {
+                    val keys = value.keys().asSequence().toList().sorted()
+                    keys.joinToString(prefix = "{", postfix = "}") { key ->
+                        JSONObject.quote(key) + ":" + canonicalJson(value.opt(key))
+                    }
+                }
+                is org.json.JSONArray -> {
+                    (0 until value.length()).joinToString(prefix = "[", postfix = "]") { index ->
+                        canonicalJson(value.opt(index))
+                    }
+                }
+                is String -> JSONObject.quote(value)
+                is Number, is Boolean -> value.toString()
+                else -> JSONObject.quote(value.toString())
+            }
+        }
+    }
+
+    private fun sharedSettingsHashKey(settings: FirebaseSettings): String {
+        return "shared_settings_hash:${settings.workspaceId.ifBlank { "default" }}"
     }
 }
 

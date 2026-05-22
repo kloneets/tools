@@ -37,6 +37,11 @@ type NoteMergeResult struct {
 	State        State
 }
 
+type NotePushResult struct {
+	Pushed int
+	State  State
+}
+
 func NoteID(path string) string {
 	normalized := NormalizeNotePath(path)
 	sum := sha256.Sum256([]byte(normalized))
@@ -61,13 +66,18 @@ func (s *NoteSyncer) Ready() bool {
 	return s != nil && s.Provider != nil && s.WorkspaceID != "" && s.Session.IDToken != ""
 }
 
-func (s *NoteSyncer) PushNotes(ctx context.Context, notes []NoteFile) error {
+func (s *NoteSyncer) PushNotes(ctx context.Context, notes []NoteFile) (NotePushResult, error) {
+	result := NotePushResult{}
 	if !s.Ready() {
-		return nil
+		return result, nil
 	}
 	state, err := LoadState(s.StatePath)
 	if err != nil {
-		return err
+		return result, err
+	}
+	if state.WorkspaceID != "" && state.WorkspaceID != s.WorkspaceID {
+		state.Notes = map[string]int64{}
+		state.NoteHashes = map[string]string{}
 	}
 	deviceID := s.deviceID(state)
 	now := s.now()
@@ -80,6 +90,14 @@ func (s *NoteSyncer) PushNotes(ctx context.Context, notes []NoteFile) error {
 		id := note.ID
 		if id == "" {
 			id = NoteID(path)
+		}
+		hash := NoteContentHash(note.Text)
+		if state.WorkspaceID == s.WorkspaceID && state.NoteHashes[id] == hash {
+			continue
+		}
+		if state.WorkspaceID == s.WorkspaceID && state.Notes[id] > 0 && state.NoteHashes[id] == "" {
+			state.NoteHashes[id] = hash
+			continue
 		}
 		rev := now.UnixMilli()
 		if rev <= state.Notes[id] {
@@ -99,13 +117,19 @@ func (s *NoteSyncer) PushNotes(ctx context.Context, notes []NoteFile) error {
 			Note:      &record,
 			CreatedAt: now,
 		}); err != nil {
-			return err
+			return result, err
 		}
 		state.Notes[id] = rev
+		state.NoteHashes[id] = hash
+		result.Pushed++
 	}
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
-	return SaveState(s.StatePath, state)
+	if err := SaveState(s.StatePath, state); err != nil {
+		return result, err
+	}
+	result.State = state
+	return result, nil
 }
 
 func (s *NoteSyncer) PushDelete(ctx context.Context, path string) error {
@@ -143,6 +167,7 @@ func (s *NoteSyncer) PushDelete(ctx context.Context, path string) error {
 		return err
 	}
 	state.Notes[id] = rev
+	delete(state.NoteHashes, id)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	return SaveState(s.StatePath, state)
@@ -199,6 +224,7 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 			delete(result.Notes, path)
 			result.Deletes = append(result.Deletes, path)
 			state.Notes[id] = remote.Rev
+			delete(state.NoteHashes, id)
 			result.Changed = true
 			continue
 		}
@@ -206,6 +232,7 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 			result.Notes[path] = apply.Note
 			result.Upserts = append(result.Upserts, apply.Note)
 			state.Notes[id] = remote.Rev
+			state.NoteHashes[id] = NoteContentHash(apply.Note.Text)
 			result.Changed = true
 		}
 	}
@@ -213,6 +240,11 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 	state.Provider = ProviderFirebase
 	result.State = state
 	return result, nil
+}
+
+func NoteContentHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *NoteSyncer) SaveState(state State) error {

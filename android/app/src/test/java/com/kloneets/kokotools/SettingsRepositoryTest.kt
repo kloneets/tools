@@ -256,7 +256,7 @@ class SettingsRepositoryTest {
 
         assertEquals(10, shared.getJSONObject("pages_app").getInt("first_book"))
         assertEquals(12, shared.getJSONObject("password_app").getInt("symbol_count"))
-        assertEquals(true, shared.getJSONObject("notes_app").getBoolean("preview_hidden"))
+        assertFalse(shared.getJSONObject("notes_app").has("preview_hidden"))
         assertFalse(shared.getJSONObject("notes_app").has("current_note_path"))
         assertFalse(shared.getJSONObject("notes_app").has("open_note_paths"))
         assertFalse(shared.has("android_app"))
@@ -287,9 +287,38 @@ class SettingsRepositoryTest {
 
         assertEquals(99, applied.pagesApp.firstBook)
         assertEquals("local.md", applied.notesApp.currentNotePath)
-        assertEquals(true, applied.notesApp.previewHidden)
+        assertEquals(false, applied.notesApp.previewHidden)
         assertEquals(true, applied.notesApp.spellCheckEnabled)
         assertEquals(ThemeMode.Dark, applied.androidApp.themeMode)
+    }
+
+    @Test
+    fun localOnlySettingsDoNotChangeSharedHash() {
+        val first = SettingsRepository.parse(
+            """
+            {
+              "pages_app": {"first_book": 10, "second_book": 20, "read_pages": 3},
+              "notes_app": {"current_note_path": "a.md", "preview_hidden": true, "spell_check_enabled": true},
+              "android_app": {"theme_mode": "dark"},
+              "firebase": {"enabled": true, "workspace_id": "user_1"}
+            }
+            """.trimIndent(),
+        )
+        val second = SettingsRepository.parse(
+            """
+            {
+              "pages_app": {"first_book": 10, "second_book": 20, "read_pages": 3},
+              "notes_app": {"current_note_path": "b.md", "preview_hidden": false, "spell_check_enabled": true},
+              "android_app": {"theme_mode": "light"},
+              "firebase": {"enabled": false, "workspace_id": "user_2"}
+            }
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            FirebaseSyncRepository.sharedSettingsHash(SettingsRepository.sharedSettingsJson(first)),
+            FirebaseSyncRepository.sharedSettingsHash(SettingsRepository.sharedSettingsJson(second)),
+        )
     }
 
     @Test

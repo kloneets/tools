@@ -1210,7 +1210,8 @@ func TestHandleSettingsKeyEditsUndoLevels(t *testing.T) {
 }
 
 func TestHandleSettingsKeyCyclesTheme(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	settings.Init()
 	app := &terminalApp{view: viewSettings, settingIndex: 0}
 	for _, want := range settings.BuiltInThemes[1:] {
@@ -1229,6 +1230,13 @@ func TestHandleSettingsKeyCyclesTheme(t *testing.T) {
 	}
 	if !app.settingsDirty {
 		t.Fatal("settingsDirty = false, want true")
+	}
+	data, err := os.ReadFile(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(settings.json) error = %v", err)
+	}
+	if !strings.Contains(string(data), `"theme":"`+settings.BuiltInThemes[0]+`"`) {
+		t.Fatalf("settings file = %q, want persisted theme", string(data))
 	}
 }
 
@@ -1257,7 +1265,8 @@ func TestRenderSettingsShowsThemePreview(t *testing.T) {
 }
 
 func TestHandleSettingsKeyEditsTabOrder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	settings.Init()
 	app := &terminalApp{view: viewSettings, settingIndex: 5}
 
@@ -1284,6 +1293,13 @@ func TestHandleSettingsKeyEditsTabOrder(t *testing.T) {
 	}
 	if app.tabOrderEditMode {
 		t.Fatal("tabOrderEditMode = true, want false")
+	}
+	data, err := os.ReadFile(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(settings.json) error = %v", err)
+	}
+	if !strings.Contains(string(data), `"tab_order":["files","notes"`) {
+		t.Fatalf("settings file = %q, want persisted tab order", string(data))
 	}
 }
 

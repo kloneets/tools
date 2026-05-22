@@ -115,7 +115,7 @@ func SharedWorkspaceSettings(settings map[string]any) map[string]any {
 	}
 	if value, ok := settings["notes_app"].(map[string]any); ok {
 		notes := map[string]any{}
-		for _, key := range []string{"tab_spaces", "undo_levels", "preview_hidden", "vim_mode", "spell_check_enabled", "spell_dictionaries"} {
+		for _, key := range []string{"tab_spaces", "undo_levels", "vim_mode", "spell_check_enabled", "spell_dictionaries"} {
 			if field, ok := value[key]; ok {
 				notes[key] = field
 			}
@@ -137,7 +137,7 @@ func ApplySharedWorkspaceSettings(local map[string]any, shared map[string]any) m
 	if value, ok := shared["notes_app"].(map[string]any); ok {
 		notes, _ := out["notes_app"].(map[string]any)
 		next := cloneMap(notes)
-		for _, key := range []string{"tab_spaces", "undo_levels", "preview_hidden", "vim_mode", "spell_check_enabled", "spell_dictionaries"} {
+		for _, key := range []string{"tab_spaces", "undo_levels", "vim_mode", "spell_check_enabled", "spell_dictionaries"} {
 			if field, ok := value[key]; ok {
 				next[key] = field
 			}

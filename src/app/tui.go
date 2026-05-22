@@ -1821,7 +1821,7 @@ func (a *terminalApp) handleSettingsKey(key notes.Key) bool {
 				return true
 			}
 			settings.Inst().NotesApp.UndoLevels = value
-			a.settingsDirty = true
+			a.markSettingsChanged()
 			a.settingsEditMode = false
 			a.settingsEditBuffer = ""
 			helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Undo levels set to %d", value))
@@ -1873,10 +1873,16 @@ func (a *terminalApp) moveTabOrderSelection(delta int, reorder bool) {
 	}
 	if reorder {
 		cfg.UI.TabOrder[a.tabOrderIndex], cfg.UI.TabOrder[next] = cfg.UI.TabOrder[next], cfg.UI.TabOrder[a.tabOrderIndex]
-		a.settingsDirty = true
+		a.markSettingsChanged()
 		helpers.StatusBarInst().UpdateStatusBar("Tab order updated")
 	}
 	a.tabOrderIndex = next
+}
+
+func (a *terminalApp) markSettingsChanged() {
+	a.settingsDirty = true
+	settings.SaveSettingsLocal()
+	a.pushSettingsToFirebaseSoon()
 }
 
 func (a *terminalApp) requestShutdown() {
@@ -1967,7 +1973,7 @@ func (a *terminalApp) syncItems() []actionItem {
 			if firebase.Realtime == false {
 				firebase.Realtime = true
 			}
-			a.settingsDirty = true
+			a.markSettingsChanged()
 			if firebase.Enabled {
 				if err := a.configureFirebaseTodoSyncer(context.Background()); err != nil {
 					helpers.StatusBarInst().UpdateStatusBar("Firebase sync not ready: " + err.Error())
@@ -2056,7 +2062,7 @@ func (a *terminalApp) syncItems() []actionItem {
 		}},
 		{Label: fmt.Sprintf("drive sync enabled: %t", cfg.Enabled), Apply: func() {
 			cfg.Enabled = !cfg.Enabled
-			a.settingsDirty = true
+			a.markSettingsChanged()
 		}},
 		{Label: "connect google drive", Apply: func() {
 			if !gdrive.HasCredentials() {
@@ -2151,7 +2157,7 @@ func (a *terminalApp) settingsItems() []actionItem {
 			cfg.UI.Theme = settings.NextTheme(settings.CurrentTheme())
 			applyGlobalBackgroundStyle()
 			a.applyWidgetBackgroundStyle()
-			a.settingsDirty = true
+			a.markSettingsChanged()
 		}},
 		{Label: fmt.Sprintf("transparent background: %t", cfg.UI != nil && cfg.UI.TransparentBackground), Apply: func() {
 			if cfg.UI == nil {
@@ -2160,18 +2166,18 @@ func (a *terminalApp) settingsItems() []actionItem {
 			cfg.UI.TransparentBackground = !cfg.UI.TransparentBackground
 			applyGlobalBackgroundStyle()
 			a.applyWidgetBackgroundStyle()
-			a.settingsDirty = true
+			a.markSettingsChanged()
 		}},
 		{Label: fmt.Sprintf("vim mode: %t", cfg.NotesApp.VimMode), Apply: func() {
 			cfg.NotesApp.VimMode = !cfg.NotesApp.VimMode
-			a.settingsDirty = true
+			a.markSettingsChanged()
 		}},
 		{Label: fmt.Sprintf("tab spaces: %d", cfg.NotesApp.TabSpaces), Apply: func() {
 			cfg.NotesApp.TabSpaces++
 			if cfg.NotesApp.TabSpaces > 8 {
 				cfg.NotesApp.TabSpaces = 2
 			}
-			a.settingsDirty = true
+			a.markSettingsChanged()
 		}},
 		{Label: a.settingsUndoLevelsLabel(cfg.NotesApp.UndoLevels), Apply: func() {
 			a.settingsEditMode = true
@@ -2200,7 +2206,7 @@ func (a *terminalApp) spellSettingsItems() []actionItem {
 	items := []actionItem{
 		{Label: fmt.Sprintf("spell checking: %t", cfg.NotesApp.SpellCheckEnabled), Apply: func() {
 			cfg.NotesApp.SpellCheckEnabled = !cfg.NotesApp.SpellCheckEnabled
-			a.settingsDirty = true
+			a.markSettingsChanged()
 		}},
 	}
 	for _, dict := range notes.SpellCatalog() {
@@ -2215,7 +2221,7 @@ func (a *terminalApp) spellSettingsItems() []actionItem {
 			if notes.SpellDictionaryInstalled(d.Code) {
 				if notes.EnableSpellDictionary(d.Code) {
 					cfg.NotesApp.SpellCheckEnabled = true
-					a.settingsDirty = true
+					a.markSettingsChanged()
 				}
 				helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Spell dictionary already installed: %s", d.Name))
 				return
@@ -2226,7 +2232,7 @@ func (a *terminalApp) spellSettingsItems() []actionItem {
 				return
 			}
 			cfg.NotesApp.SpellCheckEnabled = true
-			a.settingsDirty = true
+			a.markSettingsChanged()
 			helpers.StatusBarInst().UpdateStatusBar(fmt.Sprintf("Installed spell dictionary: %s", d.Name))
 		}})
 	}
@@ -3305,9 +3311,10 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 		return
 	}
 	go func() {
-		_ = a.pushNotesToFirebase(ctx)
-		_ = a.pushSettingsToFirebase(ctx)
-		_ = a.pushAssetsToFirebase(ctx)
+		_ = a.pullTodosFromFirebase(ctx)
+		_ = a.pullNotesFromFirebase(ctx)
+		_ = a.pullSettingsFromFirebase(ctx)
+		_ = a.pullAssetsFromFirebase(ctx)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -3576,8 +3583,12 @@ func (a *terminalApp) pushNotesToFirebase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := a.firebaseNoteSyncer.PushNotes(ctx, files); err != nil {
+	result, err := a.firebaseNoteSyncer.PushNotes(ctx, files)
+	if err != nil {
 		return err
+	}
+	if result.Pushed == 0 {
+		return nil
 	}
 	if settings.Inst().Firebase != nil {
 		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
@@ -3629,8 +3640,12 @@ func (a *terminalApp) pushSettingsToFirebase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := a.firebaseSettingsSyncer.PushSettings(ctx, values); err != nil {
+	result, err := a.firebaseSettingsSyncer.PushSettings(ctx, values)
+	if err != nil {
 		return err
+	}
+	if !result.Pushed {
+		return nil
 	}
 	if settings.Inst().Firebase != nil {
 		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)

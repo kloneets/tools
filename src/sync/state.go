@@ -13,14 +13,16 @@ import (
 )
 
 type State struct {
-	Provider       string           `json:"provider"`
-	WorkspaceID    string           `json:"workspace_id"`
-	LastEventToken string           `json:"last_event_token"`
-	DeviceID       string           `json:"device_id"`
-	Notes          map[string]int64 `json:"notes"`
-	Todos          map[string]int64 `json:"todos"`
-	Assets         map[string]int64 `json:"assets,omitempty"`
-	SettingsRev    int64            `json:"settings_rev,omitempty"`
+	Provider       string            `json:"provider"`
+	WorkspaceID    string            `json:"workspace_id"`
+	LastEventToken string            `json:"last_event_token"`
+	DeviceID       string            `json:"device_id"`
+	Notes          map[string]int64  `json:"notes"`
+	NoteHashes     map[string]string `json:"note_hashes,omitempty"`
+	Todos          map[string]int64  `json:"todos"`
+	Assets         map[string]int64  `json:"assets,omitempty"`
+	SettingsRev    int64             `json:"settings_rev,omitempty"`
+	SettingsHash   string            `json:"settings_hash,omitempty"`
 }
 
 type TokenFile struct {
@@ -99,11 +101,12 @@ func SaveToken(path string, token TokenFile) error {
 
 func defaultState() State {
 	return State{
-		Provider: ProviderFirebase,
-		DeviceID: randomDeviceID(),
-		Notes:    map[string]int64{},
-		Todos:    map[string]int64{},
-		Assets:   map[string]int64{},
+		Provider:   ProviderFirebase,
+		DeviceID:   randomDeviceID(),
+		Notes:      map[string]int64{},
+		NoteHashes: map[string]string{},
+		Todos:      map[string]int64{},
+		Assets:     map[string]int64{},
 	}
 }
 
@@ -116,6 +119,9 @@ func normalizeState(state *State) {
 	}
 	if state.Notes == nil {
 		state.Notes = map[string]int64{}
+	}
+	if state.NoteHashes == nil {
+		state.NoteHashes = map[string]string{}
 	}
 	if state.Todos == nil {
 		state.Todos = map[string]int64{}

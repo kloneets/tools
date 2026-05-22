@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -22,21 +24,29 @@ type SettingsPullResult struct {
 	Changed bool
 }
 
+type SettingsPushResult struct {
+	Pushed bool
+}
+
 func (s *SettingsSyncer) Ready() bool {
 	return s != nil && s.Provider != nil && s.WorkspaceID != "" && s.Session.IDToken != ""
 }
 
-func (s *SettingsSyncer) PushSettings(ctx context.Context, fullSettings map[string]any) error {
+func (s *SettingsSyncer) PushSettings(ctx context.Context, fullSettings map[string]any) (SettingsPushResult, error) {
 	if !s.Ready() {
-		return nil
+		return SettingsPushResult{}, nil
 	}
 	shared := SharedWorkspaceSettings(fullSettings)
 	if len(shared) == 0 {
-		return nil
+		return SettingsPushResult{}, nil
 	}
+	hash := sharedSettingsHash(shared)
 	state, err := LoadState(s.StatePath)
 	if err != nil {
-		return err
+		return SettingsPushResult{}, err
+	}
+	if state.WorkspaceID == s.WorkspaceID && state.SettingsHash == hash {
+		return SettingsPushResult{}, nil
 	}
 	now := s.now()
 	rev := now.UnixMilli()
@@ -55,12 +65,16 @@ func (s *SettingsSyncer) PushSettings(ctx context.Context, fullSettings map[stri
 		Settings:  &record,
 		CreatedAt: now,
 	}); err != nil {
-		return err
+		return SettingsPushResult{}, err
 	}
 	state.SettingsRev = rev
+	state.SettingsHash = hash
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
-	return SaveState(s.StatePath, state)
+	if err := SaveState(s.StatePath, state); err != nil {
+		return SettingsPushResult{}, err
+	}
+	return SettingsPushResult{Pushed: true}, nil
 }
 
 func (s *SettingsSyncer) PullSettings(ctx context.Context) (SettingsPullResult, error) {
@@ -76,16 +90,27 @@ func (s *SettingsSyncer) PullSettings(ctx context.Context) (SettingsPullResult, 
 		return SettingsPullResult{}, err
 	}
 	record, ok := sharedSettingsFromSnapshot(snapshot.Settings)
-	if !ok || record.Rev <= state.SettingsRev {
+	if !ok || (state.WorkspaceID == s.WorkspaceID && record.Rev <= state.SettingsRev) {
 		return SettingsPullResult{}, nil
 	}
 	state.SettingsRev = record.Rev
+	state.SettingsHash = sharedSettingsHash(record.Values)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	if err := SaveState(s.StatePath, state); err != nil {
 		return SettingsPullResult{}, err
 	}
 	return SettingsPullResult{Values: normalizeJSONMap(record.Values), Changed: true}, nil
+}
+
+func sharedSettingsHash(values map[string]any) string {
+	normalized := normalizeJSONMap(values)
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *SettingsSyncer) deviceID(state State) string {

@@ -2833,7 +2833,8 @@ func TestExecuteVimCommandChainSavesThenQueuesForcedQuit(t *testing.T) {
 }
 
 func TestExecuteVimCommandPreviewTogglesPane(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	settings.Init()
 	w := &Workspace{
 		Tabs:       []*Editor{{Title: "Plan", Text: "hello", Mode: ModeNormal}},
@@ -2845,6 +2846,13 @@ func TestExecuteVimCommandPreviewTogglesPane(t *testing.T) {
 	}
 	if got := w.ActiveEditor().Status; got != "preview hidden" {
 		t.Fatalf("status = %q, want %q", got, "preview hidden")
+	}
+	data, err := os.ReadFile(filepath.Join(home, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(settings.json) error = %v", err)
+	}
+	if !strings.Contains(string(data), `"preview_hidden":true`) {
+		t.Fatalf("settings file = %q, want preview_hidden persisted", string(data))
 	}
 	executeVimCommand(w, w.ActiveEditor(), vimCommand{Kind: vimCommandPreview})
 	if w.PreviewHidden {

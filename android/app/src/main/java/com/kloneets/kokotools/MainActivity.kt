@@ -21,6 +21,7 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.provider.OpenableColumns
@@ -93,6 +94,7 @@ class MainActivity : Activity() {
     private var readInput: EditText? = null
     private var secondInput: EditText? = null
     private var resultText: TextView? = null
+    private var rawNoteTouchDownAt = 0L
 
     private var syncStatusText: TextView? = null
     private var syncFolderTitle: TextView? = null
@@ -440,7 +442,16 @@ class MainActivity : Activity() {
                 }
             })
             setOnTouchListener { view, event ->
-                if (rawNoteSpellChecker?.handleTouchEvent(event) == true) {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        rawNoteTouchDownAt = event.eventTime
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                val selecting = selectionStart != selectionEnd
+                val longGesture = event.eventTime - rawNoteTouchDownAt >= ViewConfiguration.getLongPressTimeout()
+                if (!selecting && !longGesture && rawNoteSpellChecker?.handleTouchEvent(event) == true) {
                     return@setOnTouchListener true
                 }
                 false
@@ -1766,13 +1777,14 @@ class MainActivity : Activity() {
             }
             firebaseSession = session
             runCatching {
-                if (pushSettings) firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
+                val settingsPushed = if (pushSettings) firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session) else false
                 val assetCount = if (pushAssets) firebaseSyncRepository.pushAssets(settings.firebase, notesRepository.listAssets(), session) else 0
-                assetCount
-            }.onSuccess { assetCount ->
+                settingsPushed to assetCount
+            }.onSuccess { (settingsPushed, assetCount) ->
                 runOnUiThread {
                     val suffix = if (pushAssets) ", $assetCount asset(s)" else ""
-                    setSyncStatus("Firebase shared settings pushed$suffix")
+                    val verb = if (pushSettings && settingsPushed) "pushed" else "unchanged"
+                    setSyncStatus("Firebase shared settings $verb$suffix")
                 }
             }.onFailure { error ->
                 runOnUiThread { setSyncStatus("Firebase shared push failed: ${error.message}") }
@@ -1806,6 +1818,7 @@ class MainActivity : Activity() {
                         val next = SettingsRepository.applySharedSettings(settings, shared.values)
                         settings = next
                         settingsRepository.save(settings)
+                        firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
                     if (!localEditActive) {
                         applyRemoteAssets(assets)
@@ -1817,7 +1830,10 @@ class MainActivity : Activity() {
                             else -> Unit
                         }
                     }
-                    if (!localEditActive) setSyncStatus("Firebase shared sync: ${assets.count { !it.deleted }} asset(s)")
+                    if (!localEditActive) {
+                        val settingsStatus = if (shared != null) "shared settings pulled, " else ""
+                        setSyncStatus("Firebase shared sync: $settingsStatus${assets.count { !it.deleted }} asset(s)")
+                    }
                 }
             }.onFailure { error ->
                 runOnUiThread { setSyncStatus("Firebase shared pull failed: ${error.message}") }
@@ -1864,6 +1880,7 @@ class MainActivity : Activity() {
                     if (shared != null && !localEditActive && shared.rev > pagesLocalEditAtMs) {
                         settings = SettingsRepository.applySharedSettings(settings, shared.values)
                         settingsRepository.save(settings)
+                        firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
                     if (!localEditActive) applyRemoteAssets(remoteAssets)
                     applyRemoteNotes(pullResult.remoteNotes)
@@ -1872,8 +1889,11 @@ class MainActivity : Activity() {
                         showTodo()
                     }
                     if (currentScreen == Screen.Pages && !localEditActive) showPages()
+                    val deferredNoteCount = pendingRemoteNotes.size
+                    val sharedStatus = if (shared != null) ", shared settings pulled" else ""
+                    val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
                     setSyncStatus(
-                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s) in ${settings.firebase.workspaceId}",
+                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
                     )
                 }
             }.onFailure { error ->
@@ -1913,6 +1933,7 @@ class MainActivity : Activity() {
                     shared?.let {
                         settings = SettingsRepository.applySharedSettings(settings, it.values)
                         settingsRepository.save(settings)
+                        firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, it.values)
                     }
                     applyRemoteNotes(remoteNotes)
                     applyRemoteAssets(remoteAssets)
@@ -1959,7 +1980,7 @@ class MainActivity : Activity() {
         remoteNotes.forEach { remote ->
             val path = NotesRepository.normalizePath(remote.path)
             val isCurrent = path == currentNotePath
-            if (isCurrent && currentScreen == Screen.Notes) {
+            if (shouldDeferRemoteNote(path)) {
                 pendingRemoteNotes[path] = remote
                 return@forEach
             }
@@ -1983,6 +2004,12 @@ class MainActivity : Activity() {
         }
         noteList = notesRepository.listNotes()
         updateNoteSelector()
+    }
+
+    private fun shouldDeferRemoteNote(path: String): Boolean {
+        return currentScreen == Screen.Notes &&
+            path == currentNotePath &&
+            (hasUnsavedNoteChanges() || pendingNoteAutosave != null)
     }
 
     private fun applyPendingRemoteNoteToFile(path: String, savedText: String, updateEditor: Boolean) {

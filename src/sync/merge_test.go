@@ -84,9 +84,10 @@ func TestSharedWorkspaceSettingsKeepsUILocal(t *testing.T) {
 		"pages_app":    map[string]any{"first_book": 10},
 		"password_app": map[string]any{"symbol_count": 20},
 		"notes_app": map[string]any{
-			"preview_hidden":    true,
-			"current_note_path": "private.md",
-			"open_note_paths":   []any{"private.md"},
+			"preview_hidden":      true,
+			"current_note_path":   "private.md",
+			"open_note_paths":     []any{"private.md"},
+			"spell_check_enabled": true,
 		},
 		"ui": map[string]any{"theme": "gruvbox"},
 	})
@@ -101,13 +102,47 @@ func TestSharedWorkspaceSettingsKeepsUILocal(t *testing.T) {
 	if !ok {
 		t.Fatal("shared notes_app missing")
 	}
-	if _, ok := notes["preview_hidden"]; !ok {
-		t.Fatal("notes_app preview_hidden missing from shared settings")
+	if _, ok := notes["preview_hidden"]; ok {
+		t.Fatal("preview_hidden should stay local")
 	}
 	if _, ok := notes["current_note_path"]; ok {
 		t.Fatal("current_note_path should stay local")
 	}
 	if _, ok := got["ui"]; ok {
 		t.Fatal("ui should stay local")
+	}
+}
+
+func TestApplySharedWorkspaceSettingsPreservesNotesLocalOnlyState(t *testing.T) {
+	got := ApplySharedWorkspaceSettings(
+		map[string]any{
+			"pages_app": map[string]any{"first_book": 1},
+			"notes_app": map[string]any{
+				"current_note_path": "local.md",
+				"preview_hidden":    false,
+			},
+			"firebase": map[string]any{"workspace_id": "user_1"},
+		},
+		map[string]any{
+			"pages_app": map[string]any{"first_book": 2},
+			"notes_app": map[string]any{
+				"preview_hidden":      true,
+				"spell_check_enabled": true,
+			},
+		},
+	)
+
+	notes := got["notes_app"].(map[string]any)
+	if notes["current_note_path"] != "local.md" {
+		t.Fatalf("current_note_path = %v, want preserved local path", notes["current_note_path"])
+	}
+	if notes["preview_hidden"] != false {
+		t.Fatalf("preview_hidden = %v, want preserved local rendering mode", notes["preview_hidden"])
+	}
+	if notes["spell_check_enabled"] != true {
+		t.Fatalf("spell_check_enabled = %v, want remote shared setting applied", notes["spell_check_enabled"])
+	}
+	if _, ok := got["firebase"]; !ok {
+		t.Fatal("firebase config should stay local")
 	}
 }

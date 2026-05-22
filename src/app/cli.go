@@ -113,7 +113,7 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if err := noteSyncer.PushNotes(context.Background(), noteFiles); err != nil {
+	if _, err := noteSyncer.PushNotes(context.Background(), noteFiles); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -135,7 +135,7 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if err := settingsSyncer.PushSettings(context.Background(), settingsMap); err != nil {
+	if _, err := settingsSyncer.PushSettings(context.Background(), settingsMap); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
