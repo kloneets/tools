@@ -38,7 +38,7 @@ The first build or test run can take longer while Go downloads and compiles depe
 
 ## Android Companion App
 
-A Kotlin Android companion app lives in `android/`. It supports a focused subset of the desktop app: Markdown note editing, Pages calculations, and Google Drive snapshot interoperability.
+A Kotlin Android companion app lives in `android/`. It supports Markdown note editing, managed note assets, Pages calculations, Firebase sync, and Google Drive snapshot interoperability.
 
 See `android/README.md` for Android Studio import, build commands, local data paths, and Google Drive OAuth setup.
 
@@ -76,7 +76,7 @@ Supported link schemes are `http`, `https`, `ftp`, and `file`. Duplicate links a
 
 ### Firebase Push Local
 
-`firebase-push-local` pushes the current desktop todo list to the configured Firebase personal workspace. Use this when the desktop list is the source of truth and another device needs to pull the latest data.
+`firebase-push-local` pushes the current desktop todos, notes, managed note assets, and shared app settings to the configured Firebase personal workspace. Use this when the desktop data is the source of truth and another device needs to pull the latest data.
 
 ```sh
 ./koko-tools firebase-push-local
@@ -90,7 +90,7 @@ KOKO_FIREBASE_EMAIL="you@example.com" KOKO_FIREBASE_PASSWORD="password" ./koko-t
 
 ### Firebase Migrate
 
-`firebase-migrate` copies notes and todos from an old workspace into the current Firebase user's personal workspace, named `user_<uid>`, and updates the desktop Firebase config to use that personal workspace.
+`firebase-migrate` copies notes, todos, managed note assets, and shared settings from an old workspace into the current Firebase user's personal workspace, named `user_<uid>`, and updates the desktop Firebase config to use that personal workspace.
 
 ```sh
 KOKO_FIREBASE_EMAIL="you@example.com" KOKO_FIREBASE_PASSWORD="password" ./koko-tools firebase-migrate <old-workspace-id> --confirm-owner-copy
@@ -102,6 +102,8 @@ Safety checks:
 - The source workspace must be different from the target personal workspace.
 - The logged-in Firebase user must be an `owner` in `workspaces/<old-workspace-id>/members/<uid>`.
 - The command copies data into `user_<uid>` and does not delete the source workspace.
+
+Managed note assets are stored in Firebase Realtime Database as base64 records under `workspaces/<workspace>/assets`. Assets larger than 1 MiB are skipped and reported by push commands.
 
 ## Terminal UI
 
@@ -276,13 +278,17 @@ Actions include:
 - Toggle Firebase realtime sync.
 - Pull or push todos through Firebase.
 - Pull or push notes through Firebase.
+- Pull or push shared settings through Firebase.
+- Pull or push managed note assets through Firebase.
 - Toggle Drive sync.
 - Select or clear a Drive folder.
 - Upload local state to Drive.
 - Refresh the snapshot list.
 - Restore a selected Drive snapshot.
 
-Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Google Drive remains a legacy manual snapshot backup. The app can save locally without uploading to either backend.
+Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, managed note assets, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as preview visibility, Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Firebase credentials, Drive config, and the currently open note session. Google Drive remains a legacy manual snapshot backup. The app can save locally without uploading to either backend.
+
+Remote Firebase data is not applied over active local edits. If pages, notes, todos, settings, or managed files are currently being edited or have unsaved local changes, the app defers the remote apply and retries on a later sync after the local action is saved or finished.
 
 ## Settings
 

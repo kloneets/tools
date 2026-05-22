@@ -3,8 +3,9 @@
 This directory contains an independent Kotlin Android companion app for a focused subset of Koko Tools:
 
 - edit local Markdown notes without preview
+- import, list, and delete managed note assets
 - calculate Pages values
-- sync desktop-compatible snapshots to and from Google Drive
+- sync Firebase data and desktop-compatible snapshots to and from Google Drive
 
 The app uses plain Android SDK widgets and app-private file storage. It does not use Compose.
 
@@ -40,7 +41,7 @@ Android stores data in the app-private files directory:
 - notes root: `filesDir/notes/`
 - settings: `filesDir/settings.json`
 
-Notes are plain `.md` files. Nested notes use slash-relative paths such as `books/current.md`.
+Notes are plain `.md` files. Nested notes use slash-relative paths such as `books/current.md`. Managed assets live under the notes root in either `assets/` or note-specific `<note>.assets/` folders. The Android Assets tab imports files into the current note's asset folder when a note is selected, otherwise into `assets/`.
 
 The settings JSON keeps the desktop-compatible subset used by the Android app:
 
@@ -52,6 +53,16 @@ The settings JSON keeps the desktop-compatible subset used by the Android app:
 - `gdrive.folder_name`
 - `gdrive.selected_snapshot_id`
 - `gdrive.snapshots`
+
+## Assets Tab
+
+The Assets tab lists files that are eligible for Firebase asset sync. Actions include:
+
+- `Import asset`: choose a file from Android's document picker and copy it into app-private managed asset storage.
+- `Refresh`: reload the managed asset list.
+- Tap an asset and choose `Delete` to remove it locally and push a Firebase tombstone when Firebase is configured.
+
+Assets larger than 1 MiB can be imported locally, but Firebase asset push skips them.
 
 ## Google Drive Setup
 
