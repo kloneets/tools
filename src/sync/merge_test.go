@@ -81,16 +81,31 @@ func TestMergeTodosTombstonePreventsResurrection(t *testing.T) {
 
 func TestSharedWorkspaceSettingsKeepsUILocal(t *testing.T) {
 	got := SharedWorkspaceSettings(map[string]any{
-		"pages_app": map[string]any{"first_book": 10},
-		"notes_app": map[string]any{"preview_hidden": true},
-		"ui":        map[string]any{"theme": "gruvbox"},
+		"pages_app":    map[string]any{"first_book": 10},
+		"password_app": map[string]any{"symbol_count": 20},
+		"notes_app": map[string]any{
+			"preview_hidden":    true,
+			"current_note_path": "private.md",
+			"open_note_paths":   []any{"private.md"},
+		},
+		"ui": map[string]any{"theme": "gruvbox"},
 	})
 
 	if _, ok := got["pages_app"]; !ok {
 		t.Fatal("pages_app missing from shared settings")
 	}
-	if _, ok := got["notes_app"]; ok {
-		t.Fatal("notes_app should stay local by default")
+	if _, ok := got["password_app"]; !ok {
+		t.Fatal("password_app missing from shared settings")
+	}
+	notes, ok := got["notes_app"].(map[string]any)
+	if !ok {
+		t.Fatal("shared notes_app missing")
+	}
+	if _, ok := notes["preview_hidden"]; !ok {
+		t.Fatal("notes_app preview_hidden missing from shared settings")
+	}
+	if _, ok := notes["current_note_path"]; ok {
+		t.Fatal("current_note_path should stay local")
 	}
 	if _, ok := got["ui"]; ok {
 		t.Fatal("ui should stay local")

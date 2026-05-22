@@ -9,6 +9,7 @@ import (
 
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/notes"
+	"github.com/kloneets/tools/src/settings"
 	kokosync "github.com/kloneets/tools/src/sync"
 	"github.com/kloneets/tools/src/todo"
 )
@@ -105,6 +106,39 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	noteSyncer := kokosync.NoteSyncer{Provider: provider, WorkspaceID: workspaceID, StatePath: kokosync.StatePath(), Session: session}
+	app := &terminalApp{}
+	noteFiles, err := app.localNoteFiles()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := noteSyncer.PushNotes(context.Background(), noteFiles); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	assetSyncer := kokosync.AssetSyncer{Provider: provider, WorkspaceID: workspaceID, StatePath: kokosync.StatePath(), Session: session}
+	assetFiles, err := app.localAssetFiles()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	assetResult, err := assetSyncer.PushAssets(context.Background(), assetFiles)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	settings.Init()
+	settingsSyncer := kokosync.SettingsSyncer{Provider: provider, WorkspaceID: workspaceID, StatePath: kokosync.StatePath(), Session: session}
+	settingsMap, err := currentSettingsMap()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := settingsSyncer.PushSettings(context.Background(), settingsMap); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	cfg.Enabled = true
 	cfg.Realtime = true
 	cfg.APIKey = apiKey
@@ -115,7 +149,11 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "pushed %d local todo(s) to %s\n", len(store.Items), workspaceID)
+	fmt.Fprintf(stdout, "pushed %d todo(s), %d note(s), %d asset(s), and shared settings to %s", len(store.Items), len(noteFiles), assetResult.Pushed, workspaceID)
+	if len(assetResult.Skipped) > 0 {
+		fmt.Fprintf(stdout, " (skipped %d oversized asset(s))", len(assetResult.Skipped))
+	}
+	fmt.Fprintln(stdout)
 	return 0
 }
 
@@ -179,9 +217,11 @@ func runFirebaseMigrateCLI(args []string, stdout io.Writer, stderr io.Writer) in
 	}
 	fmt.Fprintf(
 		stdout,
-		"migrated %d note(s) and %d todo(s) from %s to %s\n",
+		"migrated %d note(s), %d todo(s), %d asset(s), and %d shared settings record(s) from %s to %s\n",
 		result.Notes,
 		result.Todos,
+		result.Assets,
+		result.Settings,
 		result.SourceWorkspaceID,
 		result.TargetWorkspaceID,
 	)

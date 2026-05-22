@@ -19,6 +19,8 @@ type State struct {
 	DeviceID       string           `json:"device_id"`
 	Notes          map[string]int64 `json:"notes"`
 	Todos          map[string]int64 `json:"todos"`
+	Assets         map[string]int64 `json:"assets,omitempty"`
+	SettingsRev    int64            `json:"settings_rev,omitempty"`
 }
 
 type TokenFile struct {
@@ -101,6 +103,7 @@ func defaultState() State {
 		DeviceID: randomDeviceID(),
 		Notes:    map[string]int64{},
 		Todos:    map[string]int64{},
+		Assets:   map[string]int64{},
 	}
 }
 
@@ -116,6 +119,9 @@ func normalizeState(state *State) {
 	}
 	if state.Todos == nil {
 		state.Todos = map[string]int64{}
+	}
+	if state.Assets == nil {
+		state.Assets = map[string]int64{}
 	}
 }
 

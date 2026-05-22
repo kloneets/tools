@@ -14,6 +14,7 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -45,6 +46,19 @@ data class FirebasePullResult(
     val remoteNotes: List<FirebaseRemoteNote>,
     val remoteTodoCount: Int,
     val remoteNoteCount: Int,
+)
+
+data class FirebaseRemoteAsset(
+    val id: String,
+    val path: String,
+    val bytes: ByteArray,
+    val rev: Long,
+    val deleted: Boolean,
+)
+
+data class FirebaseSharedSettings(
+    val values: JSONObject,
+    val rev: Long,
 )
 
 class FirebaseSyncRepository(private val context: Context) {
@@ -243,6 +257,96 @@ class FirebaseSyncRepository(private val context: Context) {
         return TodoStore(items = sortedTodos(pullRemoteTodos(settings, session).filterNot { it.deleted }.map { it.item }))
     }
 
+    fun pushSharedSettings(settings: FirebaseSettings, appSettings: AppSettings, session: FirebaseSession) {
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+        val rev = System.currentTimeMillis()
+        val record = JSONObject()
+            .put("values", SettingsRepository.sharedSettingsJson(appSettings))
+            .put("rev", rev)
+            .put("updated_at", TodoRepository.formatTime(now))
+            .put("updated_by", session.uid)
+        putDatabase(settings, "workspaces/${settings.workspaceId}/settings/shared", record, session.idToken)
+        putDatabase(
+            settings,
+            "workspaces/${settings.workspaceId}/events/android-settings-$rev",
+            JSONObject()
+                .put("device_id", "android")
+                .put("created_at", TodoRepository.formatTime(now))
+                .put("kind", "settings_push"),
+            session.idToken,
+        )
+    }
+
+    fun pullSharedSettings(settings: FirebaseSettings, session: FirebaseSession): FirebaseSharedSettings? {
+        val record = getDatabase(settings, "workspaces/${settings.workspaceId}/settings/shared", session.idToken) ?: return null
+        val values = record.optJSONObject("values") ?: return null
+        return FirebaseSharedSettings(values = values, rev = record.optLong("rev", 0L))
+    }
+
+    fun pushAssets(settings: FirebaseSettings, assets: List<LocalAssetFile>, session: FirebaseSession): Int {
+        var pushed = 0
+        assets.forEach { asset ->
+            if (asset.bytes.size > MAX_ASSET_BYTES) return@forEach
+            val path = NotesRepository.normalizeAssetPath(asset.relativePath)
+            if (path.isBlank()) return@forEach
+            val id = assetId(path)
+            val rev = maxOf(asset.lastModified, System.currentTimeMillis())
+            val record = JSONObject()
+                .put("id", id)
+                .put("path", path)
+                .put("bytes_base64", Base64.encodeToString(asset.bytes, Base64.NO_WRAP))
+                .put("sha256", sha256(asset.bytes))
+                .put("mime", mimeType(path))
+                .put("rev", rev)
+                .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+                .put("updated_by", session.uid)
+                .put("deleted", false)
+            putDatabase(settings, "workspaces/${settings.workspaceId}/assets/$id", record, session.idToken)
+            pushed++
+        }
+        return pushed
+    }
+
+    fun pushAssetDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
+        val normalized = NotesRepository.normalizeAssetPath(path)
+        if (normalized.isBlank()) return
+        val id = assetId(normalized)
+        val rev = System.currentTimeMillis()
+        val record = JSONObject()
+            .put("id", id)
+            .put("path", normalized)
+            .put("rev", rev)
+            .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
+            .put("updated_by", session.uid)
+            .put("deleted", true)
+        putDatabase(settings, "workspaces/${settings.workspaceId}/assets/$id", record, session.idToken)
+    }
+
+
+    fun pullAssets(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteAsset> {
+        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/assets", session.idToken) ?: return emptyList()
+        val assets = mutableListOf<FirebaseRemoteAsset>()
+        remote.keys().forEach { id ->
+            val record = remote.optJSONObject(id) ?: return@forEach
+            val path = NotesRepository.normalizeAssetPath(record.optString("path", ""))
+            if (path.isBlank()) return@forEach
+            val deleted = record.optBoolean("deleted", false)
+            val bytes = if (deleted) ByteArray(0) else runCatching {
+                Base64.decode(record.optString("bytes_base64", ""), Base64.NO_WRAP)
+            }.getOrDefault(ByteArray(0))
+            if (!deleted && (bytes.isEmpty() || bytes.size > MAX_ASSET_BYTES)) return@forEach
+            if (!deleted && record.optString("sha256", "").isNotBlank() && record.optString("sha256") != sha256(bytes)) return@forEach
+            assets += FirebaseRemoteAsset(
+                id = record.optString("id", id),
+                path = path,
+                bytes = bytes,
+                rev = record.optLong("rev", 0L),
+                deleted = deleted,
+            )
+        }
+        return assets.sortedBy { it.path.lowercase() }
+    }
+
     private fun pullRemoteTodos(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteTodo> {
         val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todos", session.idToken)
         val records = mutableListOf<FirebaseRemoteTodo>()
@@ -323,8 +427,29 @@ class FirebaseSyncRepository(private val context: Context) {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
+    private fun assetId(path: String): String = noteId(NotesRepository.normalizeAssetPath(path))
+
+    private fun sha256(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun mimeType(path: String): String {
+        return when (path.substringAfterLast('.', "").lowercase(Locale.US)) {
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "svg" -> "image/svg+xml"
+            "pdf" -> "application/pdf"
+            "txt" -> "text/plain"
+            else -> "application/octet-stream"
+        }
+    }
+
     companion object {
         const val TOKEN_FILE = "firebase_token.json"
+        const val MAX_ASSET_BYTES = 1 * 1024 * 1024
 
         fun personalWorkspaceId(uid: String): String = "user_$uid"
     }

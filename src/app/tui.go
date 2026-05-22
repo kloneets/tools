@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -48,77 +49,79 @@ const manualSyncTimeout = 20 * time.Second
 const recorderDuration = 5 * time.Second
 
 type terminalApp struct {
-	view               view
-	ctx                context.Context
-	notes              *notes.Workspace
-	pages              *pages.Model
-	password           *password.Model
-	todos              *todo.Repository
-	todoStore          todo.Store
-	todoIndex          int
-	todoInputMode      string
-	todoInputBuffer    string
-	todoEditID         string
-	todoDirty          bool
-	status             string
-	width              int
-	height             int
-	settingIndex       int
-	syncIndex          int
-	tui                *tview.Application
-	header             *tview.TextView
-	help               *tview.TextView
-	statusBar          *tview.TextView
-	body               *tview.Flex
-	pagesRoot          *tview.Pages
-	sidebar            *tview.TextView
-	editor             *tview.TextView
-	preview            *tview.TextView
-	commandBar         *tview.TextView
-	single             *tview.TextView
-	helpOverlay        *tview.TextView
-	quitModal          *tview.Modal
-	discardFilesModal  *tview.Modal
-	deleteNoteModal    *tview.Modal
-	deleteNoteFolder   bool
-	openLinksModal     *tview.Modal
-	root               *tview.Flex
-	lastStatus         string
-	tabSelect          bool
-	showHelp           bool
-	helpSearchMode     bool
-	helpSearchQuery    string
-	helpSearchIndex    int
-	shuttingDown       bool
-	settingsDirty      bool
-	settingsEditMode   bool
-	settingsEditBuffer string
-	tabOrderEditMode   bool
-	tabOrderIndex      int
-	syncInProgress     bool
-	syncProgressLabel  string
-	syncOpID           atomic.Int64
-	syncSpinnerTick    atomic.Int64
-	syncTimeout        time.Duration
-	firebaseTodoSyncer *kokosync.TodoSyncer
-	firebaseNoteSyncer *kokosync.NoteSyncer
-	openLinks          []string
-	deleteNotePath     string
-	deleteNoteLabel    string
-	recorderVisible    bool
-	recorderCapturing  bool
-	recorderStartedAt  time.Time
-	recorderEndsAt     time.Time
-	recorderEvents     []recordedKeyEvent
-	recorderLastEvent  recordedKeyEvent
-	recorderCaptureID  atomic.Int64
-	notesMouseDragging bool
-	notesMouseMoved    bool
-	notesMouseStartRow int
-	notesMouseStartCol int
-	inputSeqMu         sync.Mutex
-	inputSeq           string
-	inputSeqTimer      *time.Timer
+	view                   view
+	ctx                    context.Context
+	notes                  *notes.Workspace
+	pages                  *pages.Model
+	password               *password.Model
+	todos                  *todo.Repository
+	todoStore              todo.Store
+	todoIndex              int
+	todoInputMode          string
+	todoInputBuffer        string
+	todoEditID             string
+	todoDirty              bool
+	status                 string
+	width                  int
+	height                 int
+	settingIndex           int
+	syncIndex              int
+	tui                    *tview.Application
+	header                 *tview.TextView
+	help                   *tview.TextView
+	statusBar              *tview.TextView
+	body                   *tview.Flex
+	pagesRoot              *tview.Pages
+	sidebar                *tview.TextView
+	editor                 *tview.TextView
+	preview                *tview.TextView
+	commandBar             *tview.TextView
+	single                 *tview.TextView
+	helpOverlay            *tview.TextView
+	quitModal              *tview.Modal
+	discardFilesModal      *tview.Modal
+	deleteNoteModal        *tview.Modal
+	deleteNoteFolder       bool
+	openLinksModal         *tview.Modal
+	root                   *tview.Flex
+	lastStatus             string
+	tabSelect              bool
+	showHelp               bool
+	helpSearchMode         bool
+	helpSearchQuery        string
+	helpSearchIndex        int
+	shuttingDown           bool
+	settingsDirty          bool
+	settingsEditMode       bool
+	settingsEditBuffer     string
+	tabOrderEditMode       bool
+	tabOrderIndex          int
+	syncInProgress         bool
+	syncProgressLabel      string
+	syncOpID               atomic.Int64
+	syncSpinnerTick        atomic.Int64
+	syncTimeout            time.Duration
+	firebaseTodoSyncer     *kokosync.TodoSyncer
+	firebaseNoteSyncer     *kokosync.NoteSyncer
+	firebaseSettingsSyncer *kokosync.SettingsSyncer
+	firebaseAssetSyncer    *kokosync.AssetSyncer
+	openLinks              []string
+	deleteNotePath         string
+	deleteNoteLabel        string
+	recorderVisible        bool
+	recorderCapturing      bool
+	recorderStartedAt      time.Time
+	recorderEndsAt         time.Time
+	recorderEvents         []recordedKeyEvent
+	recorderLastEvent      recordedKeyEvent
+	recorderCaptureID      atomic.Int64
+	notesMouseDragging     bool
+	notesMouseMoved        bool
+	notesMouseStartRow     int
+	notesMouseStartCol     int
+	inputSeqMu             sync.Mutex
+	inputSeq               string
+	inputSeqTimer          *time.Timer
 }
 
 type appTab struct {
@@ -2012,6 +2015,42 @@ func (a *terminalApp) syncItems() []actionItem {
 				helpers.StatusBarInst().UpdateStatusBar("Firebase notes push failed: " + err.Error())
 			})
 		}},
+		{Label: "pull settings from firebase", Apply: func() {
+			a.startSyncOperation("pull settings from firebase", func() error {
+				return a.pullSettingsFromFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase settings pulled")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase settings pull failed: " + err.Error())
+			})
+		}},
+		{Label: "push settings to firebase", Apply: func() {
+			a.startSyncOperation("push settings to firebase", func() error {
+				return a.pushSettingsToFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase settings pushed")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase settings push failed: " + err.Error())
+			})
+		}},
+		{Label: "pull assets from firebase", Apply: func() {
+			a.startSyncOperation("pull assets from firebase", func() error {
+				return a.pullAssetsFromFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase assets pulled")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase assets pull failed: " + err.Error())
+			})
+		}},
+		{Label: "push assets to firebase", Apply: func() {
+			a.startSyncOperation("push assets to firebase", func() error {
+				return a.pushAssetsToFirebase(context.Background())
+			}, func() {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase assets pushed")
+			}, func(err error) {
+				helpers.StatusBarInst().UpdateStatusBar("Firebase assets push failed: " + err.Error())
+			})
+		}},
 		{Label: "legacy drive manual backup", Apply: func() {
 			helpers.StatusBarInst().UpdateStatusBar("Google Drive is legacy manual snapshot backup")
 		}},
@@ -3253,6 +3292,8 @@ func (a *terminalApp) saveLocalState() error {
 	a.todoDirty = false
 	a.pushTodosToFirebaseSoon()
 	a.pushNotesToFirebaseSoon()
+	a.pushSettingsToFirebaseSoon()
+	a.pushAssetsToFirebaseSoon()
 	return nil
 }
 
@@ -3265,6 +3306,8 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 	}
 	go func() {
 		_ = a.pushNotesToFirebase(ctx)
+		_ = a.pushSettingsToFirebase(ctx)
+		_ = a.pushAssetsToFirebase(ctx)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -3274,6 +3317,8 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 			case <-ticker.C:
 				_ = a.pullTodosFromFirebase(ctx)
 				_ = a.pullNotesFromFirebase(ctx)
+				_ = a.pullSettingsFromFirebase(ctx)
+				_ = a.pullAssetsFromFirebase(ctx)
 			}
 		}
 	}()
@@ -3316,6 +3361,20 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 		DeviceID:    "",
 	}
 	a.firebaseNoteSyncer = &kokosync.NoteSyncer{
+		Provider:    provider,
+		WorkspaceID: workspaceID,
+		StatePath:   kokosync.StatePath(),
+		Session:     session,
+		DeviceID:    "",
+	}
+	a.firebaseSettingsSyncer = &kokosync.SettingsSyncer{
+		Provider:    provider,
+		WorkspaceID: workspaceID,
+		StatePath:   kokosync.StatePath(),
+		Session:     session,
+		DeviceID:    "",
+	}
+	a.firebaseAssetSyncer = &kokosync.AssetSyncer{
 		Provider:    provider,
 		WorkspaceID: workspaceID,
 		StatePath:   kokosync.StatePath(),
@@ -3547,6 +3606,189 @@ func (a *terminalApp) pushNoteDeleteToFirebaseSoon(absPath string) {
 	}()
 }
 
+func (a *terminalApp) pushSettingsToFirebaseSoon() {
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		return
+	}
+	go func() {
+		_ = a.pushSettingsToFirebase(context.Background())
+	}()
+}
+
+func (a *terminalApp) pushSettingsToFirebase(ctx context.Context) error {
+	if a.firebaseSettingsSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.firebaseSettingsSyncer == nil || !a.firebaseSettingsSyncer.Ready() {
+		return nil
+	}
+	values, err := currentSettingsMap()
+	if err != nil {
+		return err
+	}
+	if err := a.firebaseSettingsSyncer.PushSettings(ctx, values); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase settings pushed"
+		settings.SaveSettingsLocal()
+	}
+	return nil
+}
+
+func (a *terminalApp) pullSettingsFromFirebase(ctx context.Context) error {
+	if a.firebaseSettingsSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.firebaseSettingsSyncer == nil || !a.firebaseSettingsSyncer.Ready() {
+		return nil
+	}
+	if a.deferRemoteSettingsApply() {
+		if settings.Inst().Firebase != nil {
+			settings.Inst().Firebase.LastSyncStatus = "deferred"
+			settings.Inst().Firebase.LastSyncMessage = "Firebase settings pull deferred while local edits are active"
+			settings.SaveSettingsLocal()
+		}
+		return nil
+	}
+	result, err := a.firebaseSettingsSyncer.PullSettings(ctx)
+	if err != nil || !result.Changed {
+		return err
+	}
+	local, err := currentSettingsMap()
+	if err != nil {
+		return err
+	}
+	if err := applySettingsMap(kokosync.ApplySharedWorkspaceSettings(local, result.Values)); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase settings pulled"
+		settings.SaveSettingsLocal()
+	}
+	a.queueUIDraw(func() {
+		if a.pages != nil && !a.viewDirty(viewPages) {
+			a.pages = pages.NewModel()
+		}
+		if a.password != nil && !a.viewDirty(viewPassword) {
+			a.password = password.NewModel()
+		}
+		if a.notes != nil && !a.viewDirty(viewNotes) && !a.viewDirty(viewFiles) {
+			a.notes.Refresh()
+		}
+		a.refresh()
+	})
+	return nil
+}
+
+func (a *terminalApp) deferRemoteSettingsApply() bool {
+	if a == nil {
+		return false
+	}
+	return a.hasUnsavedChanges()
+}
+
+func (a *terminalApp) pushAssetsToFirebaseSoon() {
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		return
+	}
+	go func() {
+		_ = a.pushAssetsToFirebase(context.Background())
+	}()
+}
+
+func (a *terminalApp) pushAssetsToFirebase(ctx context.Context) error {
+	if a.firebaseAssetSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.firebaseAssetSyncer == nil || !a.firebaseAssetSyncer.Ready() {
+		return nil
+	}
+	assets, err := a.localAssetFiles()
+	if err != nil {
+		return err
+	}
+	result, err := a.firebaseAssetSyncer.PushAssets(ctx, assets)
+	if err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = fmt.Sprintf("Firebase assets pushed: %d", result.Pushed)
+		if len(result.Skipped) > 0 {
+			settings.Inst().Firebase.LastSyncMessage += fmt.Sprintf(", skipped %d oversized", len(result.Skipped))
+		}
+		settings.SaveSettingsLocal()
+	}
+	return nil
+}
+
+func (a *terminalApp) pullAssetsFromFirebase(ctx context.Context) error {
+	if a.firebaseAssetSyncer == nil {
+		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
+			return err
+		}
+	}
+	if a.firebaseAssetSyncer == nil || !a.firebaseAssetSyncer.Ready() {
+		return nil
+	}
+	if a.notes != nil && a.notes.FilesDirty {
+		if settings.Inst().Firebase != nil {
+			settings.Inst().Firebase.LastSyncStatus = "deferred"
+			settings.Inst().Firebase.LastSyncMessage = "Firebase assets pull deferred while local file edits are active"
+			settings.SaveSettingsLocal()
+		}
+		return nil
+	}
+	result, err := a.firebaseAssetSyncer.PullAssets(ctx)
+	if err != nil || !result.Changed {
+		return err
+	}
+	for _, rel := range result.Deletes {
+		if err := os.Remove(a.assetAbsPath(rel)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	for _, asset := range result.Upserts {
+		path := a.assetAbsPath(asset.Path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, asset.Bytes, 0o644); err != nil {
+			return err
+		}
+	}
+	if err := a.firebaseAssetSyncer.SaveState(result.State); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase assets pulled"
+		settings.SaveSettingsLocal()
+	}
+	a.queueUIDraw(func() {
+		if a.notes != nil {
+			a.notes.Refresh()
+		}
+		a.refresh()
+	})
+	return nil
+}
+
 func (a *terminalApp) localNoteFiles() ([]kokosync.NoteFile, error) {
 	root := a.notesRootPath()
 	files := make([]kokosync.NoteFile, 0)
@@ -3602,6 +3844,53 @@ func (a *terminalApp) localNoteMap() (map[string]kokosync.LocalNote, error) {
 		}
 	}
 	return out, nil
+}
+
+func (a *terminalApp) localAssetFiles() ([]kokosync.LocalAsset, error) {
+	root := a.notesRootPath()
+	assets := make([]kokosync.LocalAsset, 0)
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel := kokosync.NormalizeAssetPath(a.noteRelPath(path))
+		if rel == "" || settings.IsTrashRelativePath(rel) || !isManagedAssetRel(rel) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		assets = append(assets, kokosync.LocalAsset{ID: kokosync.AssetID(rel), Path: rel, Bytes: data, ModTime: info.ModTime()})
+		return nil
+	}); err != nil {
+		if os.IsNotExist(err) {
+			return assets, nil
+		}
+		return nil, err
+	}
+	sort.SliceStable(assets, func(i, j int) bool { return assets[i].Path < assets[j].Path })
+	return assets, nil
+}
+
+func (a *terminalApp) assetAbsPath(rel string) string {
+	return filepath.Join(a.notesRootPath(), filepath.FromSlash(kokosync.NormalizeAssetPath(rel)))
+}
+
+func isManagedAssetRel(rel string) bool {
+	for _, part := range strings.Split(kokosync.NormalizeAssetPath(rel), "/") {
+		if part == "assets" || strings.HasSuffix(part, ".assets") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *terminalApp) updateOpenCleanNote(rel string, text string) {
@@ -3662,6 +3951,32 @@ func (a *terminalApp) noteRelPath(path string) string {
 
 func (a *terminalApp) noteAbsPath(rel string) string {
 	return filepath.Join(a.notesRootPath(), filepath.FromSlash(kokosync.NormalizeNotePath(rel)))
+}
+
+func currentSettingsMap() (map[string]any, error) {
+	data, err := json.Marshal(settings.Inst())
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func applySettingsMap(values map[string]any) error {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	var next settings.UserSettings
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	*settings.Inst() = next
+	settings.SaveSettingsLocal()
+	return nil
 }
 
 func firebaseEnabled(cfg *settings.FirebaseSettings, fileCfg kokosync.FirebaseConfig) bool {

@@ -164,6 +164,46 @@ class SettingsRepository(private val context: Context) {
             return root
         }
 
+        fun sharedSettingsJson(settings: AppSettings): JSONObject {
+            val root = toJson(settings)
+            val shared = JSONObject()
+            root.optJSONObject("pages_app")?.let { shared.put("pages_app", JSONObject(it.toString())) }
+            root.optJSONObject("password_app")?.let { shared.put("password_app", JSONObject(it.toString())) }
+            root.optJSONObject("notes_app")?.let { notes ->
+                shared.put(
+                    "notes_app",
+                    JSONObject()
+                        .copyIfPresent(notes, "tab_spaces")
+                        .copyIfPresent(notes, "undo_levels")
+                        .copyIfPresent(notes, "preview_hidden")
+                        .copyIfPresent(notes, "vim_mode")
+                        .copyIfPresent(notes, "spell_check_enabled")
+                        .copyIfPresent(notes, "spell_dictionaries"),
+                )
+            }
+            return shared
+        }
+
+        fun applySharedSettings(settings: AppSettings, shared: JSONObject): AppSettings {
+            val root = toJson(settings)
+            shared.optJSONObject("pages_app")?.let { root.put("pages_app", JSONObject(it.toString())) }
+            shared.optJSONObject("password_app")?.let { root.put("password_app", JSONObject(it.toString())) }
+            shared.optJSONObject("notes_app")?.let { remote ->
+                val notes = root.objectOrPut("notes_app")
+                listOf(
+                    "tab_spaces",
+                    "undo_levels",
+                    "preview_hidden",
+                    "vim_mode",
+                    "spell_check_enabled",
+                    "spell_dictionaries",
+                ).forEach { key ->
+                    if (remote.has(key)) notes.put(key, remote.get(key))
+                }
+            }
+            return parse(root.toString())
+        }
+
         private fun parseSnapshots(snapshots: JSONArray): List<DriveSnapshotMeta> {
             return (0 until snapshots.length()).mapNotNull { index ->
                 snapshots.optJSONObject(index)?.let {
@@ -280,6 +320,13 @@ class SettingsRepository(private val context: Context) {
             if (!has(name) || isNull(name)) {
                 put(name, value)
             }
+        }
+
+        private fun JSONObject.copyIfPresent(source: JSONObject, name: String): JSONObject {
+            if (source.has(name) && !source.isNull(name)) {
+                put(name, source.get(name))
+            }
+            return this
         }
     }
 }

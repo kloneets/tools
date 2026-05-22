@@ -131,6 +131,8 @@ type MigrationResult struct {
 	TargetWorkspaceID string
 	Notes             int
 	Todos             int
+	Assets            int
+	Settings          int
 }
 
 func (p *FirebaseRESTProvider) MigrateWorkspaceToPersonal(ctx context.Context, sourceWorkspaceID string, session Session) (MigrationResult, error) {
@@ -177,6 +179,26 @@ func (p *FirebaseRESTProvider) MigrateWorkspaceToPersonal(ctx context.Context, s
 		}
 		result.Todos++
 	}
+	for id, asset := range snapshot.Assets {
+		if asset.ID == "" {
+			asset.ID = id
+		}
+		if asset.UpdatedAt.IsZero() {
+			asset.UpdatedAt = time.Now().UTC()
+		}
+		asset.UpdatedBy = session.UID
+		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/assets/%s", url.PathEscape(targetWorkspaceID), url.PathEscape(asset.ID)), asset, nil); err != nil {
+			return result, err
+		}
+		result.Assets++
+	}
+	if record, ok := sharedSettingsFromSnapshot(snapshot.Settings); ok {
+		record.UpdatedBy = session.UID
+		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/settings/shared", url.PathEscape(targetWorkspaceID)), record, nil); err != nil {
+			return result, err
+		}
+		result.Settings = 1
+	}
 	event := map[string]any{
 		"device_id":  "desktop",
 		"created_at": time.Now().UTC().Format(time.RFC3339),
@@ -213,6 +235,8 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 			mutation.Kind = "todo_push"
 		case mutation.Settings != nil:
 			mutation.Kind = "settings_push"
+		case mutation.Asset != nil:
+			mutation.Kind = "asset_push"
 		default:
 			mutation.Kind = "sync"
 		}
@@ -230,8 +254,14 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 		}
 	}
 	if mutation.Settings != nil {
-		path := fmt.Sprintf("workspaces/%s/settings/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.DeviceID))
+		path := fmt.Sprintf("workspaces/%s/settings/shared", url.PathEscape(workspaceID))
 		if err := p.putRTDB(ctx, path, mutation.Settings, nil); err != nil {
+			return err
+		}
+	}
+	if mutation.Asset != nil {
+		path := fmt.Sprintf("workspaces/%s/assets/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Asset.ID))
+		if err := p.putRTDB(ctx, path, mutation.Asset, nil); err != nil {
 			return err
 		}
 	}
@@ -243,6 +273,22 @@ func (p *FirebaseRESTProvider) PullSnapshot(ctx context.Context, workspaceID str
 	var snapshot Snapshot
 	err := p.getRTDB(ctx, "workspaces/"+url.PathEscape(workspaceID), &snapshot)
 	return snapshot, err
+}
+
+func sharedSettingsFromSnapshot(settings map[string]any) (SharedSettingsRecord, bool) {
+	raw, ok := settings["shared"]
+	if !ok {
+		return SharedSettingsRecord{}, false
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return SharedSettingsRecord{}, false
+	}
+	var record SharedSettingsRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return SharedSettingsRecord{}, false
+	}
+	return record, record.Values != nil
 }
 
 func (p *FirebaseRESTProvider) CreateWorkspace(ctx context.Context, name string) (WorkspaceMeta, error) {

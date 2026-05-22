@@ -63,22 +63,43 @@ type TodoRecord struct {
 	Deleted   bool      `json:"deleted"`
 }
 
+type SharedSettingsRecord struct {
+	Values    map[string]any `json:"values"`
+	Rev       int64          `json:"rev"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	UpdatedBy string         `json:"updated_by"`
+}
+
+type AssetRecord struct {
+	ID          string    `json:"id"`
+	Path        string    `json:"path"`
+	BytesBase64 string    `json:"bytes_base64,omitempty"`
+	SHA256      string    `json:"sha256,omitempty"`
+	MIME        string    `json:"mime,omitempty"`
+	Rev         int64     `json:"rev"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	UpdatedBy   string    `json:"updated_by"`
+	Deleted     bool      `json:"deleted"`
+}
+
 type Snapshot struct {
-	Meta     WorkspaceMeta         `json:"meta"`
-	Members  map[string]Member     `json:"members"`
-	Notes    map[string]NoteRecord `json:"notes"`
-	Todos    map[string]TodoRecord `json:"todos"`
-	Settings map[string]any        `json:"settings"`
+	Meta     WorkspaceMeta          `json:"meta"`
+	Members  map[string]Member      `json:"members"`
+	Notes    map[string]NoteRecord  `json:"notes"`
+	Todos    map[string]TodoRecord  `json:"todos"`
+	Settings map[string]any         `json:"settings"`
+	Assets   map[string]AssetRecord `json:"assets"`
 }
 
 type Mutation struct {
-	EventID   string         `json:"event_id"`
-	DeviceID  string         `json:"device_id"`
-	Kind      string         `json:"kind"`
-	Note      *NoteRecord    `json:"note,omitempty"`
-	Todo      *TodoRecord    `json:"todo,omitempty"`
-	Settings  map[string]any `json:"settings,omitempty"`
-	CreatedAt time.Time      `json:"created_at"`
+	EventID   string                `json:"event_id"`
+	DeviceID  string                `json:"device_id"`
+	Kind      string                `json:"kind"`
+	Note      *NoteRecord           `json:"note,omitempty"`
+	Todo      *TodoRecord           `json:"todo,omitempty"`
+	Settings  *SharedSettingsRecord `json:"settings,omitempty"`
+	Asset     *AssetRecord          `json:"asset,omitempty"`
+	CreatedAt time.Time             `json:"created_at"`
 }
 
 type Change struct {

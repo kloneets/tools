@@ -108,12 +108,51 @@ func MergeTodos(local todo.Store, remote map[string]TodoRecord) todo.Store {
 
 func SharedWorkspaceSettings(settings map[string]any) map[string]any {
 	shared := map[string]any{}
-	for _, key := range []string{"pages_app"} {
+	for _, key := range []string{"pages_app", "password_app"} {
 		if value, ok := settings[key]; ok {
 			shared[key] = value
 		}
 	}
+	if value, ok := settings["notes_app"].(map[string]any); ok {
+		notes := map[string]any{}
+		for _, key := range []string{"tab_spaces", "undo_levels", "preview_hidden", "vim_mode", "spell_check_enabled", "spell_dictionaries"} {
+			if field, ok := value[key]; ok {
+				notes[key] = field
+			}
+		}
+		if len(notes) > 0 {
+			shared["notes_app"] = notes
+		}
+	}
 	return shared
+}
+
+func ApplySharedWorkspaceSettings(local map[string]any, shared map[string]any) map[string]any {
+	out := cloneMap(local)
+	for _, key := range []string{"pages_app", "password_app"} {
+		if value, ok := shared[key]; ok {
+			out[key] = value
+		}
+	}
+	if value, ok := shared["notes_app"].(map[string]any); ok {
+		notes, _ := out["notes_app"].(map[string]any)
+		next := cloneMap(notes)
+		for _, key := range []string{"tab_spaces", "undo_levels", "preview_hidden", "vim_mode", "spell_check_enabled", "spell_dictionaries"} {
+			if field, ok := value[key]; ok {
+				next[key] = field
+			}
+		}
+		out["notes_app"] = next
+	}
+	return out
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func conflictCopy(local LocalNote, deviceID string, now time.Time) *LocalNote {

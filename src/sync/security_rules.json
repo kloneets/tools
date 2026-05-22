@@ -32,7 +32,19 @@
           }
         },
         "settings": {
-          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')"
+          "shared": {
+            ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+            ".validate": "newData.hasChildren(['values', 'rev', 'updated_at', 'updated_by']) && newData.child('values').hasChildren() && newData.child('rev').isNumber() && newData.child('updated_at').isString() && newData.child('updated_by').val() == auth.uid"
+          },
+          "$other": {
+            ".write": false
+          }
+        },
+        "assets": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          "$asset": {
+            ".validate": "newData.hasChildren(['id', 'path', 'rev', 'updated_at', 'updated_by', 'deleted']) && newData.child('id').isString() && newData.child('path').isString() && newData.child('rev').isNumber() && newData.child('updated_at').isString() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean() && (newData.child('deleted').val() == true || (newData.hasChildren(['bytes_base64', 'sha256', 'mime']) && newData.child('bytes_base64').isString() && newData.child('sha256').isString() && newData.child('mime').isString()))"
+          }
         },
         "events": {
           ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",

@@ -230,6 +230,69 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun sharedSettingsExcludeLocalOnlyState() {
+        val settings = SettingsRepository.parse(
+            """
+            {
+              "pages_app": {"first_book": 10, "second_book": 20, "read_pages": 3},
+              "password_app": {"letters": false, "numbers": true, "special_symbols": false, "symbol_count": 12},
+              "notes_app": {
+                "tab_spaces": 2,
+                "undo_levels": 50,
+                "preview_hidden": true,
+                "current_note_path": "private.md",
+                "open_note_paths": ["private.md"],
+                "vim_mode": false,
+                "spell_check_enabled": true,
+                "spell_dictionaries": ["en"]
+              },
+              "android_app": {"theme_mode": "dark"},
+              "firebase": {"workspace_id": "user_1"}
+            }
+            """.trimIndent(),
+        )
+
+        val shared = SettingsRepository.sharedSettingsJson(settings)
+
+        assertEquals(10, shared.getJSONObject("pages_app").getInt("first_book"))
+        assertEquals(12, shared.getJSONObject("password_app").getInt("symbol_count"))
+        assertEquals(true, shared.getJSONObject("notes_app").getBoolean("preview_hidden"))
+        assertFalse(shared.getJSONObject("notes_app").has("current_note_path"))
+        assertFalse(shared.getJSONObject("notes_app").has("open_note_paths"))
+        assertFalse(shared.has("android_app"))
+        assertFalse(shared.has("firebase"))
+    }
+
+    @Test
+    fun applySharedSettingsPreservesLocalOnlyState() {
+        val local = SettingsRepository.parse(
+            """
+            {
+              "pages_app": {"first_book": 1, "second_book": 2, "read_pages": 3},
+              "notes_app": {"current_note_path": "local.md", "preview_hidden": false},
+              "android_app": {"theme_mode": "dark"}
+            }
+            """.trimIndent(),
+        )
+        val shared = org.json.JSONObject(
+            """
+            {
+              "pages_app": {"first_book": 99, "second_book": 2, "read_pages": 3},
+              "notes_app": {"preview_hidden": true, "spell_check_enabled": true}
+            }
+            """.trimIndent(),
+        )
+
+        val applied = SettingsRepository.applySharedSettings(local, shared)
+
+        assertEquals(99, applied.pagesApp.firstBook)
+        assertEquals("local.md", applied.notesApp.currentNotePath)
+        assertEquals(true, applied.notesApp.previewHidden)
+        assertEquals(true, applied.notesApp.spellCheckEnabled)
+        assertEquals(ThemeMode.Dark, applied.androidApp.themeMode)
+    }
+
+    @Test
     fun noteInputTypeUsesNativeSpellCheckWhenEnabled() {
         val inputType = NoteEditorInputTypes.forSpellCheck(enabled = true)
 

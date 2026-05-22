@@ -6,6 +6,7 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.Intent
 import android.content.IntentSender
+import android.net.Uri
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.Typeface
@@ -22,6 +23,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.provider.OpenableColumns
 import android.widget.BaseAdapter
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -77,6 +79,7 @@ class MainActivity : Activity() {
 
     private var noteListView: ListView? = null
     private var noteSelector: TextView? = null
+    private var assetListView: ListView? = null
     private var noteEditor: HybridMarkdownEditor? = null
     private var rawNoteEditor: EditText? = null
     private var rawNoteSpellChecker: AndroidSpellChecker? = null
@@ -103,6 +106,9 @@ class MainActivity : Activity() {
     private var syncRefreshButton: Button? = null
     private var todoRefreshRunnable: Runnable? = null
     private var firebasePullRunnable: Runnable? = null
+    private var firebaseSettingsPushRunnable: Runnable? = null
+    private var pagesLocalEditUntilMs = 0L
+    private var pagesLocalEditAtMs = 0L
     private var todoDraftText = ""
     private val pendingRemoteNotes = mutableMapOf<String, FirebaseRemoteNote>()
     private var todoMoveMode = false
@@ -128,6 +134,12 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == ASSET_IMPORT_REQUEST_CODE) {
+            if (resultCode == RESULT_OK && data?.data != null) {
+                handleImportedAsset(data.data!!)
+            }
+            return
+        }
         if (requestCode != DRIVE_AUTH_REQUEST_CODE) return
         driveAuthInProgress = false
         updateSyncButtons()
@@ -273,6 +285,10 @@ class MainActivity : Activity() {
                 hideNavigationDrawer()
                 showNotes()
             })
+            addView(drawerRow("Assets", R.id.tab_assets) {
+                hideNavigationDrawer()
+                showAssets()
+            })
             addView(drawerRow("Pages", R.id.tab_pages) {
                 hideNavigationDrawer()
                 showPages()
@@ -349,6 +365,7 @@ class MainActivity : Activity() {
     private fun showCurrentActionsMenu() {
         when (currentScreen) {
             Screen.Notes -> showNotesActionsMenu(actionsButton)
+            Screen.Assets -> showAssetsActionsMenu(actionsButton)
             Screen.Pages -> showPagesActionsMenu(actionsButton)
             Screen.Todo -> showTodoActionsMenu(actionsButton)
             Screen.Sync -> showSyncActionsMenu(actionsButton)
@@ -731,6 +748,132 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun showAssets() {
+        currentScreen = Screen.Assets
+        setScreenHeader("Assets", "Managed note files")
+        content.removeAllViews()
+        content.orientation = LinearLayout.VERTICAL
+        content.setPadding(dp(16), dp(16), dp(16), dp(16))
+
+        content.addView(commandButton("Import asset", R.id.asset_import) {
+            importAsset()
+        })
+        content.addView(commandButton("Refresh", R.id.asset_refresh) {
+            refreshAssets()
+        })
+        assetListView = ListView(this).apply {
+            id = R.id.asset_list
+            divider = null
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            ).apply {
+                topMargin = dp(10)
+            }
+        }
+        content.addView(assetListView)
+        refreshAssets()
+    }
+
+    private fun showAssetsActionsMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add("Import asset").setOnMenuItemClickListener {
+                importAsset()
+                true
+            }
+            menu.add("Refresh").setOnMenuItemClickListener {
+                refreshAssets()
+                true
+            }
+            menu.add("Open notes").setOnMenuItemClickListener {
+                showNotes()
+                true
+            }
+            show()
+        }
+    }
+
+    private fun refreshAssets() {
+        val assets = notesRepository.listAssets()
+        val labels = if (assets.isEmpty()) {
+            listOf("No managed assets yet")
+        } else {
+            assets.map { "${it.relativePath}\n${formatBytes(it.bytes.size)}" }
+        }
+        assetListView?.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
+        assetListView?.setOnItemClickListener { _, _, position, _ ->
+            if (assets.isEmpty()) return@setOnItemClickListener
+            showAssetOptions(assets[position])
+        }
+    }
+
+    private fun showAssetOptions(asset: LocalAssetFile) {
+        AlertDialog.Builder(this)
+            .setTitle(asset.relativePath)
+            .setMessage("${formatBytes(asset.bytes.size)}\nSynced as a managed note asset.")
+            .setPositiveButton("Delete") { _, _ ->
+                notesRepository.deleteAsset(asset.relativePath)
+                pushAssetDeleteToFirebase(asset.relativePath)
+                refreshAssets()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun importAsset() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(intent, ASSET_IMPORT_REQUEST_CODE)
+    }
+
+    private fun pushAssetDeleteToFirebase(path: String) {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase) ?: return@Thread
+            firebaseSession = session
+            runCatching {
+                firebaseSyncRepository.pushAssetDelete(settings.firebase, path, session)
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase asset delete failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun handleImportedAsset(uri: Uri) {
+        val name = displayNameForUri(uri)
+        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return
+        if (bytes.size > FirebaseSyncRepository.MAX_ASSET_BYTES) {
+            Toast.makeText(this, "Asset is larger than 1 MiB and will not sync", Toast.LENGTH_LONG).show()
+        }
+        val target = NotesRepository.managedAssetPathForNote(currentNotePath, name)
+        notesRepository.writeAsset(target, bytes)
+        pushSharedFirebaseData(pushSettings = false, pushAssets = true)
+        if (currentScreen == Screen.Assets) refreshAssets()
+        Toast.makeText(this, "Imported $target", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun displayNameForUri(uri: Uri): String {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) {
+                    val name = cursor.getString(index)
+                    if (!name.isNullOrBlank()) return name
+                }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { "asset" } ?: "asset"
+    }
+
+    private fun formatBytes(size: Int): String {
+        if (size < 1024) return "$size B"
+        if (size < 1024 * 1024) return "${size / 1024} KB"
+        return "${size / (1024 * 1024)} MB"
+    }
+
     private fun showPages() {
         currentScreen = Screen.Pages
         setScreenHeader("Pages", "Reading progress converter")
@@ -753,7 +896,7 @@ class MainActivity : Activity() {
         val watcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                recalculatePages()
+                recalculatePages(userEdit = true)
             }
             override fun afterTextChanged(s: Editable?) = Unit
         }
@@ -766,7 +909,7 @@ class MainActivity : Activity() {
     private fun showPagesActionsMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
             menu.add("Recalculate").setOnMenuItemClickListener {
-                recalculatePages()
+                recalculatePages(userEdit = true)
                 true
             }
             menu.add("Open notes").setOnMenuItemClickListener {
@@ -795,20 +938,26 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun recalculatePages() {
+    private fun recalculatePages(userEdit: Boolean = false) {
         val result = pagesCalculator.calculate(
             readInput?.text?.toString().orEmpty(),
             firstInput?.text?.toString().orEmpty(),
             secondInput?.text?.toString().orEmpty(),
         )
         resultText?.text = result.label
+        if (userEdit) {
+            pagesLocalEditAtMs = System.currentTimeMillis()
+            pagesLocalEditUntilMs = pagesLocalEditAtMs + 2_500L
+        }
+        val nextPages = PagesSettings(
+            firstBook = result.firstBookPages,
+            secondBook = result.secondBookPages,
+            readPages = result.readPages,
+        )
+        if (nextPages == settings.pagesApp) return
         persistSettings(
             settings.copy(
-                pagesApp = PagesSettings(
-                    firstBook = result.firstBookPages,
-                    secondBook = result.secondBookPages,
-                    readPages = result.readPages,
-                ),
+                pagesApp = nextPages,
             ),
         )
     }
@@ -1153,6 +1302,12 @@ class MainActivity : Activity() {
         content.addView(commandButton("Push todos now", View.generateViewId()) {
             pushTodosToFirebase()
         })
+        content.addView(commandButton("Pull settings and assets now", View.generateViewId()) {
+            pullSharedFirebaseData()
+        })
+        content.addView(commandButton("Push settings and assets now", View.generateViewId()) {
+            pushSharedFirebaseData()
+        })
         if (BuildConfig.DEBUG || !FirebaseDefaults.bundled.ready) {
             content.addView(commandButton("Advanced custom Firebase config", View.generateViewId()) {
                 promptFirebaseConfig()
@@ -1377,6 +1532,7 @@ class MainActivity : Activity() {
         buildRoot()
         when (currentScreen) {
             Screen.Notes -> showNotes()
+            Screen.Assets -> showAssets()
             Screen.Pages -> showPages()
             Screen.Todo -> showTodo()
             Screen.Sync -> showSync()
@@ -1414,6 +1570,7 @@ class MainActivity : Activity() {
     private fun persistSettings(next: AppSettings) {
         settings = next
         settingsRepository.save(settings)
+        scheduleSharedSettingsPush()
     }
 
     private fun startFirebaseRealtimeIfEnabled() {
@@ -1512,6 +1669,7 @@ class MainActivity : Activity() {
                             setSyncStatus("Firebase workspace: ${workspaceSettings.workspaceName}")
                             scheduleFirebasePull()
                             pullTodosFromFirebase()
+                            pushSharedFirebaseData()
                         }
                     }.onFailure { error ->
                         val label = if (register) "account creation" else "login"
@@ -1587,6 +1745,86 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun scheduleSharedSettingsPush() {
+        firebaseSettingsPushRunnable?.let { noteAutosaveHandler.removeCallbacks(it) }
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        val runnable = Runnable {
+            firebaseSettingsPushRunnable = null
+            pushSharedFirebaseData(pushSettings = true, pushAssets = false)
+        }
+        firebaseSettingsPushRunnable = runnable
+        noteAutosaveHandler.postDelayed(runnable, 1_000L)
+    }
+
+    private fun pushSharedFirebaseData(pushSettings: Boolean = true, pushAssets: Boolean = true) {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                if (pushSettings) firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
+                val assetCount = if (pushAssets) firebaseSyncRepository.pushAssets(settings.firebase, notesRepository.listAssets(), session) else 0
+                assetCount
+            }.onSuccess { assetCount ->
+                runOnUiThread {
+                    val suffix = if (pushAssets) ", $assetCount asset(s)" else ""
+                    setSyncStatus("Firebase shared settings pushed$suffix")
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase shared push failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun pullSharedFirebaseData() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
+                val assets = firebaseSyncRepository.pullAssets(settings.firebase, session)
+                Pair(shared, assets)
+            }.onSuccess { (shared, assets) ->
+                runOnUiThread {
+                    val localEditActive = hasActiveLocalEdit()
+                    if (shared != null && localEditActive) {
+                        setSyncStatus("Firebase shared settings deferred while local edits are active")
+                    }
+                    if (shared != null && shared.rev <= pagesLocalEditAtMs) {
+                        setSyncStatus("Firebase shared settings skipped because local Pages are newer")
+                    }
+                    if (shared != null && !localEditActive && shared.rev > pagesLocalEditAtMs) {
+                        val next = SettingsRepository.applySharedSettings(settings, shared.values)
+                        settings = next
+                        settingsRepository.save(settings)
+                    }
+                    if (!localEditActive) {
+                        applyRemoteAssets(assets)
+                        when (currentScreen) {
+                            Screen.Pages -> showPages()
+                            Screen.Settings -> showSettings()
+                            Screen.Notes -> refreshNotes()
+                            Screen.Assets -> refreshAssets()
+                            else -> Unit
+                        }
+                    }
+                    if (!localEditActive) setSyncStatus("Firebase shared sync: ${assets.count { !it.deleted }} asset(s)")
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase shared pull failed: ${error.message}") }
+            }
+        }.start()
+    }
+
     private fun pullTodosFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
@@ -1603,21 +1841,39 @@ class MainActivity : Activity() {
                     todoRepository.save(merged)
                 }
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
+                val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
+                val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
                 FirebasePullResult(
                     todos = merged,
                     remoteNotes = remoteNotes,
                     remoteTodoCount = merged.items.size,
                     remoteNoteCount = remoteNotes.count { !it.deleted },
-                )
+                ) to Pair(shared, remoteAssets)
             }.onSuccess { result ->
                 runOnUiThread {
-                    applyRemoteNotes(result.remoteNotes)
-                    todoStore = result.todos
+                    val pullResult = result.first
+                    val shared = result.second.first
+                    val remoteAssets = result.second.second
+                    val localEditActive = hasActiveLocalEdit()
+                    if (shared != null && localEditActive) {
+                        setSyncStatus("Firebase shared settings deferred while local edits are active")
+                    }
+                    if (shared != null && shared.rev <= pagesLocalEditAtMs) {
+                        setSyncStatus("Firebase shared settings skipped because local Pages are newer")
+                    }
+                    if (shared != null && !localEditActive && shared.rev > pagesLocalEditAtMs) {
+                        settings = SettingsRepository.applySharedSettings(settings, shared.values)
+                        settingsRepository.save(settings)
+                    }
+                    if (!localEditActive) applyRemoteAssets(remoteAssets)
+                    applyRemoteNotes(pullResult.remoteNotes)
+                    todoStore = pullResult.todos
                     if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
                         showTodo()
                     }
+                    if (currentScreen == Screen.Pages && !localEditActive) showPages()
                     setSyncStatus(
-                        "Firebase sync: ${result.remoteTodoCount} todo(s), ${result.remoteNoteCount} remote note(s) in ${settings.firebase.workspaceId}",
+                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s) in ${settings.firebase.workspaceId}",
                     )
                 }
             }.onFailure { error ->
@@ -1628,6 +1884,10 @@ class MainActivity : Activity() {
 
     private fun replaceLocalFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
+        if (hasActiveLocalEdit()) {
+            setSyncStatus("Firebase replace deferred while local edits are active")
+            return
+        }
         Thread {
             val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
             if (session == null) {
@@ -1638,13 +1898,24 @@ class MainActivity : Activity() {
             runCatching {
                 val remoteTodos = firebaseSyncRepository.pullRemoteTodoStore(settings.firebase, session)
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
-                Pair(remoteTodos, remoteNotes)
-            }.onSuccess { (remoteTodos, remoteNotes) ->
+                val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
+                val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
+                Pair(Pair(remoteTodos, remoteNotes), Pair(shared, remoteAssets))
+            }.onSuccess { result ->
                 runOnUiThread {
+                    val remoteTodos = result.first.first
+                    val remoteNotes = result.first.second
+                    val shared = result.second.first
+                    val remoteAssets = result.second.second
                     todoRepository.save(remoteTodos)
                     todoStore = remoteTodos
                     notesRepository.clearAll()
+                    shared?.let {
+                        settings = SettingsRepository.applySharedSettings(settings, it.values)
+                        settingsRepository.save(settings)
+                    }
                     applyRemoteNotes(remoteNotes)
+                    applyRemoteAssets(remoteAssets)
                     if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
                         showTodo()
                     }
@@ -1654,14 +1925,34 @@ class MainActivity : Activity() {
                             selectNote(currentNotePath)
                         }
                     }
+                    if (currentScreen == Screen.Assets) refreshAssets()
+                    if (currentScreen == Screen.Pages) showPages()
                     setSyncStatus(
-                        "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s)",
+                        "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s), ${remoteAssets.count { !it.deleted }} asset(s)",
                     )
                 }
             }.onFailure { error ->
                 runOnUiThread { setSyncStatus("Firebase replace failed: ${error.message}") }
             }
         }.start()
+    }
+
+    private fun applyRemoteAssets(remoteAssets: List<FirebaseRemoteAsset>) {
+        remoteAssets.forEach { remote ->
+            if (remote.deleted) {
+                notesRepository.deleteAsset(remote.path)
+            } else {
+                notesRepository.writeAsset(remote.path, remote.bytes)
+            }
+        }
+    }
+
+    private fun hasActiveLocalEdit(): Boolean {
+        val pageInputActive = currentScreen == Screen.Pages && System.currentTimeMillis() < pagesLocalEditUntilMs
+        val noteEditFocused = currentScreen == Screen.Notes &&
+            (noteEditor?.hasFocus() == true || rawNoteEditor?.hasFocus() == true || pendingNoteAutosave != null)
+        val todoEditActive = currentScreen == Screen.Todo && todoDraftText.isNotBlank()
+        return pageInputActive || noteEditFocused || todoEditActive
     }
 
     private fun applyRemoteNotes(remoteNotes: List<FirebaseRemoteNote>) {
@@ -2365,6 +2656,7 @@ class MainActivity : Activity() {
 
     private enum class Screen {
         Notes,
+        Assets,
         Pages,
         Todo,
         Sync,
@@ -2372,6 +2664,7 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private const val ASSET_IMPORT_REQUEST_CODE = 4200
         private const val DRIVE_AUTH_REQUEST_CODE = 4201
         private const val PLAY_SERVICES_REQUEST_CODE = 4202
         private const val DRAWER_ANIMATION_MS = 180L
