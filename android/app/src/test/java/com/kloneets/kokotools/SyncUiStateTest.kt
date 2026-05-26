@@ -82,4 +82,40 @@ class SyncUiStateTest {
         assertTrue(visibility.workspaceSelection)
         assertTrue(visibility.memberManagement)
     }
+
+    @Test
+    fun unchangedFirebaseTodosDoNotRebuildVisibleTodoScreen() {
+        assertFalse(
+            SyncUiState.shouldRebuildTodoAfterPull(
+                todoChanged = false,
+                showingTodo = true,
+                canRebuild = true,
+            ),
+        )
+    }
+
+    @Test
+    fun changedFirebaseTodosRebuildOnlyWhenTodoScreenCanRebuild() {
+        assertTrue(
+            SyncUiState.shouldRebuildTodoAfterPull(
+                todoChanged = true,
+                showingTodo = true,
+                canRebuild = true,
+            ),
+        )
+        assertFalse(
+            SyncUiState.shouldRebuildTodoAfterPull(
+                todoChanged = true,
+                showingTodo = false,
+                canRebuild = true,
+            ),
+        )
+        assertFalse(
+            SyncUiState.shouldRebuildTodoAfterPull(
+                todoChanged = true,
+                showingTodo = true,
+                canRebuild = false,
+            ),
+        )
+    }
 }

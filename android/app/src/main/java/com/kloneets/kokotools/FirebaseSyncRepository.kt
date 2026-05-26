@@ -43,6 +43,7 @@ data class FirebaseRemoteTodo(
 
 data class FirebasePullResult(
     val todos: TodoStore,
+    val todoChanged: Boolean,
     val remoteNotes: List<FirebaseRemoteNote>,
     val remoteTodoCount: Int,
     val remoteNoteCount: Int,

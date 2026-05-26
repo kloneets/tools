@@ -16,6 +16,14 @@ enum class SyncMode {
 }
 
 object SyncUiState {
+    fun shouldRebuildTodoAfterPull(
+        todoChanged: Boolean,
+        showingTodo: Boolean,
+        canRebuild: Boolean,
+    ): Boolean {
+        return todoChanged && showingTodo && canRebuild
+    }
+
     fun actionVisibility(
         connected: Boolean,
         authInProgress: Boolean,

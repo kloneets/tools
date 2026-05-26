@@ -66,7 +66,7 @@ class MainActivity : Activity() {
     private var driveAuthInProgress = false
     private var selectedSnapshotId = ""
     private var firebaseSession: FirebaseSession? = null
-    private var currentScreen = Screen.Notes
+    private var currentScreen = Screen.Todo
     private var palette = AppPalette.light()
 
     private lateinit var root: FrameLayout
@@ -130,7 +130,7 @@ class MainActivity : Activity() {
         currentNotePath = settings.notesApp.currentNotePath
         selectedSnapshotId = settings.gdrive.selectedSnapshotId
         buildRoot()
-        showNotes()
+        showTodo()
         startFirebaseRealtimeIfEnabled()
     }
 
@@ -1061,6 +1061,14 @@ class MainActivity : Activity() {
         scheduleTodoBoundaryRefresh()
     }
 
+    private fun showTodoPreservingScroll() {
+        val scrollY = findViewById<ScrollView?>(R.id.todo_list)?.scrollY ?: 0
+        showTodo()
+        findViewById<ScrollView?>(R.id.todo_list)?.post {
+            findViewById<ScrollView?>(R.id.todo_list)?.scrollTo(0, scrollY)
+        }
+    }
+
     private fun addTodoSection(parent: LinearLayout, title: String, items: List<TodoItem>, archived: Boolean) {
         parent.addView(sectionTitle(title))
         if (items.isEmpty()) {
@@ -1853,7 +1861,8 @@ class MainActivity : Activity() {
             runCatching {
                 val local = todoRepository.load()
                 val merged = firebaseSyncRepository.pullTodos(settings.firebase, local, session)
-                if (merged != local) {
+                val todoChanged = merged != local
+                if (todoChanged) {
                     todoRepository.save(merged)
                 }
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
@@ -1861,6 +1870,7 @@ class MainActivity : Activity() {
                 val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
                 FirebasePullResult(
                     todos = merged,
+                    todoChanged = todoChanged,
                     remoteNotes = remoteNotes,
                     remoteTodoCount = merged.items.size,
                     remoteNoteCount = remoteNotes.count { !it.deleted },
@@ -1885,8 +1895,13 @@ class MainActivity : Activity() {
                     if (!localEditActive) applyRemoteAssets(remoteAssets)
                     applyRemoteNotes(pullResult.remoteNotes)
                     todoStore = pullResult.todos
-                    if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
-                        showTodo()
+                    if (SyncUiState.shouldRebuildTodoAfterPull(
+                            todoChanged = pullResult.todoChanged,
+                            showingTodo = currentScreen == Screen.Todo,
+                            canRebuild = canRebuildTodoAfterRemotePull(),
+                        )
+                    ) {
+                        showTodoPreservingScroll()
                     }
                     if (currentScreen == Screen.Pages && !localEditActive) showPages()
                     val deferredNoteCount = pendingRemoteNotes.size
