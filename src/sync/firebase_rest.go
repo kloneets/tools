@@ -14,17 +14,21 @@ import (
 )
 
 type FirebaseRESTProvider struct {
-	APIKey      string
-	DatabaseURL string
-	Client      *http.Client
-	session     Session
+	APIKey             string
+	DatabaseURL        string
+	IdentityToolkitURL string
+	SecureTokenURL     string
+	Client             *http.Client
+	session            Session
 }
 
 func NewFirebaseRESTProvider(apiKey string, databaseURL string) *FirebaseRESTProvider {
 	return &FirebaseRESTProvider{
-		APIKey:      strings.TrimSpace(apiKey),
-		DatabaseURL: strings.TrimRight(strings.TrimSpace(databaseURL), "/"),
-		Client:      &http.Client{Timeout: 30 * time.Second},
+		APIKey:             strings.TrimSpace(apiKey),
+		DatabaseURL:        strings.TrimRight(strings.TrimSpace(databaseURL), "/"),
+		IdentityToolkitURL: "https://identitytoolkit.googleapis.com/v1",
+		SecureTokenURL:     "https://securetoken.googleapis.com/v1",
+		Client:             &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -44,18 +48,39 @@ func (p *FirebaseRESTProvider) Login(ctx context.Context, email string, password
 		RefreshToken string `json:"refreshToken"`
 		ExpiresIn    string `json:"expiresIn"`
 	}
-	if err := p.postJSON(ctx, "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key="+url.QueryEscape(p.APIKey), body, &response); err != nil {
+	if err := p.postJSON(ctx, p.identityToolkitEndpoint("accounts:signInWithPassword"), body, &response); err != nil {
 		return Session{}, err
 	}
-	session := Session{
-		UID:          response.LocalID,
-		Email:        response.Email,
-		IDToken:      response.IDToken,
-		RefreshToken: response.RefreshToken,
-		ExpiresAt:    time.Now().Add(time.Hour),
+	return p.sessionFromAuthResponse(response.LocalID, response.Email, response.IDToken, response.RefreshToken), nil
+}
+
+func (p *FirebaseRESTProvider) LoginWithGoogleIDToken(ctx context.Context, googleIDToken string) (Session, error) {
+	if p.APIKey == "" {
+		return Session{}, errors.New("firebase api key is required")
 	}
-	p.session = session
-	return session, nil
+	googleIDToken = strings.TrimSpace(googleIDToken)
+	if googleIDToken == "" {
+		return Session{}, errors.New("google id token is required")
+	}
+	postBody := url.Values{}
+	postBody.Set("id_token", googleIDToken)
+	postBody.Set("providerId", "google.com")
+	body := map[string]any{
+		"postBody":          postBody.Encode(),
+		"requestUri":        "http://localhost",
+		"returnSecureToken": true,
+	}
+	var response struct {
+		LocalID      string `json:"localId"`
+		Email        string `json:"email"`
+		IDToken      string `json:"idToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresIn    string `json:"expiresIn"`
+	}
+	if err := p.postJSON(ctx, p.identityToolkitEndpoint("accounts:signInWithIdp"), body, &response); err != nil {
+		return Session{}, err
+	}
+	return p.sessionFromAuthResponse(response.LocalID, response.Email, response.IDToken, response.RefreshToken), nil
 }
 
 func (p *FirebaseRESTProvider) Refresh(ctx context.Context, refreshToken string) (Session, error) {
@@ -72,7 +97,7 @@ func (p *FirebaseRESTProvider) Refresh(ctx context.Context, refreshToken string)
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    string `json:"expires_in"`
 	}
-	if err := p.postForm(ctx, "https://securetoken.googleapis.com/v1/token?key="+url.QueryEscape(p.APIKey), body, &response); err != nil {
+	if err := p.postForm(ctx, p.secureTokenEndpoint("token"), body, &response); err != nil {
 		return Session{}, err
 	}
 	session := Session{
@@ -83,6 +108,26 @@ func (p *FirebaseRESTProvider) Refresh(ctx context.Context, refreshToken string)
 	}
 	p.session = session
 	return session, nil
+}
+
+func (p *FirebaseRESTProvider) sessionFromAuthResponse(uid string, email string, idToken string, refreshToken string) Session {
+	session := Session{
+		UID:          uid,
+		Email:        email,
+		IDToken:      idToken,
+		RefreshToken: refreshToken,
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	p.session = session
+	return session
+}
+
+func (p *FirebaseRESTProvider) identityToolkitEndpoint(method string) string {
+	return strings.TrimRight(p.IdentityToolkitURL, "/") + "/" + method + "?key=" + url.QueryEscape(p.APIKey)
+}
+
+func (p *FirebaseRESTProvider) secureTokenEndpoint(method string) string {
+	return strings.TrimRight(p.SecureTokenURL, "/") + "/" + method + "?key=" + url.QueryEscape(p.APIKey)
 }
 
 func PersonalWorkspaceID(uid string) string {

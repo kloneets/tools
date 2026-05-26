@@ -97,6 +97,26 @@ class FirebaseSyncRepository(private val context: Context) {
         return authenticate(settings, email, password, signUp = true)
     }
 
+    fun loginWithGoogleIdToken(settings: FirebaseSettings, googleIdToken: String): FirebaseSession {
+        require(googleIdToken.isNotBlank()) { "Google ID token is required" }
+        val body = JSONObject()
+            .put("postBody", googleSignInPostBody(googleIdToken))
+            .put("requestUri", "http://localhost")
+            .put("returnSecureToken", true)
+        val response = postJson(
+            "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=${encode(settings.apiKey)}",
+            body,
+        )
+        val session = FirebaseSession(
+            uid = response.getString("localId"),
+            email = response.optString("email", ""),
+            idToken = response.getString("idToken"),
+            refreshToken = response.getString("refreshToken"),
+        )
+        saveToken(session)
+        return session
+    }
+
     fun ensurePersonalWorkspace(settings: FirebaseSettings, session: FirebaseSession): FirebaseSettings {
         val personalWorkspaceId = personalWorkspaceId(session.uid)
         if (settings.workspaceId.isNotBlank() && settings.workspaceId != personalWorkspaceId) {
@@ -476,6 +496,10 @@ class FirebaseSyncRepository(private val context: Context) {
 
         fun personalWorkspaceId(uid: String): String = "user_$uid"
 
+        fun googleSignInPostBody(googleIdToken: String): String {
+            return "id_token=${encodeQueryComponent(googleIdToken)}&providerId=${encodeQueryComponent("google.com")}"
+        }
+
         fun sharedSettingsHash(values: JSONObject): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(canonicalJson(values).toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }
@@ -499,6 +523,10 @@ class FirebaseSyncRepository(private val context: Context) {
                 is Number, is Boolean -> value.toString()
                 else -> JSONObject.quote(value.toString())
             }
+        }
+
+        private fun encodeQueryComponent(value: String): String {
+            return URLEncoder.encode(value, Charsets.UTF_8.name())
         }
     }
 

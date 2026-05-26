@@ -44,6 +44,8 @@ import android.widget.Toast
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
 import com.google.android.gms.common.ConnectionResult
@@ -140,6 +142,10 @@ class MainActivity : Activity() {
             if (resultCode == RESULT_OK && data?.data != null) {
                 handleImportedAsset(data.data!!)
             }
+            return
+        }
+        if (requestCode == FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE) {
+            handleFirebaseGoogleSignInResult(resultCode, data)
             return
         }
         if (requestCode != DRIVE_AUTH_REQUEST_CODE) return
@@ -1312,6 +1318,9 @@ class MainActivity : Activity() {
         content.addView(commandButton("Login Firebase", View.generateViewId()) {
             promptFirebaseLogin(register = false)
         })
+        content.addView(commandButton("Login Firebase with Google", View.generateViewId()) {
+            loginFirebaseWithGoogle()
+        })
         content.addView(commandButton("Pull todos now", View.generateViewId()) {
             pullTodosFromFirebase()
         })
@@ -1698,6 +1707,69 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun loginFirebaseWithGoogle() {
+        if (!firebaseSyncRepository.backendConfigured(settings.firebase.copy(enabled = true, realtime = true))) {
+            setSyncStatus("Firebase config unavailable. Add bundled defaults or advanced custom config.")
+            return
+        }
+        if (BuildConfig.GOOGLE_WEB_CLIENT_ID.isBlank()) {
+            setSyncStatus("Google web client ID is not configured.")
+            return
+        }
+        val options = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestIdToken(BuildConfig.GOOGLE_WEB_CLIENT_ID)
+            .requestEmail()
+            .build()
+        val client = GoogleSignIn.getClient(this, options)
+        setSyncStatus("Opening Google sign-in")
+        startActivityForResult(client.signInIntent, FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE)
+    }
+
+    private fun handleFirebaseGoogleSignInResult(resultCode: Int, data: Intent?) {
+        if (resultCode != RESULT_OK || data == null) {
+            setSyncStatus("Firebase Google login canceled")
+            return
+        }
+        val account = try {
+            GoogleSignIn.getSignedInAccountFromIntent(data).getResult(ApiException::class.java)
+        } catch (error: ApiException) {
+            setSyncStatus("Firebase Google login failed: ${error.message}")
+            return
+        }
+        val googleIdToken = account.idToken
+        if (googleIdToken.isNullOrBlank()) {
+            setSyncStatus("Firebase Google login failed: missing Google ID token")
+            return
+        }
+        val next = settings.firebase.copy(
+            enabled = true,
+            realtime = true,
+            userEmail = account.email.orEmpty(),
+        )
+        persistSettings(settings.copy(firebase = next))
+        Thread {
+            runCatching {
+                val session = firebaseSyncRepository.loginWithGoogleIdToken(next, googleIdToken)
+                val workspaceSettings = firebaseSyncRepository.ensurePersonalWorkspace(
+                    next.copy(userEmail = session.email.ifBlank { next.userEmail }),
+                    session,
+                )
+                Pair(session, workspaceSettings)
+            }.onSuccess { (session, workspaceSettings) ->
+                firebaseSession = session
+                runOnUiThread {
+                    persistSettings(settings.copy(firebase = workspaceSettings))
+                    setSyncStatus("Firebase Google login ready: ${workspaceSettings.workspaceName}")
+                    scheduleFirebasePull()
+                    pullTodosFromFirebase()
+                    pushSharedFirebaseData()
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase Google login failed: ${error.message}") }
+            }
+        }.start()
     }
 
     private fun dialogEditText(hintText: String, value: String, password: Boolean): EditText {
@@ -2709,6 +2781,7 @@ class MainActivity : Activity() {
         private const val ASSET_IMPORT_REQUEST_CODE = 4200
         private const val DRIVE_AUTH_REQUEST_CODE = 4201
         private const val PLAY_SERVICES_REQUEST_CODE = 4202
+        private const val FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE = 4203
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
         private const val FIREBASE_PULL_INTERVAL_MS = 5_000L

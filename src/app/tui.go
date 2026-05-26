@@ -2031,6 +2031,9 @@ func (a *terminalApp) syncItems() []actionItem {
 		{Label: fmt.Sprintf("firebase workspace: %s", firebaseWorkspaceLabel(firebase)), Apply: func() {
 			helpers.StatusBarInst().UpdateStatusBar("Set firebase.workspace_id in settings.json or KOKO_FIREBASE_WORKSPACE_ID")
 		}},
+		{Label: "login firebase with google", Apply: func() {
+			a.loginFirebaseWithGoogle()
+		}},
 		{Label: "pull todos from firebase", Apply: func() {
 			a.startSyncOperation("pull todos from firebase", func() error {
 				return a.pullTodosFromFirebase(context.Background())
@@ -3507,6 +3510,69 @@ func firebaseSession(ctx context.Context, provider *kokosync.FirebaseRESTProvide
 		return kokosync.Session{}, err
 	}
 	return session, nil
+}
+
+func (a *terminalApp) loginFirebaseWithGoogle() {
+	cfg := settings.Inst().Firebase
+	if cfg == nil {
+		cfg = &settings.FirebaseSettings{Realtime: true}
+		settings.Inst().Firebase = cfg
+	}
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	apiKey := firebaseAPIKey(cfg, fileCfg)
+	databaseURL := firebaseDatabaseURL(cfg, fileCfg)
+	if apiKey == "" || databaseURL == "" {
+		helpers.StatusBarInst().UpdateStatusBar("Firebase config unavailable")
+		return
+	}
+	if !gdrive.HasCredentials() {
+		helpers.StatusBarInst().UpdateStatusBar("Google OAuth credentials are not configured")
+		return
+	}
+	url, googleSession, err := gdrive.StartLocalIDTokenAuthorization()
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Google sign-in failed to start")
+		return
+	}
+	helpers.OpenURI(url)
+	helpers.StatusBarInst().UpdateStatusBar("Browser opened for Firebase Google sign-in")
+	go func() {
+		result := <-googleSession.Wait()
+		if result.Err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase Google sign-in failed: " + result.Err.Error())
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		provider := kokosync.NewFirebaseRESTProvider(apiKey, databaseURL)
+		session, err := provider.LoginWithGoogleIDToken(ctx, result.IDToken)
+		if err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase Google login failed: " + err.Error())
+			return
+		}
+		if err := kokosync.SaveToken(kokosync.TokenPath(), kokosync.TokenFile{UID: session.UID, Email: session.Email, RefreshToken: session.RefreshToken}); err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Save Firebase token failed: " + err.Error())
+			return
+		}
+		meta, err := provider.EnsurePersonalWorkspace(ctx, session, "Personal workspace")
+		if err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase workspace setup failed: " + err.Error())
+			return
+		}
+		cfg.Enabled = true
+		cfg.Realtime = true
+		cfg.UserEmail = session.Email
+		cfg.WorkspaceID = meta.ID
+		cfg.WorkspaceName = meta.Name
+		cfg.LastSyncStatus = "ok"
+		cfg.LastSyncMessage = "Firebase Google login configured"
+		settings.SaveSettingsLocal()
+		if err := a.configureFirebaseTodoSyncer(context.Background()); err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase sync not ready: " + err.Error())
+			return
+		}
+		helpers.StatusBarInst().UpdateStatusBar("Firebase Google login ready: " + meta.Name)
+	}()
 }
 
 func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
