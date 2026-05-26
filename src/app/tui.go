@@ -59,6 +59,7 @@ type terminalApp struct {
 	todoIndex              int
 	todoInputMode          string
 	todoInputBuffer        string
+	todoInputCursorOffset  int
 	todoEditID             string
 	todoDirty              bool
 	status                 string
@@ -1492,6 +1493,7 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 			if text == "" {
 				a.todoInputMode = ""
 				a.todoInputBuffer = ""
+				a.todoInputCursorOffset = 0
 				a.todoEditID = ""
 				return true
 			}
@@ -1508,23 +1510,56 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 			}
 			a.todoInputMode = ""
 			a.todoInputBuffer = ""
+			a.todoInputCursorOffset = 0
 			a.todoEditID = ""
 			a.clampTodoIndex()
 			return true
 		case "esc":
 			a.todoInputMode = ""
 			a.todoInputBuffer = ""
+			a.todoInputCursorOffset = 0
 			a.todoEditID = ""
 			return true
 		case "backspace":
-			if len(a.todoInputBuffer) > 0 {
-				runes := []rune(a.todoInputBuffer)
-				a.todoInputBuffer = string(runes[:len(runes)-1])
+			runes := []rune(a.todoInputBuffer)
+			a.clampTodoInputCursor(len(runes))
+			if a.todoInputCursorOffset > 0 {
+				a.todoInputBuffer = string(append(runes[:a.todoInputCursorOffset-1], runes[a.todoInputCursorOffset:]...))
+				a.todoInputCursorOffset--
 			}
+			return true
+		case "delete":
+			runes := []rune(a.todoInputBuffer)
+			a.clampTodoInputCursor(len(runes))
+			if a.todoInputCursorOffset < len(runes) {
+				a.todoInputBuffer = string(append(runes[:a.todoInputCursorOffset], runes[a.todoInputCursorOffset+1:]...))
+			}
+			return true
+		case "left":
+			if a.todoInputCursorOffset > 0 {
+				a.todoInputCursorOffset--
+			}
+			return true
+		case "right":
+			if a.todoInputCursorOffset < len([]rune(a.todoInputBuffer)) {
+				a.todoInputCursorOffset++
+			}
+			return true
+		case "home":
+			a.todoInputCursorOffset = 0
+			return true
+		case "end":
+			a.todoInputCursorOffset = len([]rune(a.todoInputBuffer))
 			return true
 		}
 		if key.Rune != 0 && !key.Ctrl && !key.Meta && !key.Alt {
-			a.todoInputBuffer += string(key.Rune)
+			runes := []rune(a.todoInputBuffer)
+			a.clampTodoInputCursor(len(runes))
+			next := append([]rune{}, runes[:a.todoInputCursorOffset]...)
+			next = append(next, key.Rune)
+			next = append(next, runes[a.todoInputCursorOffset:]...)
+			a.todoInputBuffer = string(next)
+			a.todoInputCursorOffset++
 			return true
 		}
 		return true
@@ -1545,11 +1580,13 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 	case "n":
 		a.todoInputMode = "new"
 		a.todoInputBuffer = ""
+		a.todoInputCursorOffset = 0
 		return true
 	case "e":
 		if item, ok := a.selectedTodoItem(); ok && item.Status == todo.StatusTodo && item.CheckedAt == nil {
 			a.todoInputMode = "edit"
 			a.todoInputBuffer = item.Text
+			a.todoInputCursorOffset = len([]rune(a.todoInputBuffer))
 			a.todoEditID = item.ID
 		}
 		return true
@@ -1571,6 +1608,15 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		return a.moveSelectedTodo(-1)
 	}
 	return false
+}
+
+func (a *terminalApp) clampTodoInputCursor(bufferLen int) {
+	if a.todoInputCursorOffset < 0 {
+		a.todoInputCursorOffset = 0
+	}
+	if a.todoInputCursorOffset > bufferLen {
+		a.todoInputCursorOffset = bufferLen
+	}
 }
 
 func (a *terminalApp) moveSelectedTodo(delta int) bool {
@@ -2862,7 +2908,9 @@ func (a *terminalApp) todoInputCursor() (int, int) {
 	if a.todoInputMode == "edit" {
 		prefix = "edit: "
 	}
-	return 2, len([]rune(prefix + a.todoInputBuffer))
+	runes := []rune(a.todoInputBuffer)
+	a.clampTodoInputCursor(len(runes))
+	return 2, len([]rune(prefix)) + a.todoInputCursorOffset
 }
 
 func joinTViewLines(lines []string) string {

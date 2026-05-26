@@ -737,6 +737,7 @@ func TestMoveSelectedTodoKeepsSelectionOnMovedItem(t *testing.T) {
 
 func TestTodoInputCursorPointsToEditBufferEnd(t *testing.T) {
 	app := &terminalApp{view: viewTodo, todoInputMode: "edit", todoInputBuffer: "alpha"}
+	app.todoInputCursorOffset = len([]rune(app.todoInputBuffer))
 
 	row, col := app.todoInputCursor()
 
@@ -745,6 +746,61 @@ func TestTodoInputCursorPointsToEditBufferEnd(t *testing.T) {
 	}
 	if col != len([]rune("edit: alpha")) {
 		t.Fatalf("col = %d, want edit buffer end", col)
+	}
+}
+
+func TestTodoInputCursorMovesAndInsertsInNewTodo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	app := &terminalApp{view: viewTodo, todos: repo}
+
+	for _, key := range []notes.Key{
+		{Name: "n", Rune: 'n'},
+		{Name: "a", Rune: 'a'},
+		{Name: "c", Rune: 'c'},
+		{Name: "left"},
+		{Name: "b", Rune: 'b'},
+		{Name: "enter"},
+	} {
+		if !app.handleGlobalKey(key) {
+			t.Fatalf("handleGlobalKey(%#v) = false, want true", key)
+		}
+	}
+
+	if got := todo.ActiveItems(app.todoStore); len(got) != 1 || got[0].Text != "abc" {
+		t.Fatalf("active todos = %#v, want abc", got)
+	}
+}
+
+func TestTodoInputCursorMovesAndDeletesInEditTodo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	store, _, err := repo.Add("axbc")
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo, todoStore: store}
+
+	for _, key := range []notes.Key{
+		{Name: "e", Rune: 'e'},
+		{Name: "right"},
+		{Name: "left"},
+		{Name: "home"},
+		{Name: "right"},
+		{Name: "delete"},
+		{Name: "end"},
+		{Name: "d", Rune: 'd'},
+		{Name: "enter"},
+	} {
+		if !app.handleGlobalKey(key) {
+			t.Fatalf("handleGlobalKey(%#v) = false, want true", key)
+		}
+	}
+
+	if got := todo.ActiveItems(app.todoStore); len(got) != 1 || got[0].Text != "abcd" {
+		t.Fatalf("active todos = %#v, want abcd", got)
 	}
 }
 
