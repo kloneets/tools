@@ -47,6 +47,9 @@ func LoadState(path string) (State, error) {
 		}
 		return State{}, fmt.Errorf("read sync state: %w", err)
 	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return defaultState(), nil
+	}
 	var state State
 	if err := json.Unmarshal(data, &state); err != nil {
 		return State{}, fmt.Errorf("decode sync state: %w", err)
@@ -73,7 +76,13 @@ func SaveState(path string, state State) error {
 func LoadToken(path string) (TokenFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return TokenFile{}, nil
+		}
 		return TokenFile{}, fmt.Errorf("read firebase token: %w", err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return TokenFile{}, nil
 	}
 	var token TokenFile
 	if err := json.Unmarshal(data, &token); err != nil {

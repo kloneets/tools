@@ -3307,14 +3307,13 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 	if a == nil {
 		return
 	}
-	if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-		return
-	}
 	go func() {
-		_ = a.pullTodosFromFirebase(ctx)
-		_ = a.pullNotesFromFirebase(ctx)
-		_ = a.pullSettingsFromFirebase(ctx)
-		_ = a.pullAssetsFromFirebase(ctx)
+		// Run initial sync on startup if enabled
+		fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+		if firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+			a.runFirebaseSyncTick(ctx)
+		}
+
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -3322,13 +3321,55 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_ = a.pullTodosFromFirebase(ctx)
-				_ = a.pullNotesFromFirebase(ctx)
-				_ = a.pullSettingsFromFirebase(ctx)
-				_ = a.pullAssetsFromFirebase(ctx)
+				fileCfg, _ = kokosync.LoadConfig(kokosync.ConfigPath())
+				if firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+					a.runFirebaseSyncTick(ctx)
+				}
 			}
 		}
 	}()
+}
+
+func (a *terminalApp) runFirebaseSyncTick(ctx context.Context) {
+	var syncErr error
+	if err := a.pullTodosFromFirebase(ctx); err != nil {
+		syncErr = err
+	} else if err := a.pullNotesFromFirebase(ctx); err != nil {
+		syncErr = err
+	} else if err := a.pullSettingsFromFirebase(ctx); err != nil {
+		syncErr = err
+	} else if err := a.pullAssetsFromFirebase(ctx); err != nil {
+		syncErr = err
+	}
+
+	if syncErr != nil {
+		cfg := settings.Inst().Firebase
+		if cfg != nil {
+			if cfg.LastSyncStatus != "error" || cfg.LastSyncMessage != syncErr.Error() {
+				cfg.LastSyncStatus = "error"
+				cfg.LastSyncMessage = syncErr.Error()
+				settings.SaveSettingsLocal()
+				a.queueUIDraw(func() {
+					a.refresh()
+				})
+			}
+		}
+	}
+}
+
+func (a *terminalApp) ensureFirebaseSyncer(ctx context.Context) error {
+	if a == nil {
+		return fmt.Errorf("app is nil")
+	}
+	if a.firebaseTodoSyncer == nil ||
+		a.firebaseNoteSyncer == nil ||
+		a.firebaseSettingsSyncer == nil ||
+		a.firebaseAssetSyncer == nil ||
+		a.firebaseTodoSyncer.Session.IDToken == "" ||
+		a.firebaseTodoSyncer.Session.ExpiresAt.Before(time.Now().Add(5*time.Minute)) {
+		return a.configureFirebaseTodoSyncer(ctx)
+	}
+	return nil
 }
 
 func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
@@ -3337,9 +3378,6 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 	if cfg == nil {
 		cfg = &settings.FirebaseSettings{Realtime: true}
 		settings.Inst().Firebase = cfg
-	}
-	if !firebaseEnabled(cfg, fileCfg) {
-		return fmt.Errorf("firebase realtime is disabled")
 	}
 	apiKey := firebaseAPIKey(cfg, fileCfg)
 	databaseURL := firebaseDatabaseURL(cfg, fileCfg)
@@ -3424,10 +3462,8 @@ func firebaseSession(ctx context.Context, provider *kokosync.FirebaseRESTProvide
 }
 
 func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
-	if a.firebaseTodoSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
 		return nil
@@ -3471,10 +3507,8 @@ func (a *terminalApp) pushTodosToFirebaseSoon() {
 }
 
 func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
-	if a.firebaseTodoSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
 		return nil
@@ -3496,10 +3530,8 @@ func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
 }
 
 func (a *terminalApp) pullNotesFromFirebase(ctx context.Context) error {
-	if a.firebaseNoteSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.firebaseNoteSyncer == nil || !a.firebaseNoteSyncer.Ready() {
 		return nil
@@ -3571,10 +3603,8 @@ func (a *terminalApp) pushNotesToFirebaseSoon() {
 }
 
 func (a *terminalApp) pushNotesToFirebase(ctx context.Context) error {
-	if a.firebaseNoteSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.firebaseNoteSyncer == nil || !a.firebaseNoteSyncer.Ready() {
 		return nil
@@ -3606,10 +3636,8 @@ func (a *terminalApp) pushNoteDeleteToFirebaseSoon(absPath string) {
 	}
 	rel := a.noteRelPath(absPath)
 	go func() {
-		if a.firebaseNoteSyncer == nil {
-			if err := a.configureFirebaseTodoSyncer(context.Background()); err != nil {
-				return
-			}
+		if err := a.ensureFirebaseSyncer(context.Background()); err != nil {
+			return
 		}
 		if a.firebaseNoteSyncer != nil {
 			_ = a.firebaseNoteSyncer.PushDelete(context.Background(), rel)
@@ -3628,10 +3656,8 @@ func (a *terminalApp) pushSettingsToFirebaseSoon() {
 }
 
 func (a *terminalApp) pushSettingsToFirebase(ctx context.Context) error {
-	if a.firebaseSettingsSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.firebaseSettingsSyncer == nil || !a.firebaseSettingsSyncer.Ready() {
 		return nil
@@ -3657,10 +3683,8 @@ func (a *terminalApp) pushSettingsToFirebase(ctx context.Context) error {
 }
 
 func (a *terminalApp) pullSettingsFromFirebase(ctx context.Context) error {
-	if a.firebaseSettingsSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.firebaseSettingsSyncer == nil || !a.firebaseSettingsSyncer.Ready() {
 		return nil
@@ -3723,10 +3747,8 @@ func (a *terminalApp) pushAssetsToFirebaseSoon() {
 }
 
 func (a *terminalApp) pushAssetsToFirebase(ctx context.Context) error {
-	if a.firebaseAssetSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.firebaseAssetSyncer == nil || !a.firebaseAssetSyncer.Ready() {
 		return nil
@@ -3752,10 +3774,8 @@ func (a *terminalApp) pushAssetsToFirebase(ctx context.Context) error {
 }
 
 func (a *terminalApp) pullAssetsFromFirebase(ctx context.Context) error {
-	if a.firebaseAssetSyncer == nil {
-		if err := a.configureFirebaseTodoSyncer(ctx); err != nil {
-			return err
-		}
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
 	}
 	if a.firebaseAssetSyncer == nil || !a.firebaseAssetSyncer.Ready() {
 		return nil
