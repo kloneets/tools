@@ -4,7 +4,6 @@ data class AppSettings(
     val pagesApp: PagesSettings = PagesSettings(),
     val notesApp: NotesSettings = NotesSettings(),
     val androidApp: AndroidSettings = AndroidSettings(),
-    val gdrive: GDriveSettings = GDriveSettings(),
     val firebase: FirebaseSettings = FirebaseSettings(),
     val rawJson: String = "",
 )
@@ -37,19 +36,6 @@ enum class ThemeMode(val value: String, val label: String) {
         }
     }
 }
-
-data class GDriveSettings(
-    val folderId: String = "",
-    val folderName: String = "",
-    val selectedSnapshotId: String = "",
-    val snapshots: List<DriveSnapshotMeta> = emptyList(),
-)
-
-data class DriveSnapshotMeta(
-    val id: String,
-    val name: String,
-    val createdAt: String,
-)
 
 data class FirebaseSettings(
     val enabled: Boolean = false,

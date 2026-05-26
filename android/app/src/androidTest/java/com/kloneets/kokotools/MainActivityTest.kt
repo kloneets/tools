@@ -1,7 +1,7 @@
 package com.kloneets.kokotools
 
 import android.view.View
-import android.widget.Button
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.RadioButton
@@ -132,46 +132,20 @@ class MainActivityTest {
     }
 
     @Test
-    fun syncScreenShowsActionsForConnectionAndFolderState() {
+    fun syncScreenShowsFirebaseActionsOnly() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
-                setPrivateField(activity, "driveAccessToken", null)
                 setPrivateField(activity, "settings", AppSettings())
                 showSync(activity)
 
-                assertEquals(View.VISIBLE, activity.findViewById<Button>(R.id.sync_connect).visibility)
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_select_folder).visibility)
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_upload).visibility)
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_refresh).visibility)
-
-                setPrivateField(activity, "driveAccessToken", "token")
-                setPrivateField(activity, "settings", AppSettings())
-                showSync(activity)
-
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_connect).visibility)
-                assertEquals(View.VISIBLE, activity.findViewById<Button>(R.id.sync_select_folder).visibility)
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_upload).visibility)
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_refresh).visibility)
-
-                setPrivateField(
-                    activity,
-                    "settings",
-                    AppSettings(
-                        gdrive = GDriveSettings(
-                            folderId = "folder",
-                            folderName = "Koko Tools",
-                            selectedSnapshotId = "snapshot",
-                            snapshots = listOf(DriveSnapshotMeta("snapshot", "snapshot", "2026-05-13T10:00:00Z")),
-                        ),
-                    ),
-                )
-                setPrivateField(activity, "selectedSnapshotId", "snapshot")
-                showSync(activity)
-
-                assertEquals(View.GONE, activity.findViewById<Button>(R.id.sync_connect).visibility)
-                assertEquals(View.VISIBLE, activity.findViewById<Button>(R.id.sync_select_folder).visibility)
-                assertEquals(View.VISIBLE, activity.findViewById<Button>(R.id.sync_upload).visibility)
-                assertEquals(View.VISIBLE, activity.findViewById<Button>(R.id.sync_refresh).visibility)
+                assertEquals("Sync", activity.findViewById<TextView>(R.id.app_title).text.toString())
+                val labels = visibleTextLabels(activity.findViewById(android.R.id.content))
+                assertTrue(labels.contains("Sync to Firebase"))
+                assertTrue(!labels.contains("Pull todos now"))
+                assertTrue(!labels.contains("Push todos now"))
+                assertTrue(!labels.contains("Pull settings and assets now"))
+                assertTrue(!labels.contains("Push settings and assets now"))
+                assertTrue(!labels.contains("Replace local from Firebase"))
             }
         }
     }
@@ -214,5 +188,18 @@ class MainActivityTest {
             isAccessible = true
             get(activity)
         }
+    }
+
+    private fun visibleTextLabels(view: View): Set<String> {
+        val labels = mutableSetOf<String>()
+        if (view is TextView && view.isShown) {
+            labels += view.text.toString()
+        }
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                labels += visibleTextLabels(view.getChildAt(index))
+            }
+        }
+        return labels
     }
 }

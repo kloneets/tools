@@ -204,7 +204,7 @@ class HybridMarkdownEditor(
         setBackgroundColor(Color.TRANSPARENT)
         isFillViewport = true
         clipToPadding = false
-        setPadding(0, 0, 0, dp(120))
+        setPadding(0, 0, 0, dp(16))
         addView(container)
         spellChecker.setConfig(spellCheckEnabled, spellDictionaries)
         setOnClickListener {

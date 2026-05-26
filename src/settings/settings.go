@@ -1,20 +1,18 @@
 package settings
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
-	"github.com/kloneets/tools/src/todo"
 )
 
 type UserSettings struct {
@@ -23,7 +21,6 @@ type UserSettings struct {
 	NotesApp    NotesAppSettings    `json:"notes_app"`
 	AppWindow   AppWindowSettings   `json:"app_window"`
 	UI          *UISettings         `json:"ui"`
-	GDrive      *GDriveSettings     `json:"gdrive"`
 	Firebase    *FirebaseSettings   `json:"firebase,omitempty"`
 }
 
@@ -110,30 +107,6 @@ func (u *UISettings) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-type GDriveSettings struct {
-	Enabled             bool                `json:"enabled"`
-	SyncIntervalSec     int                 `json:"sync_interval_sec"`
-	FolderID            string              `json:"folder_id"`
-	FolderName          string              `json:"folder_name"`
-	PendingSync         bool                `json:"pending_sync,omitempty"`
-	LastRemoteState     string              `json:"last_remote_state,omitempty"`
-	ConflictRemoteState string              `json:"conflict_remote_state,omitempty"`
-	LastSyncAt          string              `json:"last_sync_at"`
-	LastSyncStatus      string              `json:"last_sync_status"`
-	LastSyncMessage     string              `json:"last_sync_message"`
-	LastLocalSaveAt     string              `json:"last_local_save_at"`
-	LastDriveSaveAt     string              `json:"last_drive_save_at"`
-	LastDriveRefreshAt  string              `json:"last_drive_refresh_at"`
-	SelectedSnapshotID  string              `json:"selected_snapshot_id,omitempty"`
-	Snapshots           []DriveSnapshotMeta `json:"snapshots,omitempty"`
-}
-
-type DriveSnapshotMeta struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CreatedAt string `json:"created_at"`
-}
-
 type FirebaseSettings struct {
 	Enabled         bool   `json:"enabled"`
 	Realtime        bool   `json:"realtime"`
@@ -149,13 +122,7 @@ type FirebaseSettings struct {
 
 var settingsInstance *UserSettings
 var saveHooks []func(*UserSettings)
-var driveSyncInFlight atomic.Bool
-var driveRefreshInFlight atomic.Bool
 var shuttingDown atomic.Bool
-var driveSyncFunc func() error
-var driveUploadSnapshotFunc func(folderID string, settingsData []byte, retain int) (gdrive.SnapshotMeta, error)
-var driveListSnapshotsFunc func(folderID string) ([]gdrive.SnapshotMeta, error)
-var driveRestoreSnapshotFunc func(snapshotID string) ([]byte, error)
 var statusUpdater = func(text string) {
 	if helpers.HasStatusBar() {
 		helpers.StatusBarInst().UpdateStatusBar(text)
@@ -197,25 +164,111 @@ func Init() *[]string {
 		return &messages
 	}
 
-	marshalError := json.Unmarshal(c, &settingsInstance)
+	loaded, marshalError := decodeSettings(c)
 	if marshalError != nil {
-		log.Println("Settings unmarshal error: ", marshalError)
-		ct := time.Now()
-		backupFileName := getFileName(ct.Format("2006-01-02_15.04.0000") + "settings.json")
-		err = os.Rename(fn, backupFileName)
-		if err != nil {
-			log.Println("Cannot back up settings: ", err)
+		msg := fmt.Sprintf("Settings unmarshal error: %s", marshalError)
+		log.Println(msg)
+		messages = append(messages, msg)
+		if backupFileName, backupErr := backupInvalidSettings(fn); backupErr != nil {
+			log.Println("Cannot back up settings: ", backupErr)
 		} else {
 			msg := "Old settings backed up to: " + backupFileName
 			messages = append(messages, msg)
 			log.Println(msg)
 		}
+		if recovered, backupFileName, recoverErr := recoverSettingsFromBackup(); recoverErr == nil {
+			settingsInstance = recovered
+			msg := "Settings recovered from backup: " + backupFileName
+			messages = append(messages, msg)
+			log.Println(msg)
+			writeSettingsToDisk(false)
+			return &messages
+		}
 		settingsInstance = defaultSettings()
+	} else {
+		settingsInstance = loaded
 	}
 
 	normalizeSettings(settingsInstance)
 
 	return &messages
+}
+
+func decodeSettings(data []byte) (*UserSettings, error) {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil, errors.New("settings file is empty")
+	}
+	if trimmed == "null" {
+		return nil, errors.New("settings file is null")
+	}
+	var loaded UserSettings
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return nil, err
+	}
+	normalizeSettings(&loaded)
+	return &loaded, nil
+}
+
+func backupInvalidSettings(path string) (string, error) {
+	backupFileName := getFileName(time.Now().Format("2006-01-02_15.04.0000") + "settings.json")
+	return backupFileName, os.Rename(path, backupFileName)
+}
+
+func recoverSettingsFromBackup() (*UserSettings, string, error) {
+	candidates, err := settingsBackupCandidates()
+	if err != nil {
+		return nil, "", err
+	}
+	for _, candidate := range candidates {
+		data, err := os.ReadFile(candidate.path)
+		if err != nil {
+			log.Println("Cannot read settings backup: ", err)
+			continue
+		}
+		settings, err := decodeSettings(data)
+		if err != nil {
+			log.Println("Cannot decode settings backup: ", candidate.path, err)
+			continue
+		}
+		return settings, candidate.path, nil
+	}
+	return nil, "", errors.New("no valid settings backup found")
+}
+
+type settingsBackupCandidate struct {
+	path    string
+	modTime time.Time
+}
+
+func settingsBackupCandidates() ([]settingsBackupCandidate, error) {
+	dir := filepath.Dir(fileName())
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]settingsBackupCandidate, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "settings.json" || !strings.Contains(name, "settings.json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, settingsBackupCandidate{
+			path:    filepath.Join(dir, name),
+			modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+	return candidates, nil
 }
 
 func defaultSettings() *UserSettings {
@@ -242,14 +295,7 @@ func defaultSettings() *UserSettings {
 			VimMode:        true,
 		},
 		UI:       defaultUISettings(),
-		GDrive:   defaultGDriveSettings(),
 		Firebase: defaultFirebaseSettings(),
-	}
-}
-
-func defaultGDriveSettings() *GDriveSettings {
-	return &GDriveSettings{
-		SyncIntervalSec: 10,
 	}
 }
 
@@ -320,12 +366,6 @@ func normalizeSettings(s *UserSettings) {
 	}
 	if s.PasswordApp.SymbolCount <= 0 {
 		s.PasswordApp.SymbolCount = 16
-	}
-	if s.GDrive == nil {
-		s.GDrive = defaultGDriveSettings()
-	}
-	if s.GDrive.SyncIntervalSec <= 0 {
-		s.GDrive.SyncIntervalSec = 10
 	}
 	if s.Firebase == nil {
 		s.Firebase = defaultFirebaseSettings()
@@ -442,40 +482,16 @@ func fileName() string {
 	return getFileName("settings.json")
 }
 
-func (g *GDriveSettings) Ready() bool {
-	return g != nil && g.Enabled && g.FolderID != "" && gdrive.HasCredentials() && gdrive.HasToken()
-}
-
 func SaveSettings() {
 	SaveSettingsLocal()
 }
 
 func SaveSettingsLocal() {
-	MarkDriveDirty()
-	if settingsInstance != nil && settingsInstance.GDrive != nil {
-		settingsInstance.GDrive.LastLocalSaveAt = time.Now().Format(time.RFC3339)
-	}
 	writeSettingsToDisk(false)
 }
 
 func saveSettings(sync bool, notifyHooks bool) {
-	if sync {
-		MarkDriveDirty()
-		if settingsInstance != nil && settingsInstance.GDrive != nil {
-			settingsInstance.GDrive.LastLocalSaveAt = time.Now().Format(time.RFC3339)
-		}
-	}
 	writeSettingsToDisk(notifyHooks)
-}
-
-func StartDriveSync() {
-}
-
-func StartDriveRefresh() {
-}
-
-func SyncDriveDataOnShutdown(ctx context.Context) error {
-	return ctx.Err()
 }
 
 func BeginShutdown() {
@@ -484,13 +500,6 @@ func BeginShutdown() {
 
 func IsShuttingDown() bool {
 	return shuttingDown.Load()
-}
-
-func DriveSyncInterval() time.Duration {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || settingsInstance.GDrive.SyncIntervalSec <= 0 {
-		return 10 * time.Second
-	}
-	return time.Duration(settingsInstance.GDrive.SyncIntervalSec) * time.Second
 }
 
 func SaveNotesEditorWidth(width int) {
@@ -628,18 +637,23 @@ func PersistedNotesEditorWidth() int {
 
 func writeSettingsToDisk(notifyHooks bool) {
 	file := fileName()
-	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+	dir := filepath.Dir(file)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Println(err)
 		statusUpdater("Couldn't prepare settings directory... :(")
 		return
 	}
+	if settingsInstance == nil {
+		settingsInstance = defaultSettings()
+	}
+	normalizeSettings(settingsInstance)
 	dataString, err := json.Marshal(settingsInstance)
 	if err != nil {
 		log.Println(err)
 		statusUpdater("Couldn't stringify settings... :(")
 		return
 	}
-	if err := os.WriteFile(file, dataString, 0o644); err != nil {
+	if err := writeFileAtomic(file, dataString, 0o644); err != nil {
 		log.Println(err)
 		statusUpdater("Couldn't save settings... :(")
 		return
@@ -648,241 +662,38 @@ func writeSettingsToDisk(notifyHooks bool) {
 	statusUpdater("Settings saved!")
 }
 
-func SyncDriveData() error {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() {
-		return errors.New("Google Drive is not ready")
-	}
-	if !driveSyncInFlight.CompareAndSwap(false, true) {
-		return nil
-	}
-	defer driveSyncInFlight.Store(false)
-
-	settingsData, dataErr := driveSyncSettingsJSON()
-	if dataErr != nil {
-		recordSyncResult(dataErr)
-		writeSettingsToDisk(false)
-		return dataErr
-	}
-
-	if driveSyncFunc != nil {
-		err := driveSyncFunc()
-		recordSyncResult(err)
-		writeSettingsToDisk(false)
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".settings.json.tmp-*")
+	if err != nil {
 		return err
 	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
 
-	uploadSnapshot := driveUploadSnapshotFunc
-	if uploadSnapshot == nil {
-		uploadSnapshot = gdrive.UploadAppSnapshot
-	}
-	snapshot, err := uploadSnapshot(settingsInstance.GDrive.FolderID, settingsData, 5)
-	recordSyncResult(err)
-	if err == nil {
-		settingsInstance.GDrive.PendingSync = false
-		settingsInstance.GDrive.LastDriveSaveAt = snapshot.CreatedAt
-		settingsInstance.GDrive.SelectedSnapshotID = snapshot.ID
-		if err := RefreshDriveSnapshots(); err != nil {
-			log.Println("drive snapshot refresh error:", err)
-		}
-	}
-	writeSettingsToDisk(false)
-	return err
-}
-
-func driveSyncSettingsJSON() ([]byte, error) {
-	if settingsInstance == nil {
-		return nil, nil
-	}
-
-	clone := *settingsInstance
-	if settingsInstance.UI != nil {
-		uiCopy := *settingsInstance.UI
-		clone.UI = &uiCopy
-	}
-	if settingsInstance.GDrive != nil {
-		gDriveCopy := *settingsInstance.GDrive
-		clone.GDrive = &gDriveCopy
-	}
-
-	if clone.GDrive != nil {
-		clone.GDrive.PendingSync = false
-	}
-
-	return json.Marshal(&clone)
-}
-
-func RefreshDriveSnapshots() error {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() {
-		return errors.New("Google Drive is not ready")
-	}
-	if !driveRefreshInFlight.CompareAndSwap(false, true) {
-		return nil
-	}
-	defer driveRefreshInFlight.Store(false)
-	listSnapshots := driveListSnapshotsFunc
-	if listSnapshots == nil {
-		listSnapshots = gdrive.ListAppSnapshots
-	}
-	snapshots, err := listSnapshots(settingsInstance.GDrive.FolderID)
-	if err != nil {
-		recordSyncResult(err)
-		writeSettingsToDisk(false)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	settingsInstance.GDrive.Snapshots = make([]DriveSnapshotMeta, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		settingsInstance.GDrive.Snapshots = append(settingsInstance.GDrive.Snapshots, DriveSnapshotMeta{
-			ID:        snapshot.ID,
-			Name:      snapshot.Name,
-			CreatedAt: snapshot.CreatedAt,
-		})
-	}
-	settingsInstance.GDrive.LastDriveRefreshAt = time.Now().Format(time.RFC3339)
-	settingsInstance.GDrive.LastSyncStatus = "ok"
-	settingsInstance.GDrive.LastSyncMessage = "Drive snapshot list refreshed"
-	writeSettingsToDisk(false)
-	return nil
-}
-
-func RestoreDriveSnapshot(snapshotID string) error {
-	if settingsInstance == nil || settingsInstance.GDrive == nil || !settingsInstance.GDrive.Ready() {
-		return errors.New("Google Drive is not ready")
-	}
-	if strings.TrimSpace(snapshotID) == "" {
-		return errors.New("no Drive snapshot selected")
-	}
-	restoreSnapshot := driveRestoreSnapshotFunc
-	if restoreSnapshot == nil {
-		restoreSnapshot = gdrive.RestoreAppSnapshot
-	}
-	data, err := restoreSnapshot(snapshotID)
-	if err != nil {
-		recordSyncResult(err)
-		writeSettingsToDisk(false)
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	var remote UserSettings
-	if err := json.Unmarshal(data, &remote); err != nil {
-		return fmt.Errorf("restore snapshot settings decode: %w", err)
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	normalizeSettings(&remote)
-	if remote.GDrive == nil {
-		remote.GDrive = defaultGDriveSettings()
+	if err := tmp.Close(); err != nil {
+		return err
 	}
-	remote.GDrive.Enabled = settingsInstance.GDrive.Enabled
-	remote.GDrive.FolderID = settingsInstance.GDrive.FolderID
-	remote.GDrive.FolderName = settingsInstance.GDrive.FolderName
-	remote.GDrive.LastDriveSaveAt = settingsInstance.GDrive.LastDriveSaveAt
-	remote.GDrive.LastDriveRefreshAt = settingsInstance.GDrive.LastDriveRefreshAt
-	remote.GDrive.LastLocalSaveAt = time.Now().Format(time.RFC3339)
-	remote.GDrive.LastSyncStatus = "ok"
-	remote.GDrive.LastSyncMessage = "Drive snapshot restored"
-	remote.GDrive.PendingSync = false
-	remote.GDrive.SelectedSnapshotID = snapshotID
-	remote.GDrive.Snapshots = settingsInstance.GDrive.Snapshots
-	settingsInstance = &remote
-	writeSettingsToDisk(true)
-	return nil
-}
-
-func recordSyncResult(err error) {
-	if settingsInstance == nil || settingsInstance.GDrive == nil {
-		return
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
 	}
-
-	settingsInstance.GDrive.LastSyncAt = time.Now().Format(time.RFC3339)
-	if err != nil {
-		settingsInstance.GDrive.LastSyncStatus = "error"
-		settingsInstance.GDrive.LastSyncMessage = err.Error()
-		return
-	}
-
-	settingsInstance.GDrive.LastSyncStatus = "ok"
-	settingsInstance.GDrive.LastSyncMessage = "Drive operation completed successfully"
-}
-
-func lastDriveSyncError() error {
-	if settingsInstance == nil || settingsInstance.GDrive == nil {
-		return nil
-	}
-	switch settingsInstance.GDrive.LastSyncStatus {
-	case "error", "conflict":
-		if settingsInstance.GDrive.LastSyncMessage == "" {
-			return errors.New("Drive sync failed")
-		}
-		return errors.New(settingsInstance.GDrive.LastSyncMessage)
-	default:
-		return nil
-	}
-}
-
-func MarkDriveDirty() {
-	if settingsInstance == nil || settingsInstance.GDrive == nil {
-		return
-	}
-	settingsInstance.GDrive.PendingSync = true
-}
-
-func backupLocalStateSnapshot() (string, error) {
-	stamp := time.Now().Format("2006-01-02_15-04-05")
-	root := getFileName(filepath.Join("conflicts", stamp))
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", fmt.Errorf("create conflict backup directory: %w", err)
-	}
-
-	if err := copyFileIfExists(fileName(), filepath.Join(root, "settings.json")); err != nil {
-		return "", err
-	}
-	if err := copyFileIfExists(todo.DefaultPath(), filepath.Join(root, "todos.json")); err != nil {
-		return "", err
-	}
-	notesRoot := filepath.Join(filepath.Dir(fileName()), "notes")
-	if err := copyDirIfExists(notesRoot, filepath.Join(root, "notes")); err != nil {
-		return "", err
-	}
-	return root, nil
-}
-
-func copyFileIfExists(source string, target string) error {
-	data, err := os.ReadFile(source)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read backup source file: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("create backup file directory: %w", err)
-	}
-	if err := os.WriteFile(target, data, 0o644); err != nil {
-		return fmt.Errorf("write backup file: %w", err)
+	if dirFile, err := os.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 	return nil
-}
-
-func copyDirIfExists(source string, target string) error {
-	info, err := os.Stat(source)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("stat backup source directory: %w", err)
-	}
-	if !info.IsDir() {
-		return nil
-	}
-	return filepath.WalkDir(source, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		destPath := filepath.Join(target, rel)
-		if d.IsDir() {
-			return os.MkdirAll(destPath, 0o755)
-		}
-		return copyFileIfExists(path, destPath)
-	})
 }

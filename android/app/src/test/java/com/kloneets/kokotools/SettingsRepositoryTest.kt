@@ -40,8 +40,6 @@ class SettingsRepositoryTest {
         assertEquals(ThemeMode.Dark, settings.androidApp.themeMode)
         assertEquals(true, settings.firebase.enabled)
         assertEquals("ws-1", settings.firebase.workspaceId)
-        assertEquals("folder-1", settings.gdrive.folderId)
-        assertEquals("snap-1", settings.gdrive.snapshots.single().id)
     }
 
     @Test
@@ -56,12 +54,6 @@ class SettingsRepositoryTest {
                     spellDictionaries = listOf("en", "lv"),
                 ),
                 androidApp = AndroidSettings(themeMode = ThemeMode.Light),
-                gdrive = GDriveSettings(
-                    folderId = "folder",
-                    folderName = "name",
-                    selectedSnapshotId = "snapshot",
-                    snapshots = listOf(DriveSnapshotMeta("snapshot", "2026", "now")),
-                ),
                 firebase = FirebaseSettings(
                     enabled = true,
                     realtime = true,
@@ -84,8 +76,7 @@ class SettingsRepositoryTest {
         assertEquals(true, json.getJSONObject("firebase").getBoolean("enabled"))
         assertEquals("project", json.getJSONObject("firebase").getString("project_id"))
         assertEquals("ws", json.getJSONObject("firebase").getString("workspace_id"))
-        assertEquals("folder", json.getJSONObject("gdrive").getString("folder_id"))
-        assertEquals("snapshot", json.getJSONObject("gdrive").getJSONArray("snapshots").getJSONObject(0).getString("id"))
+        assertFalse(json.has("gdrive"))
     }
 
     @Test
@@ -140,7 +131,7 @@ class SettingsRepositoryTest {
     }
 
     @Test
-    fun writesDesktopCompatibleDefaultsForMobileSnapshots() {
+    fun writesDesktopCompatibleDefaultsWithoutGoogleDrive() {
         val json = SettingsRepository.toJson(
             AppSettings(
                 pagesApp = PagesSettings(firstBook = 10),
@@ -162,7 +153,7 @@ class SettingsRepositoryTest {
         assertEquals(false, json.getJSONObject("notes_app").getBoolean("spell_check_enabled"))
         assertEquals(0, json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").length())
         assertEquals(true, json.getJSONObject("firebase").getBoolean("realtime"))
-        assertEquals(10, json.getJSONObject("gdrive").getInt("sync_interval_sec"))
+        assertFalse(json.has("gdrive"))
     }
 
     @Test
@@ -186,7 +177,7 @@ class SettingsRepositoryTest {
               },
               "android_app": {"theme_mode": "dark", "unknown_mobile_field": true},
               "app_window": {"width": 900, "height": 700, "maximized": true},
-              "ui": {"show_pages": false, "show_password": true, "show_notes": true, "theme": "gruvbox"},
+                "ui": {"show_pages": false, "show_password": true, "show_notes": true, "theme": "gruvbox"},
               "gdrive": {"enabled": true, "sync_interval_sec": 25, "folder_id": "old", "last_sync_status": "ok"}
             }
             """.trimIndent(),
@@ -195,7 +186,6 @@ class SettingsRepositoryTest {
         val json = SettingsRepository.toJson(
             loaded.copy(
                 notesApp = loaded.notesApp.copy(currentNotePath = "b.md"),
-                gdrive = loaded.gdrive.copy(folderId = "new"),
             ),
         )
 
@@ -209,9 +199,7 @@ class SettingsRepositoryTest {
         assertEquals(true, json.getJSONObject("android_app").getBoolean("unknown_mobile_field"))
         assertEquals(900, json.getJSONObject("app_window").getInt("width"))
         assertEquals("gruvbox", json.getJSONObject("ui").getString("theme"))
-        assertEquals(true, json.getJSONObject("gdrive").getBoolean("enabled"))
-        assertEquals(25, json.getJSONObject("gdrive").getInt("sync_interval_sec"))
-        assertEquals("new", json.getJSONObject("gdrive").getString("folder_id"))
+        assertFalse(json.has("gdrive"))
     }
 
     @Test

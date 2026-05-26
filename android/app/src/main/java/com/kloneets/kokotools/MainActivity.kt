@@ -5,7 +5,6 @@ import android.app.AlertDialog
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.Intent
-import android.content.IntentSender
 import android.net.Uri
 import android.graphics.Paint
 import android.graphics.Rect
@@ -25,7 +24,6 @@ import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.provider.OpenableColumns
-import android.widget.BaseAdapter
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -41,16 +39,9 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import com.google.android.gms.auth.api.identity.AuthorizationRequest
-import com.google.android.gms.auth.api.identity.AuthorizationResult
-import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
-import com.google.android.gms.common.api.Scope
-import com.google.android.gms.common.ConnectionResult
-import com.google.android.gms.common.GoogleApiAvailability
-import java.io.IOException
 
 class MainActivity : Activity() {
     private lateinit var settingsRepository: SettingsRepository
@@ -58,15 +49,11 @@ class MainActivity : Activity() {
     private lateinit var todoRepository: TodoRepository
     private lateinit var firebaseSyncRepository: FirebaseSyncRepository
     private val pagesCalculator = PagesCalculator()
-    private val driveRepository = DriveSnapshotRepository()
 
     private var settings = AppSettings()
     private var todoStore = TodoStore()
     private var currentNotePath = ""
     private var noteList: List<NoteFile> = emptyList()
-    private var driveAccessToken: String? = null
-    private var driveAuthInProgress = false
-    private var selectedSnapshotId = ""
     private var firebaseSession: FirebaseSession? = null
     private var currentScreen = Screen.Todo
     private var palette = AppPalette.light()
@@ -99,15 +86,6 @@ class MainActivity : Activity() {
     private var rawNoteTouchDownAt = 0L
 
     private var syncStatusText: TextView? = null
-    private var syncFolderTitle: TextView? = null
-    private var syncActionTitle: TextView? = null
-    private var syncSnapshotTitle: TextView? = null
-    private var syncFolderText: TextView? = null
-    private var syncSelectFolderButton: Button? = null
-    private var syncSnapshotList: ListView? = null
-    private var syncConnectButton: Button? = null
-    private var syncUploadButton: Button? = null
-    private var syncRefreshButton: Button? = null
     private var todoRefreshRunnable: Runnable? = null
     private var firebasePullRunnable: Runnable? = null
     private var firebaseSettingsPushRunnable: Runnable? = null
@@ -130,7 +108,6 @@ class MainActivity : Activity() {
         palette = resolvePalette()
         applySystemBars()
         currentNotePath = settings.notesApp.currentNotePath
-        selectedSnapshotId = settings.gdrive.selectedSnapshotId
         buildRoot()
         showTodo()
         startFirebaseRealtimeIfEnabled()
@@ -147,18 +124,6 @@ class MainActivity : Activity() {
         if (requestCode == FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE) {
             handleFirebaseGoogleSignInResult(resultCode, data)
             return
-        }
-        if (requestCode != DRIVE_AUTH_REQUEST_CODE) return
-        driveAuthInProgress = false
-        updateSyncButtons()
-        if (resultCode != RESULT_OK || data == null) {
-            setSyncStatus("Google authorization canceled. If the Google screen flashed, add a Google account in the emulator first.")
-            return
-        }
-        try {
-            handleAuthorizationResult(Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(data))
-        } catch (error: ApiException) {
-            setSyncStatus("Google authorization failed: ${error.message}")
         }
     }
 
@@ -431,7 +396,7 @@ class MainActivity : Activity() {
             }
             setTextColor(COLOR_TEXT_PRIMARY)
             setHintTextColor(COLOR_TEXT_MUTED)
-            setPadding(dp(14), dp(12), dp(14), dp(120))
+            setPadding(dp(14), dp(12), dp(14), dp(16))
             background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, 0f)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -545,13 +510,22 @@ class MainActivity : Activity() {
     }
 
     private fun toggleNoteRendering() {
+        changeNoteRenderingEnabled(settings.notesApp.previewHidden)
+    }
+
+    private fun changeNoteRenderingEnabled(enabled: Boolean) {
+        if (enabled == !settings.notesApp.previewHidden) return
         saveCurrentNoteSilently()
         persistSettings(
             settings.copy(
-                notesApp = settings.notesApp.copy(previewHidden = !settings.notesApp.previewHidden),
+                notesApp = settings.notesApp.copy(previewHidden = !enabled),
             ),
         )
-        showNotes()
+        if (currentScreen == Screen.Notes) {
+            showNotes()
+        } else if (currentScreen == Screen.Settings) {
+            showSettings()
+        }
     }
 
     private fun showNotePicker() {
@@ -1321,104 +1295,20 @@ class MainActivity : Activity() {
         content.addView(commandButton("Login Firebase with Google", View.generateViewId()) {
             loginFirebaseWithGoogle()
         })
-        content.addView(commandButton("Pull todos now", View.generateViewId()) {
-            pullTodosFromFirebase()
-        })
-        content.addView(commandButton("Replace local from Firebase", View.generateViewId()) {
-            replaceLocalFromFirebase()
-        })
-        content.addView(commandButton("Push todos now", View.generateViewId()) {
-            pushTodosToFirebase()
-        })
-        content.addView(commandButton("Pull settings and assets now", View.generateViewId()) {
-            pullSharedFirebaseData()
-        })
-        content.addView(commandButton("Push settings and assets now", View.generateViewId()) {
-            pushSharedFirebaseData()
+        content.addView(commandButton("Sync to Firebase", View.generateViewId()) {
+            syncToFirebase()
         })
         if (BuildConfig.DEBUG || !FirebaseDefaults.bundled.ready) {
             content.addView(commandButton("Advanced custom Firebase config", View.generateViewId()) {
                 promptFirebaseConfig()
             })
         }
-        content.addView(TextView(this).apply {
-            text = "Google Drive below is legacy manual snapshot backup."
-            textSize = 13f
-            setTextColor(COLOR_TEXT_SECONDARY)
-            setPadding(dp(4), dp(8), dp(4), dp(4))
-        })
-
-        syncFolderTitle = sectionTitle("Drive folder")
-        content.addView(syncFolderTitle)
-        syncFolderText = TextView(this).apply {
-            id = R.id.sync_folder_id
-            textSize = 15f
-            setTextColor(COLOR_TEXT_PRIMARY)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            background = roundedFill(COLOR_SURFACE, dp(10).toFloat())
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
-        }
-        content.addView(syncFolderText)
-
-        syncSelectFolderButton = commandButton("Select Drive folder", R.id.sync_select_folder) {
-            showDriveFolderPicker()
-        }
-        content.addView(syncSelectFolderButton)
-
-        syncActionTitle = sectionTitle("Snapshot actions")
-        content.addView(syncActionTitle)
-        syncConnectButton = commandButton("Connect Google", R.id.sync_connect) {
-            connectGoogleDrive()
-        }
-        syncUploadButton = commandButton("Upload snapshot", R.id.sync_upload) {
-            uploadDriveSnapshot()
-        }
-        syncRefreshButton = commandButton("Refresh snapshots", R.id.sync_refresh) {
-            refreshDriveSnapshots()
-        }
-        content.addView(syncConnectButton)
-        content.addView(syncUploadButton)
-        content.addView(syncRefreshButton)
-
-        syncSnapshotTitle = sectionTitle("Snapshots")
-        content.addView(syncSnapshotTitle)
-        syncSnapshotList = ListView(this).apply {
-            id = R.id.sync_snapshot_list
-            divider = null
-            background = roundedFill(COLOR_SURFACE, dp(10).toFloat())
-            setPadding(0, dp(4), 0, dp(4))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            )
-        }
-        content.addView(syncSnapshotList)
-
-        refreshSnapshotListView()
-        updateSyncButtons()
     }
 
     private fun showSyncActionsMenu(anchor: View) {
-        val visibility = currentSyncActionVisibility()
         PopupMenu(this, anchor).apply {
-            if (visibility.connect) menu.add("Connect Google").setOnMenuItemClickListener {
-                connectGoogleDrive()
-                true
-            }
-            if (visibility.folderSelection) menu.add("Select Drive folder").setOnMenuItemClickListener {
-                showDriveFolderPicker()
-                true
-            }
-            if (visibility.upload) menu.add("Upload snapshot").setOnMenuItemClickListener {
-                uploadDriveSnapshot()
-                true
-            }
-            if (visibility.refresh) menu.add("Refresh snapshots").setOnMenuItemClickListener {
-                refreshDriveSnapshots()
+            menu.add("Sync to Firebase").setOnMenuItemClickListener {
+                syncToFirebase()
                 true
             }
             show()
@@ -1455,6 +1345,29 @@ class MainActivity : Activity() {
         content.addView(group)
 
         content.addView(sectionTitle("Notes"))
+        val richRendering = CheckBox(this).apply {
+            id = R.id.settings_note_rendering
+            text = "Rich text rendering"
+            textSize = 16f
+            setTextColor(COLOR_TEXT_PRIMARY)
+            buttonTintList = ColorStateList.valueOf(COLOR_ACCENT)
+            background = selectableFillBackground(COLOR_SURFACE)
+            setPadding(dp(12), 0, dp(12), 0)
+            isChecked = !settings.notesApp.previewHidden
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48),
+            ).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(8)
+            }
+            setOnCheckedChangeListener { _, checked ->
+                if (checked != !settings.notesApp.previewHidden) {
+                    changeNoteRenderingEnabled(checked)
+                }
+            }
+        }
+        content.addView(richRendering)
         val spellCheck = CheckBox(this).apply {
             id = R.id.settings_spell_check
             text = "Spell checking"
@@ -1989,6 +1902,109 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun syncToFirebase() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        saveCurrentNoteSilently()
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                val localTodos = todoRepository.load()
+                val mergedTodos = firebaseSyncRepository.pullTodos(settings.firebase, localTodos, session)
+                val todoChanged = mergedTodos != localTodos
+                if (todoChanged) {
+                    todoRepository.save(mergedTodos)
+                }
+                val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
+                val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
+                val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
+                Pair(
+                    FirebasePullResult(
+                        todos = mergedTodos,
+                        todoChanged = todoChanged,
+                        remoteNotes = remoteNotes,
+                        remoteTodoCount = mergedTodos.items.size,
+                        remoteNoteCount = remoteNotes.count { !it.deleted },
+                    ),
+                    Pair(shared, remoteAssets),
+                )
+            }.onSuccess { result ->
+                runOnUiThread {
+                    val pullResult = result.first
+                    val shared = result.second.first
+                    val remoteAssets = result.second.second
+                    val localEditActive = hasActiveLocalEdit()
+                    if (shared != null && localEditActive) {
+                        setSyncStatus("Firebase shared settings deferred while local edits are active")
+                    }
+                    if (shared != null && shared.rev <= pagesLocalEditAtMs) {
+                        setSyncStatus("Firebase shared settings skipped because local Pages are newer")
+                    }
+                    if (shared != null && !localEditActive && shared.rev > pagesLocalEditAtMs) {
+                        settings = SettingsRepository.applySharedSettings(settings, shared.values)
+                        settingsRepository.save(settings)
+                        firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
+                    }
+                    if (!localEditActive) applyRemoteAssets(remoteAssets)
+                    applyRemoteNotes(pullResult.remoteNotes)
+                    todoStore = pullResult.todos
+                    if (SyncUiState.shouldRebuildTodoAfterPull(
+                            todoChanged = pullResult.todoChanged,
+                            showingTodo = currentScreen == Screen.Todo,
+                            canRebuild = canRebuildTodoAfterRemotePull(),
+                        )
+                    ) {
+                        showTodoPreservingScroll()
+                    }
+                    if (currentScreen == Screen.Pages && !localEditActive) showPages()
+                    if (currentScreen == Screen.Assets && !localEditActive) refreshAssets()
+                    pushLocalStateAfterManualFirebasePull(pullResult, shared, remoteAssets)
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}") }
+            }
+        }.start()
+    }
+
+    private fun pushLocalStateAfterManualFirebasePull(
+        pullResult: FirebasePullResult,
+        shared: FirebaseSharedSettings?,
+        remoteAssets: List<FirebaseRemoteAsset>,
+    ) {
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
+                notesRepository.listNotes().forEach { note ->
+                    firebaseSyncRepository.pushNote(settings.firebase, note.relativePath, notesRepository.read(note.relativePath), session)
+                }
+                val settingsPushed = firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
+                val pushedAssets = firebaseSyncRepository.pushAssets(settings.firebase, notesRepository.listAssets(), session)
+                settingsPushed to pushedAssets
+            }.onSuccess { (settingsPushed, pushedAssets) ->
+                runOnUiThread {
+                    val deferredNoteCount = pendingRemoteNotes.size
+                    val sharedStatus = if (shared != null || settingsPushed) ", shared settings synced" else ""
+                    val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
+                    setSyncStatus(
+                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s), $pushedAssets asset(s) pushed$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
+                    )
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}") }
+            }
+        }.start()
+    }
+
     private fun replaceLocalFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         if (hasActiveLocalEdit()) {
@@ -2141,242 +2157,8 @@ class MainActivity : Activity() {
         return todoDraftText.isBlank()
     }
 
-    private fun saveSelectedDriveFolder(folder: DriveSnapshotRepository.DriveEntry) {
-        selectedSnapshotId = ""
-        persistSettings(
-            settings.copy(
-                gdrive = settings.gdrive.copy(
-                    folderId = folder.id,
-                    folderName = folder.name,
-                    selectedSnapshotId = "",
-                    snapshots = emptyList(),
-                ),
-            ),
-        )
-        refreshSnapshotListView()
-        syncFolderText?.text = selectedFolderLabel()
-        setSyncStatus("Synced to ${folder.name}")
-        updateSyncButtons()
-        if (driveAccessToken != null) {
-            refreshDriveSnapshots()
-        }
-    }
-
-    private fun connectGoogleDrive() {
-        if (driveAuthInProgress) {
-            setSyncStatus("Google authorization is already open")
-            return
-        }
-        val availability = GoogleApiAvailability.getInstance()
-        val status = availability.isGooglePlayServicesAvailable(this)
-        if (status != ConnectionResult.SUCCESS) {
-            val message = availability.getErrorString(status)
-            setSyncStatus("Google Play services unavailable: $message")
-            availability.getErrorDialog(this, status, PLAY_SERVICES_REQUEST_CODE)?.show()
-            return
-        }
-
-        setSyncStatus("Opening Google authorization")
-        driveAuthInProgress = true
-        updateSyncButtons()
-        val request = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(Scope(DriveSnapshotRepository.DRIVE_SCOPE)))
-            .build()
-        Identity.getAuthorizationClient(this).authorize(request)
-            .addOnSuccessListener { handleAuthorizationResult(it) }
-            .addOnFailureListener {
-                driveAuthInProgress = false
-                setSyncStatus("Google authorization failed: ${it.message ?: it.javaClass.simpleName}")
-                updateSyncButtons()
-            }
-    }
-
-    private fun handleAuthorizationResult(result: AuthorizationResult) {
-        if (result.hasResolution()) {
-            val pendingIntent = result.pendingIntent
-            if (pendingIntent == null) {
-                driveAuthInProgress = false
-                setSyncStatus("Google authorization needs resolution but did not return an intent")
-                updateSyncButtons()
-                return
-            }
-            try {
-                startIntentSenderForResult(
-                    pendingIntent.intentSender,
-                    DRIVE_AUTH_REQUEST_CODE,
-                    null,
-                    0,
-                    0,
-                    0,
-                )
-            } catch (error: IntentSender.SendIntentException) {
-                driveAuthInProgress = false
-                setSyncStatus("Google authorization failed: ${error.message}")
-                updateSyncButtons()
-            }
-            return
-        }
-        val token = result.accessToken
-        if (token.isNullOrBlank()) {
-            driveAuthInProgress = false
-            setSyncStatus("Google authorization did not return a Drive access token")
-            updateSyncButtons()
-            return
-        }
-        driveAuthInProgress = false
-        driveAccessToken = token
-        setSyncStatus("Google Drive connected")
-        updateSyncButtons()
-        if (settings.gdrive.folderId.isNotBlank()) {
-            refreshDriveSnapshots()
-        }
-    }
-
-    private fun uploadDriveSnapshot() {
-        val token = driveAccessToken ?: return setSyncStatus("Connect Google first")
-        val folderId = settings.gdrive.folderId
-        if (folderId.isBlank()) return setSyncStatus("Select a Drive folder first")
-
-        runDriveOperation("Uploading snapshot") {
-            settingsRepository.save(settings)
-            val snapshot = driveRepository.uploadSnapshot(
-                folderId = folderId,
-                accessToken = token,
-                settingsData = settingsRepository.settingsPath().readBytes(),
-                todosData = todoRepository.todosPath().takeIf { it.exists() }?.readBytes()
-                    ?: "{\"version\":1,\"items\":[]}\n".toByteArray(),
-                notesRoot = notesRepository.notesPath(),
-                retain = 5,
-            )
-            val snapshots = driveRepository.listSnapshots(folderId, token)
-            runOnUiThread {
-                selectedSnapshotId = snapshot.id
-                persistSettings(
-                    settings.copy(
-                        gdrive = settings.gdrive.copy(
-                            selectedSnapshotId = snapshot.id,
-                            snapshots = snapshots,
-                        ),
-                    ),
-                )
-                refreshSnapshotListView()
-                setSyncStatus("Uploaded snapshot ${snapshot.name}")
-                updateSyncButtons()
-            }
-        }
-    }
-
-    private fun refreshDriveSnapshots() {
-        val token = driveAccessToken ?: return setSyncStatus("Connect Google first")
-        val folderId = settings.gdrive.folderId
-        if (folderId.isBlank()) return setSyncStatus("Select a Drive folder first")
-
-        runDriveOperation("Refreshing snapshots") {
-            val snapshots = driveRepository.listSnapshots(folderId, token)
-            runOnUiThread {
-                selectedSnapshotId = DriveSnapshotSelection.preserveIfPresent(selectedSnapshotId, snapshots)
-                persistSettings(
-                    settings.copy(
-                        gdrive = settings.gdrive.copy(
-                            selectedSnapshotId = selectedSnapshotId,
-                            snapshots = snapshots,
-                        ),
-                    ),
-                )
-                refreshSnapshotListView()
-                setSyncStatus(if (snapshots.isEmpty()) "No snapshots found in Drive" else "Found ${snapshots.size} snapshot(s)")
-                updateSyncButtons()
-            }
-        }
-    }
-
-    private fun confirmRestoreDriveSnapshot(snapshot: DriveSnapshotMeta) {
-        AlertDialog.Builder(this)
-            .setTitle("Restore snapshot")
-            .setMessage("Replace local settings and notes with ${snapshot.name}?")
-            .setPositiveButton("Restore") { _, _ -> restoreDriveSnapshot(snapshot) }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun restoreDriveSnapshot(snapshot: DriveSnapshotMeta) {
-        val token = driveAccessToken ?: return setSyncStatus("Connect Google first")
-        runDriveOperation("Restoring snapshot") {
-            val settingsData = driveRepository.restoreSnapshot(snapshot.id, token, notesRepository, todoRepository)
-            val restored = SettingsRepository.parse(settingsData.toString(Charsets.UTF_8))
-            runOnUiThread {
-                val preservedDrive = settings.gdrive.copy(selectedSnapshotId = snapshot.id)
-                persistSettings(restored.copy(gdrive = preservedDrive))
-                currentNotePath = settings.notesApp.currentNotePath
-                todoStore = todoRepository.load()
-                selectedSnapshotId = snapshot.id
-                refreshSnapshotListView()
-                setSyncStatus("Restored snapshot ${snapshot.name}")
-                showNotes()
-            }
-        }
-    }
-
-    private fun runDriveOperation(status: String, operation: () -> Unit) {
-        setSyncStatus(status)
-        setSyncButtonsEnabled(false)
-        Thread {
-            try {
-                operation()
-            } catch (error: Exception) {
-                runOnUiThread {
-                    if (error is DriveSnapshotRepository.DriveAuthorizationException) {
-                        driveAccessToken = null
-                    }
-                    setSyncStatus(syncErrorStatus(error))
-                    updateSyncButtons()
-                }
-            }
-        }.start()
-    }
-
-    private fun refreshSnapshotListView() {
-        syncFolderText?.text = selectedFolderLabel()
-        syncSnapshotList?.adapter = SnapshotAdapter(settings.gdrive.snapshots)
-        updateSyncButtons()
-    }
-
     private fun setSyncStatus(status: String) {
         syncStatusText?.text = status
-    }
-
-    private fun updateSyncButtons() {
-        val visibility = currentSyncActionVisibility()
-        syncConnectButton?.visibility = if (visibility.connect) View.VISIBLE else View.GONE
-        syncSelectFolderButton?.visibility = if (visibility.folderSelection) View.VISIBLE else View.GONE
-        syncFolderText?.visibility = if (visibility.folderSelection) View.VISIBLE else View.GONE
-        syncFolderTitle?.visibility = if (visibility.folderSelection) View.VISIBLE else View.GONE
-        syncActionTitle?.visibility = if (visibility.upload || visibility.refresh) View.VISIBLE else View.GONE
-        syncSnapshotTitle?.visibility = if (visibility.upload || visibility.refresh) View.VISIBLE else View.GONE
-        syncSnapshotList?.visibility = if (visibility.upload || visibility.refresh) View.VISIBLE else View.GONE
-        syncUploadButton?.visibility = if (visibility.upload) View.VISIBLE else View.GONE
-        syncRefreshButton?.visibility = if (visibility.refresh) View.VISIBLE else View.GONE
-
-        syncConnectButton?.isEnabled = visibility.connect
-        syncSelectFolderButton?.isEnabled = visibility.folderSelection
-        syncUploadButton?.isEnabled = visibility.upload
-        syncRefreshButton?.isEnabled = visibility.refresh
-    }
-
-    private fun setSyncButtonsEnabled(enabled: Boolean) {
-        syncConnectButton?.isEnabled = enabled
-        syncSelectFolderButton?.isEnabled = enabled
-        syncUploadButton?.isEnabled = enabled
-        syncRefreshButton?.isEnabled = enabled
-    }
-
-    private fun currentSyncActionVisibility(): SyncActionVisibility {
-        return SyncUiState.actionVisibility(
-            connected = driveAccessToken != null,
-            authInProgress = driveAuthInProgress,
-            hasFolder = settings.gdrive.folderId.isNotBlank(),
-            hasSelectedSnapshot = settings.gdrive.snapshots.any { it.id == selectedSnapshotId },
-        )
     }
 
     private fun currentSyncStatus(): String {
@@ -2395,153 +2177,7 @@ class MainActivity : Activity() {
             }
         }
         if (FirebaseDefaults.bundled.ready) return "Firebase: ready. Create account or login."
-        if (driveAccessToken == null) return "Not connected"
-        val folderName = settings.gdrive.folderName.ifBlank { settings.gdrive.folderId }
-        return if (folderName.isBlank()) "Connected, no folder selected" else "Synced to $folderName"
-    }
-
-    private fun selectedFolderLabel(): String {
-        val folderName = settings.gdrive.folderName.ifBlank { settings.gdrive.folderId }
-        return if (folderName.isBlank()) "No Drive folder selected" else "Drive folder: $folderName"
-    }
-
-    private fun showDriveFolderPicker() {
-        val token = driveAccessToken ?: return setSyncStatus("Connect Google first")
-        val rootFolder = DriveSnapshotRepository.DriveEntry(
-            id = DriveSnapshotRepository.ROOT_FOLDER_ID,
-            name = "My Drive",
-            mimeType = DriveSnapshotRepository.DRIVE_FOLDER_MIME,
-        )
-        val folderStack = mutableListOf<DriveSnapshotRepository.DriveEntry>()
-        var currentFolder = rootFolder
-        var currentFolders: List<DriveSnapshotRepository.DriveEntry> = emptyList()
-
-        val pickerLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, 0)
-        }
-        val locationText = TextView(this).apply {
-            textSize = 15f
-            setTextColor(COLOR_TEXT_PRIMARY)
-            setPadding(dp(8), 0, dp(8), dp(8))
-        }
-        val folderList = ListView(this).apply {
-            divider = null
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(260),
-            )
-        }
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-            setPadding(0, dp(10), 0, 0)
-        }
-        val newFolderButton = dialogButton("New folder")
-        val backButton = dialogButton("Back")
-        val selectButton = dialogButton("Select this folder")
-        buttons.addView(newFolderButton)
-        buttons.addView(backButton)
-        buttons.addView(selectButton)
-        pickerLayout.addView(locationText)
-        pickerLayout.addView(folderList)
-        pickerLayout.addView(buttons)
-
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Select Drive folder")
-            .setView(pickerLayout)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        fun showFolders() {
-            locationText.text = "Loading ${currentFolder.name}"
-            folderList.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, listOf("Loading..."))
-            backButton.isEnabled = folderStack.isNotEmpty()
-            Thread {
-                try {
-                    val folders = driveRepository.listFolders(currentFolder.id, token)
-                    runOnUiThread {
-                        currentFolders = folders
-                        locationText.text = currentFolder.name
-                        val labels = if (folders.isEmpty()) listOf("No folders") else folders.map { it.name }
-                        folderList.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
-                        folderList.setOnItemClickListener { _, _, position, _ ->
-                            if (currentFolders.isEmpty()) return@setOnItemClickListener
-                            folderStack.add(currentFolder)
-                            currentFolder = currentFolders[position]
-                            showFolders()
-                        }
-                        backButton.isEnabled = folderStack.isNotEmpty()
-                    }
-                } catch (error: Exception) {
-                    runOnUiThread {
-                        if (error is DriveSnapshotRepository.DriveAuthorizationException) {
-                            driveAccessToken = null
-                            dialog.dismiss()
-                        }
-                        setSyncStatus(syncErrorStatus(error))
-                        updateSyncButtons()
-                    }
-                }
-            }.start()
-        }
-
-        selectButton.setOnClickListener {
-            saveSelectedDriveFolder(currentFolder)
-            dialog.dismiss()
-        }
-        backButton.setOnClickListener {
-            if (folderStack.isEmpty()) return@setOnClickListener
-            currentFolder = folderStack.removeAt(folderStack.lastIndex)
-            showFolders()
-        }
-        newFolderButton.setOnClickListener {
-            promptNewDriveFolder(currentFolder, dialog)
-        }
-
-        dialog.setOnShowListener { showFolders() }
-        dialog.show()
-    }
-
-    private fun promptNewDriveFolder(parentFolder: DriveSnapshotRepository.DriveEntry, pickerDialog: AlertDialog) {
-        val token = driveAccessToken ?: return setSyncStatus("Connect Google first")
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT
-            hint = "Folder name"
-            setSingleLine(true)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("New Drive folder")
-            .setView(input)
-            .setPositiveButton("Create") { _, _ ->
-                val folderName = input.text.toString().trim()
-                if (folderName.isBlank()) {
-                    setSyncStatus("Drive folder name is required")
-                    return@setPositiveButton
-                }
-                setSyncStatus("Creating Drive folder")
-                setSyncButtonsEnabled(false)
-                Thread {
-                    try {
-                        val folder = driveRepository.createFolderIn(parentFolder.id, folderName, token)
-                        runOnUiThread {
-                            saveSelectedDriveFolder(folder)
-                            pickerDialog.dismiss()
-                        }
-                    } catch (error: Exception) {
-                        runOnUiThread {
-                            if (error is DriveSnapshotRepository.DriveAuthorizationException) {
-                                driveAccessToken = null
-                                pickerDialog.dismiss()
-                            }
-                            setSyncStatus(syncErrorStatus(error))
-                            updateSyncButtons()
-                        }
-                    }
-                }.start()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        return "Firebase config unavailable. Add bundled defaults or advanced custom config."
     }
 
     private fun dialogButton(label: String): Button {
@@ -2572,61 +2208,6 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
                 leftMargin = dp(6)
             }
-        }
-    }
-
-    private inner class SnapshotAdapter(
-        private val snapshots: List<DriveSnapshotMeta>,
-    ) : BaseAdapter() {
-        override fun getCount(): Int = snapshots.size
-        override fun getItem(position: Int): DriveSnapshotMeta = snapshots[position]
-        override fun getItemId(position: Int): Long = position.toLong()
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val row = (convertView as? LinearLayout) ?: LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(12), dp(8), dp(8), dp(8))
-            }
-            row.removeAllViews()
-
-            val snapshot = getItem(position)
-            val label = TextView(this@MainActivity).apply {
-                text = snapshotLabel(snapshot)
-                textSize = 15f
-                setTextColor(COLOR_TEXT_PRIMARY)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val restoreButton = ImageButton(this@MainActivity).apply {
-                id = R.id.sync_snapshot_restore
-                contentDescription = "Restore snapshot"
-                setImageResource(R.drawable.ic_restore_24)
-                setColorFilter(COLOR_ACCENT)
-                scaleType = ImageView.ScaleType.CENTER
-                setPadding(dp(9), dp(9), dp(9), dp(9))
-                background = selectableBorderlessBackground()
-                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
-                    leftMargin = dp(8)
-                }
-                setOnClickListener { confirmRestoreDriveSnapshot(snapshot) }
-            }
-            row.addView(label)
-            row.addView(restoreButton)
-            return row
-        }
-    }
-
-    private fun snapshotLabel(snapshot: DriveSnapshotMeta): String {
-        val createdAt = SnapshotDateFormatter.format(snapshot.createdAt)
-        return if (createdAt.isBlank()) snapshot.name else "${snapshot.name}  $createdAt"
-    }
-
-    private fun syncErrorStatus(error: Exception): String {
-        return when (error) {
-            is DriveSnapshotRepository.SnapshotsFolderNotFoundException -> "No snapshots folder found in Drive"
-            is DriveSnapshotRepository.DriveAuthorizationException -> "Google authorization expired. Connect Google again."
-            is IOException -> "Drive API error: ${error.message ?: error.javaClass.simpleName}"
-            else -> error.message ?: "Drive operation failed"
         }
     }
 
@@ -2779,8 +2360,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val ASSET_IMPORT_REQUEST_CODE = 4200
-        private const val DRIVE_AUTH_REQUEST_CODE = 4201
-        private const val PLAY_SERVICES_REQUEST_CODE = 4202
         private const val FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE = 4203
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L

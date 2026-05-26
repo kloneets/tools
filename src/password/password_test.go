@@ -2,12 +2,9 @@ package password
 
 import (
 	"math/rand"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/settings"
 )
 
@@ -44,18 +41,7 @@ func TestGeneratePasswordUsesPoolAndLength(t *testing.T) {
 func TestGeneratePersistsSettingsLocally(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
 	settings.Init()
-	settings.Inst().GDrive.Enabled = true
-	settings.Inst().GDrive.FolderID = "folder-1"
-	settings.Inst().GDrive.PendingSync = false
 
 	m := NewModel()
 	m.Letters = true
@@ -69,8 +55,5 @@ func TestGeneratePersistsSettingsLocally(t *testing.T) {
 	}
 	if settings.Inst().PasswordApp.SymbolCount != 12 {
 		t.Fatalf("SymbolCount = %d, want 12", settings.Inst().PasswordApp.SymbolCount)
-	}
-	if settings.Inst().GDrive.PendingSync {
-		t.Fatal("PendingSync = true, want false after password-only change")
 	}
 }

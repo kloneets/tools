@@ -773,7 +773,6 @@ func (w *Workspace) saveCurrent(sync bool) error {
 		return err
 	}
 	ed.Dirty = false
-	settings.MarkDriveDirty()
 	if sync {
 		settings.SaveSettings()
 	} else {
@@ -851,7 +850,6 @@ func (w *Workspace) saveAllDirty(sync bool) (bool, error) {
 		wroteAny = true
 	}
 	if wroteAny {
-		settings.MarkDriveDirty()
 		if sync {
 			settings.SaveSettings()
 		} else {

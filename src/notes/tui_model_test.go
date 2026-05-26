@@ -2259,12 +2259,9 @@ func TestWorkspaceRegisterOverridesStaleNoteRegisterOnPaste(t *testing.T) {
 	}
 }
 
-func TestSaveAllDirtyLocalDoesNotStartDriveSync(t *testing.T) {
+func TestSaveAllDirtyLocalWritesDirtyFiles(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	settings.Inst().GDrive.Enabled = true
-	settings.Inst().GDrive.FolderID = "folder-1"
-	settings.Inst().GDrive.PendingSync = true
 
 	root := t.TempDir()
 	first := filepath.Join(root, "one.md")
@@ -2278,9 +2275,6 @@ func TestSaveAllDirtyLocalDoesNotStartDriveSync(t *testing.T) {
 	}
 	if !wrote {
 		t.Fatal("SaveAllDirtyLocal() wrote = false, want true")
-	}
-	if !settings.Inst().GDrive.PendingSync {
-		t.Fatal("PendingSync = false, want true after local-only save")
 	}
 }
 

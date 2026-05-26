@@ -36,9 +36,7 @@ class SettingsRepository(private val context: Context) {
             val pages = root.optJSONObject("pages_app") ?: JSONObject()
             val notes = root.optJSONObject("notes_app") ?: JSONObject()
             val android = root.optJSONObject("android_app") ?: JSONObject()
-            val gdrive = root.optJSONObject("gdrive") ?: JSONObject()
             val firebase = root.optJSONObject("firebase") ?: JSONObject()
-            val snapshots = gdrive.optJSONArray("snapshots") ?: JSONArray()
 
             return AppSettings(
                 pagesApp = PagesSettings(
@@ -54,12 +52,6 @@ class SettingsRepository(private val context: Context) {
                 ),
                 androidApp = AndroidSettings(
                     themeMode = ThemeMode.fromValue(android.optString("theme_mode", ThemeMode.System.value)),
-                ),
-                gdrive = GDriveSettings(
-                    folderId = gdrive.optString("folder_id", ""),
-                    folderName = gdrive.optString("folder_name", ""),
-                    selectedSnapshotId = gdrive.optString("selected_snapshot_id", ""),
-                    snapshots = parseSnapshots(snapshots),
                 ),
                 firebase = FirebaseDefaults.applyBundledDefaults(
                     FirebaseSettings(
@@ -122,31 +114,7 @@ class SettingsRepository(private val context: Context) {
                 putIfMissing("theme", "tokyo-night")
                 putIfMissing("transparent_background", false)
             }
-
-            val gdrive = root.objectOrPut("gdrive")
-            gdrive.putIfMissing("enabled", false)
-            gdrive.putIfMissing("sync_interval_sec", 10)
-            gdrive.put("folder_id", settings.gdrive.folderId)
-            gdrive.put("folder_name", settings.gdrive.folderName)
-            gdrive.putIfMissing("pending_sync", false)
-            gdrive.putIfMissing("last_remote_state", "")
-            gdrive.putIfMissing("conflict_remote_state", "")
-            gdrive.putIfMissing("last_sync_at", "")
-            gdrive.putIfMissing("last_sync_status", "")
-            gdrive.putIfMissing("last_sync_message", "")
-            gdrive.putIfMissing("last_local_save_at", "")
-            gdrive.putIfMissing("last_drive_save_at", "")
-            gdrive.putIfMissing("last_drive_refresh_at", "")
-            gdrive.put("selected_snapshot_id", settings.gdrive.selectedSnapshotId)
-            gdrive.put(
-                "snapshots",
-                JSONArray(settings.gdrive.snapshots.map { snapshot ->
-                    JSONObject()
-                        .put("id", snapshot.id)
-                        .put("name", snapshot.name)
-                        .put("created_at", snapshot.createdAt)
-                }),
-            )
+            root.remove("gdrive")
 
             val firebase = root.objectOrPut("firebase")
             firebase.put("enabled", settings.firebase.enabled)
@@ -200,18 +168,6 @@ class SettingsRepository(private val context: Context) {
                 }
             }
             return parse(root.toString())
-        }
-
-        private fun parseSnapshots(snapshots: JSONArray): List<DriveSnapshotMeta> {
-            return (0 until snapshots.length()).mapNotNull { index ->
-                snapshots.optJSONObject(index)?.let {
-                    DriveSnapshotMeta(
-                        id = it.optString("id", ""),
-                        name = it.optString("name", ""),
-                        createdAt = it.optString("created_at", ""),
-                    )
-                }
-            }
         }
 
         private fun parseStringArray(values: JSONArray?): List<String> {
@@ -269,25 +225,6 @@ class SettingsRepository(private val context: Context) {
                         .put("show_notes", true)
                         .put("theme", "tokyo-night")
                         .put("transparent_background", false),
-                )
-                .put(
-                    "gdrive",
-                    JSONObject()
-                        .put("enabled", false)
-                        .put("sync_interval_sec", 10)
-                        .put("folder_id", "")
-                        .put("folder_name", "")
-                        .put("pending_sync", false)
-                        .put("last_remote_state", "")
-                        .put("conflict_remote_state", "")
-                        .put("last_sync_at", "")
-                        .put("last_sync_status", "")
-                        .put("last_sync_message", "")
-                        .put("last_local_save_at", "")
-                        .put("last_drive_save_at", "")
-                        .put("last_drive_refresh_at", "")
-                        .put("selected_snapshot_id", "")
-                        .put("snapshots", JSONArray()),
                 )
                 .put(
                     "firebase",

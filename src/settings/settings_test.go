@@ -1,15 +1,12 @@
 package settings
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/kloneets/tools/src/gdrive"
 	"github.com/kloneets/tools/src/helpers"
 )
 
@@ -56,9 +53,6 @@ func TestDefaultSettings(t *testing.T) {
 func TestNormalizeSettings(t *testing.T) {
 	cfg := &UserSettings{}
 	normalizeSettings(cfg)
-	if cfg.GDrive == nil || cfg.GDrive.SyncIntervalSec != 10 {
-		t.Fatalf("GDrive = %#v, want initialized interval 10", cfg.GDrive)
-	}
 	if cfg.Firebase == nil || !cfg.Firebase.Realtime {
 		t.Fatalf("Firebase = %#v, want initialized realtime settings", cfg.Firebase)
 	}
@@ -204,13 +198,9 @@ func TestSaveNotesPreviewHiddenPersistsLocally(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.PendingSync = false
 	SaveNotesPreviewHidden(true)
 	if !settingsInstance.NotesApp.PreviewHidden {
 		t.Fatal("PreviewHidden = false, want true")
-	}
-	if settingsInstance.GDrive.PendingSync {
-		t.Fatal("PendingSync = true, want false for local UI preference persistence")
 	}
 	data, err := os.ReadFile(fileName())
 	if err != nil {
@@ -221,20 +211,79 @@ func TestSaveNotesPreviewHiddenPersistsLocally(t *testing.T) {
 	}
 }
 
+func TestSaveSettingsLocalPersistsPreviewAndTabOrderAcrossInit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settingsInstance = defaultSettings()
+	settingsInstance.NotesApp.PreviewHidden = true
+	settingsInstance.UI.TabOrder = []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+
+	SaveSettingsLocal()
+	settingsInstance = nil
+	Init()
+
+	if !settingsInstance.NotesApp.PreviewHidden {
+		t.Fatal("PreviewHidden = false after Init, want true")
+	}
+	wantOrder := []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	if got := settingsInstance.UI.TabOrder; strings.Join(got, ",") != strings.Join(wantOrder, ",") {
+		t.Fatalf("TabOrder = %v after Init, want %v", got, wantOrder)
+	}
+}
+
+func TestInitRecoversSettingsFromValidBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Dir(fileName()), 0o755); err != nil {
+		t.Fatalf("MkdirAll(config dir) error = %v", err)
+	}
+	if err := os.WriteFile(fileName(), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(empty settings) error = %v", err)
+	}
+	backup := getFileName("settings.json_bup")
+	backupSettings := defaultSettings()
+	backupSettings.NotesApp.PreviewHidden = true
+	backupSettings.UI.TabOrder = []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	data, err := json.Marshal(backupSettings)
+	if err != nil {
+		t.Fatalf("Marshal(backup settings) error = %v", err)
+	}
+	if err := os.WriteFile(backup, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(settings backup) error = %v", err)
+	}
+
+	settingsInstance = nil
+	messages := Init()
+
+	if !settingsInstance.NotesApp.PreviewHidden {
+		t.Fatal("PreviewHidden = false after recovery, want true")
+	}
+	wantOrder := []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	if got := settingsInstance.UI.TabOrder; strings.Join(got, ",") != strings.Join(wantOrder, ",") {
+		t.Fatalf("TabOrder = %v after recovery, want %v", got, wantOrder)
+	}
+	if !containsMessage(*messages, "Settings recovered from backup") {
+		t.Fatalf("Init() messages = %#v, want recovery message", *messages)
+	}
+	persisted, err := os.ReadFile(fileName())
+	if err != nil {
+		t.Fatalf("ReadFile(settings.json) error = %v", err)
+	}
+	if len(persisted) == 0 {
+		t.Fatal("settings.json is empty after recovery")
+	}
+}
+
 func TestSaveNotesSessionPersistsLocally(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.PendingSync = false
 	root := getFileName("notes")
 	SaveNotesSession([]string{
 		filepath.Join(root, "Note 1.md"),
 		filepath.Join(root, "Projects", "Note 2.md"),
 		filepath.Join(root, "Note 1.md"),
 	}, filepath.Join(root, "Projects", "Note 2.md"))
-	if settingsInstance.GDrive.PendingSync {
-		t.Fatal("PendingSync = true, want false for note session persistence")
-	}
 	if got := settingsInstance.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "Note 1.md" || got[1] != "Projects/Note 2.md" {
 		t.Fatalf("OpenNotePaths = %#v", got)
 	}
@@ -273,247 +322,11 @@ func TestGetFileNameUsesHomeDirectory(t *testing.T) {
 	}
 }
 
-func TestGDriveReady(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
-	cfg := &GDriveSettings{Enabled: true, FolderID: "folder-1"}
-	if !cfg.Ready() {
-		t.Fatal("Ready() should return true")
-	}
-}
-
-func TestDriveSyncInterval(t *testing.T) {
-	settingsInstance = nil
-	if got := DriveSyncInterval(); got != 10*time.Second {
-		t.Fatalf("DriveSyncInterval() = %v, want 10s", got)
-	}
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.SyncIntervalSec = 25
-	if got := DriveSyncInterval(); got != 25*time.Second {
-		t.Fatalf("DriveSyncInterval() = %v, want 25s", got)
-	}
-}
-
-func TestSyncDriveDataOnShutdownIsNoOp(t *testing.T) {
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = true
-	settingsInstance.GDrive.FolderID = "folder-1"
-	settingsInstance.GDrive.PendingSync = true
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	err := SyncDriveDataOnShutdown(ctx)
-	if err != nil {
-		t.Fatalf("SyncDriveDataOnShutdown() error = %v, want nil", err)
-	}
-}
-
-func TestSaveSettingsLocalDoesNotStartDriveSync(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = true
-	settingsInstance.GDrive.FolderID = "folder-1"
-	settingsInstance.GDrive.PendingSync = true
-
-	originalDriveSyncFunc := driveSyncFunc
-	defer func() { driveSyncFunc = originalDriveSyncFunc }()
-	called := make(chan struct{}, 1)
-	driveSyncFunc = func() error {
-		called <- struct{}{}
-		return nil
-	}
-
-	SaveSettingsLocal()
-	select {
-	case <-called:
-		t.Fatal("SaveSettingsLocal() started drive sync, want local-only save")
-	case <-time.After(50 * time.Millisecond):
-	}
-}
-
-func TestStartDriveSyncDoesNothingDuringShutdown(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = true
-	settingsInstance.GDrive.FolderID = "folder-1"
-	settingsInstance.GDrive.PendingSync = true
-
-	originalDriveSyncFunc := driveSyncFunc
-	defer func() {
-		driveSyncFunc = originalDriveSyncFunc
-		shuttingDown.Store(false)
-	}()
-	called := make(chan struct{}, 1)
-	driveSyncFunc = func() error {
-		called <- struct{}{}
-		return nil
-	}
-
-	BeginShutdown()
-	StartDriveSync()
-	select {
-	case <-called:
-		t.Fatal("StartDriveSync() started sync during shutdown")
-	case <-time.After(50 * time.Millisecond):
-	}
-}
-
-func TestSyncDriveDataStoresUploadedSnapshotMetadata(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = true
-	settingsInstance.GDrive.FolderID = "folder-1"
-
-	origUpload := driveUploadSnapshotFunc
-	origList := driveListSnapshotsFunc
-	defer func() {
-		driveUploadSnapshotFunc = origUpload
-		driveListSnapshotsFunc = origList
-	}()
-	driveUploadSnapshotFunc = func(folderID string, settingsData []byte, retain int) (gdrive.SnapshotMeta, error) {
-		return gdrive.SnapshotMeta{ID: "snap-1", Name: "snapshot-a", CreatedAt: "2026-04-15T10:00:00Z"}, nil
-	}
-	driveListSnapshotsFunc = func(folderID string) ([]gdrive.SnapshotMeta, error) {
-		return []gdrive.SnapshotMeta{{ID: "snap-1", Name: "snapshot-a", CreatedAt: "2026-04-15T10:00:00Z"}}, nil
-	}
-
-	if err := SyncDriveData(); err != nil {
-		t.Fatalf("SyncDriveData() error = %v", err)
-	}
-	if got := settingsInstance.GDrive.SelectedSnapshotID; got != "snap-1" {
-		t.Fatalf("SelectedSnapshotID = %q, want snap-1", got)
-	}
-	if got := settingsInstance.GDrive.LastDriveSaveAt; got != "2026-04-15T10:00:00Z" {
-		t.Fatalf("LastDriveSaveAt = %q, want created time", got)
-	}
-	if len(settingsInstance.GDrive.Snapshots) != 1 {
-		t.Fatalf("Snapshots len = %d, want 1", len(settingsInstance.GDrive.Snapshots))
-	}
-}
-
-func TestRestoreDriveSnapshotUsesHook(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = true
-	settingsInstance.GDrive.FolderID = "folder-1"
-	settingsInstance.GDrive.Snapshots = []DriveSnapshotMeta{{ID: "snap-2", Name: "snapshot-b", CreatedAt: "2026-04-15T11:00:00Z"}}
-
-	origRestore := driveRestoreSnapshotFunc
-	defer func() { driveRestoreSnapshotFunc = origRestore }()
-	driveRestoreSnapshotFunc = func(snapshotID string) ([]byte, error) {
-		restored := defaultSettings()
-		restored.NotesApp.TabSpaces = 8
-		restored.NotesApp.OpenNotePaths = []string{
-			"/old-home/.config/koko-tools/notes/Note 1.md",
-			"/old-home/.config/koko-tools/notes/Projects/Plan.md",
+func containsMessage(messages []string, substr string) bool {
+	for _, message := range messages {
+		if strings.Contains(message, substr) {
+			return true
 		}
-		restored.NotesApp.CurrentNotePath = "/old-home/.config/koko-tools/notes/Projects/Plan.md"
-		return json.Marshal(restored)
 	}
-
-	if err := RestoreDriveSnapshot("snap-2"); err != nil {
-		t.Fatalf("RestoreDriveSnapshot() error = %v", err)
-	}
-	if got := settingsInstance.NotesApp.TabSpaces; got != 8 {
-		t.Fatalf("TabSpaces = %d, want restored value 8", got)
-	}
-	if got := settingsInstance.GDrive.SelectedSnapshotID; got != "snap-2" {
-		t.Fatalf("SelectedSnapshotID = %q, want snap-2", got)
-	}
-	if got := settingsInstance.NotesApp.OpenNotePaths; len(got) != 2 || got[0] != "Note 1.md" || got[1] != "Projects/Plan.md" {
-		t.Fatalf("OpenNotePaths = %#v", got)
-	}
-	if got := settingsInstance.NotesApp.CurrentNotePath; got != "Projects/Plan.md" {
-		t.Fatalf("CurrentNotePath = %q, want Projects/Plan.md", got)
-	}
-}
-
-func TestRestoreDriveSnapshotRepairsMobileSettingsSubset(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_ID", "client-id-1")
-	t.Setenv("KOKO_TOOLS_GOOGLE_CLIENT_SECRET", "secret-1")
-	if err := os.MkdirAll(filepath.Dir(gdrive.TokenPath()), 0o755); err != nil {
-		t.Fatalf("MkdirAll(token dir) error = %v", err)
-	}
-	if err := os.WriteFile(gdrive.TokenPath(), []byte(`{"access_token":"x"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(token) error = %v", err)
-	}
-	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = true
-	settingsInstance.GDrive.FolderID = "folder-1"
-	settingsInstance.GDrive.FolderName = "Koko"
-	settingsInstance.GDrive.Snapshots = []DriveSnapshotMeta{{ID: "snap-mobile", Name: "mobile", CreatedAt: "2026-05-14T10:00:00Z"}}
-
-	origRestore := driveRestoreSnapshotFunc
-	defer func() { driveRestoreSnapshotFunc = origRestore }()
-	driveRestoreSnapshotFunc = func(snapshotID string) ([]byte, error) {
-		return []byte(`{
-			"pages_app":{"first_book":100,"second_book":200,"read_pages":10},
-			"notes_app":{"current_note_path":"mobile.md"},
-			"gdrive":{"folder_id":"mobile-folder"}
-		}`), nil
-	}
-
-	if err := RestoreDriveSnapshot("snap-mobile"); err != nil {
-		t.Fatalf("RestoreDriveSnapshot() error = %v", err)
-	}
-	if !settingsInstance.PasswordApp.Letters || !settingsInstance.PasswordApp.Numbers || !settingsInstance.PasswordApp.SpecialSymbols {
-		t.Fatalf("PasswordApp = %#v, want restored desktop-safe defaults", settingsInstance.PasswordApp)
-	}
-	if settingsInstance.PasswordApp.SymbolCount != 16 {
-		t.Fatalf("SymbolCount = %d, want 16", settingsInstance.PasswordApp.SymbolCount)
-	}
-	if settingsInstance.UI == nil || !settingsInstance.UI.ShowNotes || !settingsInstance.UI.ShowPages || !settingsInstance.UI.ShowPassword {
-		t.Fatalf("UI = %#v, want restored desktop-safe defaults", settingsInstance.UI)
-	}
-	if settingsInstance.AppWindow.Width != 600 || settingsInstance.AppWindow.Height != 300 {
-		t.Fatalf("AppWindow = %#v, want restored desktop-safe defaults", settingsInstance.AppWindow)
-	}
-	if settingsInstance.GDrive.FolderID != "folder-1" || settingsInstance.GDrive.FolderName != "Koko" {
-		t.Fatalf("GDrive = %#v, want current desktop Drive context preserved", settingsInstance.GDrive)
-	}
+	return false
 }

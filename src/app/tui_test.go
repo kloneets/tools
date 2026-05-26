@@ -1791,18 +1791,12 @@ func TestHelpTextForFilesIncludesScopeFolderShortcut(t *testing.T) {
 func TestShutdownAndStopDoesNotSyncOnClose(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	settings.Inst().GDrive.Enabled = true
-	settings.Inst().GDrive.FolderID = "folder-1"
-	settings.Inst().GDrive.PendingSync = true
 
 	app := &terminalApp{}
 	start := time.Now()
 	app.shutdownAndStop()
 	if time.Since(start) > 200*time.Millisecond {
 		t.Fatalf("shutdownAndStop() took too long: %v", time.Since(start))
-	}
-	if !settings.Inst().GDrive.PendingSync {
-		t.Fatal("PendingSync = false, want unchanged because close should not sync")
 	}
 }
 
@@ -1818,17 +1812,15 @@ func TestStopTUIClearsShutdownState(t *testing.T) {
 	}
 }
 
-func TestRequestShutdownShowsModalForUnsyncedState(t *testing.T) {
+func TestRequestShutdownShowsModalForUnsavedState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	settings.Inst().GDrive.LastLocalSaveAt = "2026-04-15T12:00:00Z"
-	settings.Inst().GDrive.LastDriveSaveAt = "2026-04-15T11:00:00Z"
 
-	app := &terminalApp{}
+	app := &terminalApp{settingsDirty: true}
 	app.initWidgets()
 	app.requestShutdown()
 	if !app.shuttingDown {
-		t.Fatal("shuttingDown = false, want true for unsynced state")
+		t.Fatal("shuttingDown = false, want true for unsaved state")
 	}
 	front, _ := app.pagesRoot.GetFrontPage()
 	if front != "quit" {
@@ -1967,48 +1959,43 @@ func TestHandleGlobalKeyBrowserDShowsFolderDeleteConfirmation(t *testing.T) {
 	}
 }
 
-func TestRenderSyncHighlightsSelectedSnapshot(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	settings.Inst().GDrive.Snapshots = []settings.DriveSnapshotMeta{
-		{ID: "snap-1", Name: "snapshot-a", CreatedAt: "2026-04-15T12:00:00Z"},
-	}
-	settings.Inst().GDrive.SelectedSnapshotID = "snap-1"
-	app := &terminalApp{}
-	got := app.renderSync(20)
-	if !strings.Contains(got, "[selected]") {
-		t.Fatalf("renderSync() = %q, want selected snapshot marker", got)
-	}
-	if strings.Contains(got, "[green::b]") {
-		t.Fatalf("renderSync() = %q, want no raw tview color markup", got)
-	}
-	if !strings.Contains(got, "\x1b[") {
-		t.Fatalf("renderSync() = %q, want ANSI styling for sync selection", got)
-	}
-}
-
-func TestRenderSyncIncludesFullDriveErrorMessage(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	settings.Inst().GDrive.LastSyncStatus = "error"
-	settings.Inst().GDrive.LastSyncMessage = "drive upload failed because the remote folder rejected the snapshot metadata payload"
-	app := &terminalApp{}
-	got := app.renderSync(20)
-	if !strings.Contains(got, settings.Inst().GDrive.LastSyncMessage) {
-		t.Fatalf("renderSync() = %q, want full drive error message", got)
-	}
-}
-
 func TestRenderSyncShowsProgressState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	app := &terminalApp{
 		syncInProgress:    true,
-		syncProgressLabel: "upload local save to drive",
+		syncProgressLabel: "pull todos from firebase",
 	}
 	got := app.renderSync(20)
-	if !strings.Contains(got, "progress: / running upload local save to drive") {
+	if !strings.Contains(got, "progress: / running pull todos from firebase") {
 		t.Fatalf("renderSync() = %q, want sync progress line", got)
+	}
+}
+
+func TestSyncItemsExposeSingleManualFirebaseAction(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	app := &terminalApp{}
+
+	items := app.syncItems()
+	manualSyncCount := 0
+	for _, item := range items {
+		switch item.Label {
+		case "sync to firebase":
+			manualSyncCount++
+		case "pull todos from firebase",
+			"push todos to firebase",
+			"pull notes from firebase",
+			"push notes to firebase",
+			"pull settings from firebase",
+			"push settings to firebase",
+			"pull assets from firebase",
+			"push assets to firebase":
+			t.Fatalf("syncItems() includes old granular action %q", item.Label)
+		}
+	}
+	if manualSyncCount != 1 {
+		t.Fatalf("sync to firebase action count = %d, want 1", manualSyncCount)
 	}
 }
 

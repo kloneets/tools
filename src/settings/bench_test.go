@@ -28,7 +28,7 @@ func BenchmarkInit(b *testing.B) {
 	}
 
 	cfg := defaultSettings()
-	cfg.GDrive.LastSyncMessage = strings.Repeat("ok", 40)
+	cfg.Firebase.LastSyncMessage = strings.Repeat("ok", 40)
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		b.Fatalf("Marshal() error = %v", err)
@@ -52,7 +52,6 @@ func BenchmarkSaveSettingsNoSync(b *testing.B) {
 		b.Fatalf("MkdirAll() error = %v", err)
 	}
 	settingsInstance = defaultSettings()
-	settingsInstance.GDrive.Enabled = false
 
 	originalStatusUpdater := statusUpdater
 	statusUpdater = func(string) {}

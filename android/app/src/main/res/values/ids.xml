@@ -33,19 +33,11 @@
     <item name="todo_input" type="id" />
     <item name="todo_add" type="id" />
     <item name="todo_list" type="id" />
-    <item name="sync_folder_id" type="id" />
-    <item name="sync_select_folder" type="id" />
-    <item name="sync_connect" type="id" />
-    <item name="sync_save_folder" type="id" />
-    <item name="sync_upload" type="id" />
-    <item name="sync_refresh" type="id" />
-    <item name="sync_restore" type="id" />
-    <item name="sync_snapshot_restore" type="id" />
-    <item name="sync_snapshot_list" type="id" />
     <item name="sync_status" type="id" />
     <item name="settings_theme_group" type="id" />
     <item name="settings_theme_light" type="id" />
     <item name="settings_theme_dark" type="id" />
     <item name="settings_theme_system" type="id" />
+    <item name="settings_note_rendering" type="id" />
     <item name="settings_spell_check" type="id" />
 </resources>

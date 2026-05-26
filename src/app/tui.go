@@ -22,7 +22,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"github.com/kloneets/tools/src/gdrive"
+	"github.com/kloneets/tools/src/googleauth"
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/notes"
 	"github.com/kloneets/tools/src/pages"
@@ -247,8 +247,8 @@ func (a *terminalApp) initWidgets() {
 	a.helpOverlay.SetBorder(true).SetTitle("Keyboard Shortcuts")
 	a.pagesRoot.AddPage("help", a.helpOverlay, true, false)
 	a.quitModal = tview.NewModal().
-		SetText("Unsaved or unsynced changes. Save before closing?").
-		AddButtons([]string{"Save", "Save + Sync", "Discard", "Cancel"})
+		SetText("Unsaved changes. Save before closing?").
+		AddButtons([]string{"Save", "Discard", "Cancel"})
 	a.quitModal.SetDoneFunc(func(_ int, label string) {
 		switch label {
 		case "Save":
@@ -258,23 +258,6 @@ func (a *terminalApp) initWidgets() {
 				return
 			}
 			a.stopTUI()
-		case "Save + Sync":
-			a.startSyncOperation("save + sync before close", func() error {
-				if err := a.saveLocalState(); err != nil {
-					return err
-				}
-				return settings.SyncDriveData()
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Saved locally and uploaded Drive snapshot at " + formatTimestampOrNever(settings.Inst().GDrive.LastDriveSaveAt))
-				a.shuttingDown = false
-				if a.pagesRoot != nil {
-					a.pagesRoot.HidePage("quit")
-				}
-				a.stopTUI()
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Save + Sync failed: " + err.Error())
-				a.cancelShutdown()
-			})
 		case "Discard":
 			if a.notes != nil {
 				_ = a.notes.DiscardPendingFiles()
@@ -1109,7 +1092,7 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		if err := a.saveLocalState(); err != nil {
 			helpers.StatusBarInst().UpdateStatusBar("Save failed: " + err.Error())
 		} else {
-			helpers.StatusBarInst().UpdateStatusBar("Saved locally at " + formatTimestampOrNever(settings.Inst().GDrive.LastLocalSaveAt))
+			helpers.StatusBarInst().UpdateStatusBar("Saved locally")
 		}
 		return true
 	}
@@ -1241,7 +1224,7 @@ func (a *terminalApp) consumePendingNoteActions() {
 			if ed := a.notes.ActiveEditor(); ed != nil {
 				ed.Status = "saved"
 			}
-			helpers.StatusBarInst().UpdateStatusBar("Saved locally at " + formatTimestampOrNever(settings.Inst().GDrive.LastLocalSaveAt))
+			helpers.StatusBarInst().UpdateStatusBar("Saved locally")
 		}
 	}
 	if a.notes.TakePendingRecordKeys() {
@@ -1651,7 +1634,6 @@ func (a *terminalApp) reloadTodosForRender() {
 func (a *terminalApp) markTodoChanged() {
 	a.todoDirty = true
 	a.settingsDirty = true
-	settings.MarkDriveDirty()
 	helpers.StatusBarInst().UpdateStatusBar("Todo saved")
 	a.pushTodosToFirebaseSoon()
 }
@@ -1806,7 +1788,7 @@ func (a *terminalApp) startSyncOperation(label string, work func() error, onSucc
 	go func() {
 		select {
 		case <-time.After(timeout):
-			finish(fmt.Errorf("manual Drive operation timed out after %s", timeout))
+			finish(fmt.Errorf("sync operation timed out after %s", timeout))
 		case <-done:
 		}
 	}()
@@ -1935,11 +1917,11 @@ func (a *terminalApp) requestShutdown() {
 	if a.shuttingDown {
 		return
 	}
-	if a.hasUnsavedChanges() || a.hasUnsyncedChanges() {
+	if a.hasUnsavedChanges() {
 		a.shuttingDown = true
 		a.showHelp = false
 		if a.quitModal != nil {
-			a.quitModal.SetText("Unsaved or unsynced changes. Save before closing?")
+			a.quitModal.SetText("Unsaved changes. Save before closing?")
 		}
 		if a.pagesRoot != nil {
 			a.pagesRoot.ShowPage("quit")
@@ -2007,7 +1989,6 @@ type actionItem struct {
 }
 
 func (a *terminalApp) syncItems() []actionItem {
-	cfg := settings.Inst().GDrive
 	firebase := settings.Inst().Firebase
 	if firebase == nil {
 		firebase = &settings.FirebaseSettings{Realtime: true}
@@ -2034,156 +2015,15 @@ func (a *terminalApp) syncItems() []actionItem {
 		{Label: "login firebase with google", Apply: func() {
 			a.loginFirebaseWithGoogle()
 		}},
-		{Label: "pull todos from firebase", Apply: func() {
-			a.startSyncOperation("pull todos from firebase", func() error {
-				return a.pullTodosFromFirebase(context.Background())
+		{Label: "sync to firebase", Apply: func() {
+			a.startSyncOperation("sync to firebase", func() error {
+				return a.syncToFirebase(context.Background())
 			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase todos pulled")
+				helpers.StatusBarInst().UpdateStatusBar("Firebase sync complete")
 			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase pull failed: " + err.Error())
+				helpers.StatusBarInst().UpdateStatusBar("Firebase sync failed: " + err.Error())
 			})
 		}},
-		{Label: "push todos to firebase", Apply: func() {
-			a.startSyncOperation("push todos to firebase", func() error {
-				return a.pushTodosToFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase todos pushed")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase push failed: " + err.Error())
-			})
-		}},
-		{Label: "pull notes from firebase", Apply: func() {
-			a.startSyncOperation("pull notes from firebase", func() error {
-				return a.pullNotesFromFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase notes pulled")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase notes pull failed: " + err.Error())
-			})
-		}},
-		{Label: "push notes to firebase", Apply: func() {
-			a.startSyncOperation("push notes to firebase", func() error {
-				return a.pushNotesToFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase notes pushed")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase notes push failed: " + err.Error())
-			})
-		}},
-		{Label: "pull settings from firebase", Apply: func() {
-			a.startSyncOperation("pull settings from firebase", func() error {
-				return a.pullSettingsFromFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase settings pulled")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase settings pull failed: " + err.Error())
-			})
-		}},
-		{Label: "push settings to firebase", Apply: func() {
-			a.startSyncOperation("push settings to firebase", func() error {
-				return a.pushSettingsToFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase settings pushed")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase settings push failed: " + err.Error())
-			})
-		}},
-		{Label: "pull assets from firebase", Apply: func() {
-			a.startSyncOperation("pull assets from firebase", func() error {
-				return a.pullAssetsFromFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase assets pulled")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase assets pull failed: " + err.Error())
-			})
-		}},
-		{Label: "push assets to firebase", Apply: func() {
-			a.startSyncOperation("push assets to firebase", func() error {
-				return a.pushAssetsToFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase assets pushed")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase assets push failed: " + err.Error())
-			})
-		}},
-		{Label: "legacy drive manual backup", Apply: func() {
-			helpers.StatusBarInst().UpdateStatusBar("Google Drive is legacy manual snapshot backup")
-		}},
-		{Label: fmt.Sprintf("drive sync enabled: %t", cfg.Enabled), Apply: func() {
-			cfg.Enabled = !cfg.Enabled
-			a.markSettingsChanged()
-		}},
-		{Label: "connect google drive", Apply: func() {
-			if !gdrive.HasCredentials() {
-				helpers.StatusBarInst().UpdateStatusBar("Google OAuth credentials are not configured")
-				return
-			}
-			url, session, err := gdrive.StartLocalAuthorization()
-			if err != nil {
-				helpers.StatusBarInst().UpdateStatusBar("Google authorization failed to start")
-				return
-			}
-			helpers.OpenURI(url)
-			helpers.StatusBarInst().UpdateStatusBar("Browser opened for Google Drive authorization")
-			go func() {
-				err := <-session.Wait()
-				if err != nil {
-					helpers.StatusBarInst().UpdateStatusBar("Google Drive authorization failed")
-					return
-				}
-				helpers.StatusBarInst().UpdateStatusBar("Google Drive connected")
-			}()
-		}},
-		{Label: "upload local save to drive", Apply: func() {
-			if a.hasUnsavedChanges() {
-				helpers.StatusBarInst().UpdateStatusBar("Save locally first before uploading to Drive")
-				return
-			}
-			a.startSyncOperation("upload local save to drive", settings.SyncDriveData, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Drive snapshot uploaded at " + formatTimestampOrNever(settings.Inst().GDrive.LastDriveSaveAt))
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Drive upload failed: " + err.Error())
-			})
-		}},
-		{Label: "refresh snapshot list from drive", Apply: func() {
-			a.startSyncOperation("refresh snapshot list from drive", settings.RefreshDriveSnapshots, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Drive snapshot list refreshed at " + formatTimestampOrNever(settings.Inst().GDrive.LastDriveRefreshAt))
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Drive refresh failed: " + err.Error())
-			})
-		}},
-		{Label: "restore selected drive snapshot", Apply: func() {
-			if a.selectedSnapshotID() == "" {
-				helpers.StatusBarInst().UpdateStatusBar("No Drive snapshot selected")
-				return
-			}
-			selectedID := a.selectedSnapshotID()
-			selectedLabel := a.selectedSnapshotLabel()
-			a.startSyncOperation("restore selected drive snapshot", func() error {
-				return settings.RestoreDriveSnapshot(selectedID)
-			}, func() {
-				if ws, err := notes.NewWorkspace(); err == nil {
-					a.notes = ws
-				}
-				a.pages = pages.NewModel()
-				a.password = password.NewModel()
-				a.settingsDirty = false
-				helpers.StatusBarInst().UpdateStatusBar("Drive snapshot restored from " + selectedLabel)
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Drive restore failed: " + err.Error())
-			})
-		}},
-	}
-	for _, snapshot := range cfg.Snapshots {
-		snap := snapshot
-		label := fmt.Sprintf("snapshot %s", formatSnapshotLabel(snap.Name, snap.CreatedAt))
-		if snap.ID == cfg.SelectedSnapshotID {
-			label = helpers.ANSI(helpers.ANSIReverse+helpers.ANSIBold, label+" [selected]")
-		}
-		items = append(items, actionItem{Label: label, Apply: func() {
-			cfg.SelectedSnapshotID = snap.ID
-			helpers.StatusBarInst().UpdateStatusBar("Selected snapshot: " + formatSnapshotLabel(snap.Name, snap.CreatedAt))
-		}})
 	}
 	return items
 }
@@ -2358,9 +2198,9 @@ func (a *terminalApp) refresh() {
 			a.pagesRoot.ShowPage("quit")
 			if a.quitModal != nil {
 				if a.syncInProgress {
-					a.quitModal.SetText(fmt.Sprintf("Saving locally and uploading to Google Drive... %s", a.syncSpinnerFrame()))
+					a.quitModal.SetText(fmt.Sprintf("Sync operation running... %s", a.syncSpinnerFrame()))
 				} else {
-					a.quitModal.SetText("Unsaved or unsynced changes. Save before closing?")
+					a.quitModal.SetText("Unsaved changes. Save before closing?")
 				}
 			}
 		} else {
@@ -2433,33 +2273,6 @@ func (a *terminalApp) viewDirty(v view) bool {
 	default:
 		return false
 	}
-}
-
-func (a *terminalApp) hasUnsyncedChanges() bool {
-	cfg := settings.Inst().GDrive
-	if cfg == nil {
-		return false
-	}
-	if cfg.PendingSync {
-		return true
-	}
-	localText := strings.TrimSpace(cfg.LastLocalSaveAt)
-	if localText == "" {
-		return false
-	}
-	localTime, err := time.Parse(time.RFC3339, localText)
-	if err != nil {
-		return false
-	}
-	driveText := strings.TrimSpace(cfg.LastDriveSaveAt)
-	if driveText == "" {
-		return true
-	}
-	driveTime, err := time.Parse(time.RFC3339, driveText)
-	if err != nil {
-		return true
-	}
-	return localTime.After(driveTime)
 }
 
 func (a *terminalApp) currentStatusText() string {
@@ -3102,17 +2915,9 @@ func (a *terminalApp) renderTodo(height int) string {
 }
 
 func (a *terminalApp) renderSync(height int) string {
-	cfg := settings.Inst().GDrive
 	firebase := settings.Inst().Firebase
 	if firebase == nil {
 		firebase = &settings.FirebaseSettings{Realtime: true}
-	}
-	folder := cfg.FolderName
-	if strings.TrimSpace(folder) == "" {
-		folder = cfg.FolderID
-	}
-	if strings.TrimSpace(folder) == "" {
-		folder = "not selected"
 	}
 	lines := []string{
 		"Firebase realtime sync",
@@ -3120,16 +2925,6 @@ func (a *terminalApp) renderSync(height int) string {
 		fmt.Sprintf("configured: %t", firebaseConfigured(firebase)),
 		fmt.Sprintf("workspace: %s", firebaseWorkspaceLabel(firebase)),
 		fmt.Sprintf("last firebase action: %s", strings.TrimSpace(firebase.LastSyncStatus+" "+firebase.LastSyncMessage)),
-		"",
-		"Google Drive legacy manual backup",
-		fmt.Sprintf("enabled: %t", cfg.Enabled),
-		fmt.Sprintf("credentials: %t", gdrive.HasCredentials()),
-		fmt.Sprintf("token: %t", gdrive.HasToken()),
-		fmt.Sprintf("folder: %s", folder),
-		fmt.Sprintf("last local save: %s", formatTimestampOrNever(cfg.LastLocalSaveAt)),
-		fmt.Sprintf("last drive save: %s", formatTimestampOrNever(cfg.LastDriveSaveAt)),
-		fmt.Sprintf("last drive refresh: %s", formatTimestampOrNever(cfg.LastDriveRefreshAt)),
-		fmt.Sprintf("last drive action: %s", strings.TrimSpace(cfg.LastSyncStatus+" "+cfg.LastSyncMessage)),
 	}
 	if a.syncInProgress {
 		lines = append(lines, fmt.Sprintf("progress: %s running %s", a.syncSpinnerFrame(), a.syncProgressLabel))
@@ -3137,10 +2932,6 @@ func (a *terminalApp) renderSync(height int) string {
 		lines = append(lines, "progress: idle")
 	}
 	lines = append(lines, "")
-	lines = append(lines, fmt.Sprintf("snapshots: %d", len(cfg.Snapshots)))
-	if cfg.SelectedSnapshotID != "" {
-		lines = append(lines, helpers.ANSI(helpers.ANSIReverse+helpers.ANSIBold, fmt.Sprintf("selected snapshot: %s [selected]", a.selectedSnapshotLabel())))
-	}
 	lines = append(lines, "Actions")
 	items := a.syncItems()
 	for i, item := range items {
@@ -3150,8 +2941,6 @@ func (a *terminalApp) renderSync(height int) string {
 		}
 		lines = append(lines, prefix+item.Label)
 	}
-	lines = append(lines, "")
-	lines = append(lines, fmt.Sprintf("selected snapshot: %s", a.selectedSnapshotLabel()))
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
@@ -3278,27 +3067,6 @@ func formatTimestampOrNever(value string) string {
 		return t.Local().Format("2006-01-02 15:04")
 	}
 	return value
-}
-
-func (a *terminalApp) selectedSnapshotID() string {
-	cfg := settings.Inst().GDrive
-	if cfg == nil {
-		return ""
-	}
-	return cfg.SelectedSnapshotID
-}
-
-func (a *terminalApp) selectedSnapshotLabel() string {
-	cfg := settings.Inst().GDrive
-	if cfg == nil || cfg.SelectedSnapshotID == "" {
-		return "none"
-	}
-	for _, snapshot := range cfg.Snapshots {
-		if snapshot.ID == cfg.SelectedSnapshotID {
-			return formatSnapshotLabel(snapshot.Name, snapshot.CreatedAt)
-		}
-	}
-	return "none"
 }
 
 func (a *terminalApp) hasUnsavedChanges() bool {
@@ -3525,11 +3293,11 @@ func (a *terminalApp) loginFirebaseWithGoogle() {
 		helpers.StatusBarInst().UpdateStatusBar("Firebase config unavailable")
 		return
 	}
-	if !gdrive.HasCredentials() {
+	if !googleauth.HasCredentials() {
 		helpers.StatusBarInst().UpdateStatusBar("Google OAuth credentials are not configured")
 		return
 	}
-	url, googleSession, err := gdrive.StartLocalIDTokenAuthorization()
+	url, googleSession, err := googleauth.StartLocalIDTokenAuthorization()
 	if err != nil {
 		helpers.StatusBarInst().UpdateStatusBar("Google sign-in failed to start")
 		return
@@ -3607,6 +3375,40 @@ func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
 		a.reloadTodosForRender()
 		a.refresh()
 	})
+	return nil
+}
+
+func (a *terminalApp) syncToFirebase(ctx context.Context) error {
+	if err := a.pullTodosFromFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pullNotesFromFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pullSettingsFromFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pullAssetsFromFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pushTodosToFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pushNotesToFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pushSettingsToFirebase(ctx); err != nil {
+		return err
+	}
+	if err := a.pushAssetsToFirebase(ctx); err != nil {
+		return err
+	}
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase sync complete"
+		settings.SaveSettingsLocal()
+	}
 	return nil
 }
 
@@ -4169,16 +3971,6 @@ func firebaseWorkspaceID(cfg *settings.FirebaseSettings, fileCfg kokosync.Fireba
 		return strings.TrimSpace(cfg.WorkspaceID)
 	}
 	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_WORKSPACE_ID"))
-}
-
-func formatSnapshotLabel(name string, createdAt string) string {
-	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
-		return fmt.Sprintf("%s (%s)", name, t.Local().Format("2006-01-02 15:04"))
-	}
-	if createdAt != "" {
-		return fmt.Sprintf("%s (%s)", name, createdAt)
-	}
-	return name
 }
 
 func (a *terminalApp) helpText() string {
