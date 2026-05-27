@@ -2,10 +2,11 @@
 
 This directory contains an independent Kotlin Android companion app for a focused subset of Koko Tools:
 
-- edit local Markdown notes without preview
+- edit local Markdown notes with optional rich rendering
 - import, list, and delete managed note assets
+- manage todos
 - calculate Pages values
-- sync Firebase data and desktop-compatible snapshots to and from Google Drive
+- sync notes, todos, settings, and managed assets with Firebase
 
 The app uses plain Android SDK widgets and app-private file storage. It does not use Compose.
 
@@ -13,12 +14,12 @@ The app uses plain Android SDK widgets and app-private file storage. It does not
 
 Open `android/` in Android Studio as its own Gradle project.
 
-Command-line tasks from this directory with an installed Gradle:
+Command-line tasks from this directory:
 
 ```sh
-gradle :app:assembleDebug
-gradle :app:testDebugUnitTest
-gradle :app:connectedDebugAndroidTest
+./gradlew :app:assembleDebug
+./gradlew :app:testDebugUnitTest
+./gradlew :app:connectedDebugAndroidTest
 ```
 
 This repository does not require the Android app to be built when building the Go desktop app.
@@ -31,6 +32,8 @@ The project currently uses:
 - min SDK: 26
 - compile SDK: 35
 - target SDK: 35
+- version code: 1
+- version name: 0.1.0
 
 If your installed Android SDK differs, install API 35 with Android Studio SDK Manager or adjust `compileSdk` and `targetSdk` in `app/build.gradle.kts`.
 
@@ -40,8 +43,9 @@ Android stores data in the app-private files directory:
 
 - notes root: `filesDir/notes/`
 - settings: `filesDir/settings.json`
+- todos: `filesDir/todos.json`
 
-Notes are plain `.md` files. Nested notes use slash-relative paths such as `books/current.md`. Managed assets live under the notes root in either `assets/` or note-specific `<note>.assets/` folders. The Android Assets tab imports files into the current note's asset folder when a note is selected, otherwise into `assets/`.
+Notes are plain `.md` files. Nested notes use slash-relative paths such as `books/current.md`. Managed assets live under the notes root in either `assets/` or note-specific `<note>.assets/` folders.
 
 The settings JSON keeps the desktop-compatible subset used by the Android app:
 
@@ -49,10 +53,34 @@ The settings JSON keeps the desktop-compatible subset used by the Android app:
 - `pages_app.second_book`
 - `pages_app.read_pages`
 - `notes_app.current_note_path`
-- `gdrive.folder_id`
-- `gdrive.folder_name`
-- `gdrive.selected_snapshot_id`
-- `gdrive.snapshots`
+- `notes_app.preview_hidden`
+- `notes_app.spell_check_enabled`
+- `notes_app.spell_dictionaries`
+- `android_app.theme_mode`
+- `firebase.*`
+
+## Firebase Setup
+
+The app reads bundled Firebase defaults from `google-services.json` or Gradle properties:
+
+- `KOKO_FIREBASE_API_KEY`
+- `KOKO_FIREBASE_DATABASE_URL`
+- `KOKO_FIREBASE_PROJECT_ID`
+- `KOKO_GOOGLE_WEB_CLIENT_ID`
+
+Firebase requirements:
+
+1. Android package name must be `com.kloneets.kokotools`.
+2. Firebase Authentication must enable Email/password and Google providers.
+3. Realtime Database must be configured with production-safe rules.
+4. Release builds need SHA-1 and SHA-256 fingerprints added to the Firebase Android app for the upload key and Play app signing key.
+5. After changing Firebase fingerprints or OAuth clients, download a fresh `google-services.json` into `android/google-services.json`.
+
+## Play Store Release
+
+See [RELEASE.md](RELEASE.md) for the release signing, Firebase, Play Console, privacy, and validation checklist.
+
+Release signing uses local `android/keystore.properties`, which is ignored by git.
 
 ## Assets Tab
 
@@ -64,62 +92,15 @@ The Assets tab lists files that are eligible for Firebase asset sync. Actions in
 
 Assets larger than 1 MiB can be imported locally, but Firebase asset push skips them.
 
-## Google Drive Setup
-
-Android uses Google Play services authorization and direct Drive REST calls. Android must use its own OAuth client; do not reuse the desktop OAuth client.
-
-Google Cloud setup:
-
-1. Enable the Google Drive API for the project.
-2. Create an OAuth client of type Android.
-3. Use package name `com.kloneets.kokotools`.
-4. Add the signing certificate SHA-1 for the debug or release keystore used to build the app.
-5. Request Drive scope `https://www.googleapis.com/auth/drive`.
-
-The full Drive scope is required because the desktop app works with a user-selected folder and a full snapshot tree.
-
-## Sync Workflow
-
-In the Android app:
-
-1. Open `Sync`.
-2. Tap `Connect Google` and grant Drive access.
-3. Paste the existing desktop Drive folder ID into `Folder ID`.
-4. Tap `Set Drive folder ID`.
-5. Use `Upload snapshot`, `Refresh snapshots`, or select a listed snapshot and tap `Restore selected snapshot`.
-
-The folder ID is the Drive file ID of the shared Koko Tools folder. In a browser Drive URL, it is the ID after `/folders/`.
-
-## Google Connect Troubleshooting
-
-If `Connect Google` flashes, opens Settings, or returns without connecting on an emulator:
-
-- Use an emulator system image with Google Play, not a plain AOSP image.
-- Open the Play Store or Settings on the emulator and sign into a Google account first.
-- Complete any screen-lock prompt Google shows during account setup.
-- Prefer a stable API image such as API 35 or 36 if a preview image has Google Play services crashes.
-- Confirm the Android OAuth client in Google Cloud uses package `com.kloneets.kokotools` and the SHA-1 of the keystore used by Android Studio.
-
-## Desktop Snapshot Interoperability
-
-The shared Drive folder is expected to contain:
-
-```text
-snapshots/
-  <timestamp>/
-    settings.json
-    notes/
-      ...
-```
-
-Android-created snapshots should be restorable by the desktop app, and desktop-created snapshots should be restorable by Android. Snapshot retention should keep the latest 5 snapshots when Drive upload is implemented.
-
 ## Manual Test Checklist
 
 Verify:
 
-- create a note locally on Android
-- upload a snapshot
-- restore a snapshot
-- verify desktop can list and restore an Android-created snapshot
-- verify Android can restore a desktop-created snapshot
+- create and edit notes locally on Android
+- rich text rendering can be toggled from Settings
+- create, edit, complete, and reorder todos
+- log in with Firebase email/password
+- log in with Google Firebase SSO
+- use `Sync to Firebase`
+- restart the app and confirm settings are restored
+- confirm the same Firebase workspace syncs with the desktop TUI

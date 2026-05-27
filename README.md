@@ -5,7 +5,7 @@ Koko Tools is a Go terminal desktop app that collects a few everyday utilities i
 - Markdown notes with Vim-style editing, syntax highlighting, note tabs, file asset management, and link opening.
 - Page conversion for comparing progress between different editions of a book.
 - Password generation.
-- Optional Google Drive settings and data sync.
+- Optional Firebase sync for todos, notes, managed assets, and shared settings.
 - App settings for editor behavior, theme, transparent background, and local preferences.
 
 The app is built as a local desktop binary and stores its configuration under the user home directory.
@@ -38,9 +38,9 @@ The first build or test run can take longer while Go downloads and compiles depe
 
 ## Android Companion App
 
-A Kotlin Android companion app lives in `android/`. It supports Markdown note editing, managed note assets, Pages calculations, Firebase sync, and Google Drive snapshot interoperability.
+A Kotlin Android companion app lives in `android/`. It supports Markdown note editing, managed note assets, todos, Pages calculations, and Firebase sync.
 
-See `android/README.md` for Android Studio import, build commands, local data paths, and Google Drive OAuth setup.
+See `android/README.md` for Android Studio import, build commands, local data paths, Firebase setup, and Play Store release notes.
 
 ## CLI Commands
 
@@ -259,34 +259,21 @@ Useful keys:
 
 ## Sync
 
-The Sync view handles Firebase realtime sync and optional Google Drive snapshot backup.
+The Sync view handles Firebase realtime sync.
 
 It shows:
 
 - Whether Firebase realtime sync is enabled.
 - The effective Firebase workspace ID.
 - Last Firebase sync status.
-- Whether Drive sync is enabled.
-- Credential and token availability.
-- Selected Drive folder.
-- Last local save time.
-- Last Drive save or refresh time.
-- Snapshot list and selected snapshot.
 
 Actions include:
 
 - Toggle Firebase realtime sync.
-- Pull or push todos through Firebase.
-- Pull or push notes through Firebase.
-- Pull or push shared settings through Firebase.
-- Pull or push managed note assets through Firebase.
-- Toggle Drive sync.
-- Select or clear a Drive folder.
-- Upload local state to Drive.
-- Refresh the snapshot list.
-- Restore a selected Drive snapshot.
+- Log in with Google.
+- Sync to Firebase.
 
-Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, managed note assets, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Markdown rendering mode, Firebase credentials, Drive config, and the currently open note session. Google Drive remains a legacy manual snapshot backup. The app can save locally without uploading to either backend.
+Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, managed note assets, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Markdown rendering mode, Firebase credentials, and the currently open note session. The app can save locally without uploading to Firebase.
 
 Remote Firebase data is not applied over active local edits. If pages, notes, todos, settings, or managed files are currently being edited or have unsaved local changes, the app defers the remote apply and retries on a later sync after the local action is saved or finished.
 
@@ -317,9 +304,9 @@ Transparent background is independent from the theme. When transparent backgroun
 
 ## Data and Configuration
 
-The app creates its config directory under the user home directory at startup. Settings and note session state are persisted locally. Google Drive sync, when enabled and configured, can upload and restore snapshots of app state.
+The app creates its config directory under the user home directory at startup. Settings and note session state are persisted locally. Firebase sync, when enabled and configured, can sync todos, notes, managed note assets, and shared settings.
 
-Changes to settings, file paths, notes, or Drive behavior should handle missing directories and read failures safely.
+Changes to settings, file paths, notes, or sync behavior should handle missing directories and read failures safely.
 
 ## Development
 
@@ -330,8 +317,7 @@ Project structure:
 - `src/notes`: notes workspace, Markdown rendering, Vim commands, managed files, and editor behavior.
 - `src/pages`: page conversion model.
 - `src/password`: password generation model.
-- `src/settings`: persisted settings and Google Drive sync state.
-- `src/gdrive`: Google Drive client integration.
+- `src/settings`: persisted settings and local sync state.
 - `src/helpers`: shared helpers for ANSI styling, assets, clipboard, URI opening, and status.
 
 Common development commands:
@@ -359,7 +345,7 @@ This project is built with free and open technologies:
 - Go: application language and build toolchain. Reference: https://go.dev/
 - tcell and tview: terminal UI libraries used by the application shell. References: https://github.com/gdamore/tcell and https://github.com/rivo/tview
 - Tree-sitter: parsing and syntax-highlighting foundation for the notes editor, together with free language grammars for Bash, CSS, Go, HTML, Java, JavaScript, JSON, Lua, PHP, Python, Rust, and TypeScript. Reference: https://tree-sitter.github.io/tree-sitter/
-- Google OAuth 2.0 and Google Drive API client libraries: used for optional Drive sync. References: https://developers.google.com/identity/protocols/oauth2 and https://developers.google.com/drive/api
+- Firebase and Google OAuth 2.0: used for optional cross-device sync and Google sign-in. References: https://firebase.google.com/ and https://developers.google.com/identity/protocols/oauth2
 - Font Awesome Free: bundled icon set used for app assets and generated outputs. Reference: https://fontawesome.com/
 
 AI coding agents are used as a development aid in this project for implementation support, refactoring, and test/debug iteration. They are used during development, not as part of the shipped application runtime.

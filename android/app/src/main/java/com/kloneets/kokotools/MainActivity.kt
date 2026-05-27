@@ -1397,6 +1397,14 @@ class MainActivity : Activity() {
         SpellLanguages.supported.forEach { language ->
             content.addView(spellDictionaryCheckBox(language, selectedSpellDictionaries))
         }
+
+        content.addView(sectionTitle("Privacy"))
+        content.addView(commandButton("Privacy policy", R.id.settings_privacy_policy) {
+            openExternalUrl(PRIVACY_POLICY_URL)
+        })
+        content.addView(commandButton("Delete account or data", R.id.settings_delete_account) {
+            openExternalUrl(ACCOUNT_DELETION_URL)
+        })
     }
 
     private fun showSettingsActionsMenu(anchor: View) {
@@ -1506,6 +1514,14 @@ class MainActivity : Activity() {
     private fun hideKeyboardForView(view: View) {
         val inputMethodManager = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
         inputMethodManager?.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+
+    private fun openExternalUrl(url: String) {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }.onFailure {
+            Toast.makeText(this, "No browser available", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun persistSettings(next: AppSettings) {
@@ -2364,5 +2380,7 @@ class MainActivity : Activity() {
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
         private const val FIREBASE_PULL_INTERVAL_MS = 5_000L
+        private const val PRIVACY_POLICY_URL = "https://github.com/kloneets/tools/blob/main/PRIVACY.md"
+        private const val ACCOUNT_DELETION_URL = "https://github.com/kloneets/tools/blob/main/ACCOUNT_DELETION.md"
     }
 }

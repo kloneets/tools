@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -7,6 +8,12 @@ plugins {
 android {
     namespace = "com.kloneets.kokotools"
     compileSdk = 35
+
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
+    val keystoreProperties = Properties()
+    if (keystorePropertiesFile.isFile) {
+        keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+    }
 
     fun googleServicesConfig(): Map<String, String> {
         val file = listOf(
@@ -54,6 +61,26 @@ android {
             cmake {
                 cppFlags += listOf("-std=c++17")
             }
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.isFile) {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (keystorePropertiesFile.isFile) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            isMinifyEnabled = false
         }
     }
 

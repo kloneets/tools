@@ -165,6 +165,8 @@ class MainActivityTest {
                 val settings = getPrivateField(activity, "settings") as AppSettings
                 assertEquals(ThemeMode.Dark, settings.androidApp.themeMode)
                 assertTrue(activity.findViewById<RadioButton>(R.id.settings_theme_dark).isChecked)
+                assertTrue(activity.findViewById<TextView>(R.id.settings_privacy_policy).isShown)
+                assertTrue(activity.findViewById<TextView>(R.id.settings_delete_account).isShown)
             }
         }
     }
