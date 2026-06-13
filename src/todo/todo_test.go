@@ -1,7 +1,9 @@
 package todo
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -123,6 +125,37 @@ func TestMoveActiveOnlyAffectsUncheckedActiveTodos(t *testing.T) {
 	}
 	if MoveActive(&store, "4", -1, now) {
 		t.Fatal("done item should not reorder")
+	}
+}
+
+func TestMoveActiveReordersDuplicateOrderItemsPastTen(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := Store{}
+	for i := 1; i <= 12; i++ {
+		item := newItem(fmt.Sprintf("%02d", i), fmt.Sprintf("item %02d", i), now.Add(time.Duration(i)*time.Minute))
+		item.Order = 0
+		store.Items = append(store.Items, item)
+	}
+
+	if !MoveActive(&store, "11", -1, now.Add(time.Hour)) {
+		t.Fatal("MoveActive() = false, want true")
+	}
+
+	active := ActiveItems(store)
+	got := make([]string, 0, len(active))
+	orders := make([]int, 0, len(active))
+	for _, item := range active {
+		got = append(got, item.ID)
+		orders = append(orders, item.Order)
+	}
+	want := []string{"01", "02", "03", "04", "05", "06", "07", "08", "09", "11", "10", "12"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("active IDs = %#v, want %#v", got, want)
+	}
+	for i, order := range orders {
+		if order != i {
+			t.Fatalf("orders = %#v, want normalized numeric order at index %d", orders, i)
+		}
 	}
 }
 

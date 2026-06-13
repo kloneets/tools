@@ -322,7 +322,12 @@ func MoveActive(store *Store, id string, delta int, now time.Time) bool {
 		}
 	}
 	sort.SliceStable(active, func(i, j int) bool {
-		return store.Items[active[i]].Order < store.Items[active[j]].Order
+		left := store.Items[active[i]]
+		right := store.Items[active[j]]
+		if left.Order != right.Order {
+			return left.Order < right.Order
+		}
+		return left.CreatedAt.Before(right.CreatedAt)
 	})
 	pos := -1
 	for i, index := range active {
@@ -338,9 +343,20 @@ func MoveActive(store *Store, id string, delta int, now time.Time) bool {
 	if target < 0 || target >= len(active) {
 		return false
 	}
-	store.Items[active[pos]].Order, store.Items[active[target]].Order = store.Items[active[target]].Order, store.Items[active[pos]].Order
-	store.Items[active[pos]].UpdatedAt = now.UTC()
-	store.Items[active[target]].UpdatedAt = now.UTC()
+	moved := active[pos]
+	if delta > 0 {
+		copy(active[pos:], active[pos+1:target+1])
+	} else {
+		copy(active[target+1:], active[target:pos])
+	}
+	active[target] = moved
+	now = now.UTC()
+	for order, index := range active {
+		if store.Items[index].Order != order {
+			store.Items[index].UpdatedAt = now
+		}
+		store.Items[index].Order = order
+	}
 	return true
 }
 
