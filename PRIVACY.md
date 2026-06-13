@@ -1,5 +1,7 @@
 # Koko Tools Privacy Policy
 
+Public HTML version for Google Play: https://koko.lv/privacy-policy.html
+
 Koko Tools stores notes, todos, settings, and managed note assets locally on your device. If you enable Firebase sync, that data is copied to the configured Firebase project so it can sync between your devices.
 
 ## Data The App Handles

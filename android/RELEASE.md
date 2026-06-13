@@ -1,5 +1,7 @@
 # Android Play Store Release Checklist
 
+For the full step-by-step publishing walkthrough, see [PLAY_STORE_PUBLISHING.md](PLAY_STORE_PUBLISHING.md).
+
 ## One-Time Setup
 
 1. Create the Play Console app with package name `com.kloneets.kokotools`.
@@ -44,12 +46,12 @@ The bundle is written under `android/app/build/outputs/bundle/release/`. If `and
 
 Complete these before production:
 
-- App content -> Privacy policy: use the public `PRIVACY.md` URL.
+- App content -> Privacy policy: `https://koko.lv/privacy-policy.html`
 - App content -> Data safety: declare account info, user content, and cloud sync.
-- App content -> Data deletion: use the public `ACCOUNT_DELETION.md` URL.
+- App content -> Data deletion: `https://koko.lv/account-deletion.html`
 - App content -> Content rating.
 - App content -> Target audience.
-- Store listing: screenshots, short description, full description, category, contact email.
+- Store listing: use `android/play-store/koko-tools-icon-512.png` for the app icon, then add screenshots, short description, full description, category, and contact email.
 
 If this is a new personal developer account, complete the required closed test with 12 opted-in testers for 14 days before applying for production access.
 

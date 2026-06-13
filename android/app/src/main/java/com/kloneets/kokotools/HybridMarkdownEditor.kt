@@ -218,6 +218,23 @@ class HybridMarkdownEditor(
         rebuild()
     }
 
+    fun updateMarkdownPreservingState(text: String) {
+        val wasFocused = activeEditText.hasFocus()
+        val nextOffset = if (wasFocused) {
+            activeRange.first + activeEditText.selectionStart.coerceAtLeast(0)
+        } else {
+            activeOffset
+        }
+        val previousScrollY = scrollY
+        markdown = text
+        activeOffset = nextOffset.coerceIn(0, markdown.length)
+        rebuild()
+        if (wasFocused) {
+            focusActiveEditor(showKeyboard = keyboardVisible)
+        }
+        post { scrollTo(0, previousScrollY) }
+    }
+
     fun getMarkdown(): String = markdown
 
     fun setSpellCheckEnabled(enabled: Boolean) {

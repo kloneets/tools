@@ -1,5 +1,7 @@
 # Koko Tools Account And Data Deletion
 
+Public HTML version for Google Play: https://koko.lv/account-deletion.html
+
 Koko Tools uses Firebase Authentication and Firebase Realtime Database when Firebase sync is enabled.
 
 ## Request Account Or Cloud Data Deletion

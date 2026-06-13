@@ -115,6 +115,103 @@ class MainActivityTest {
     }
 
     @Test
+    fun cleanFocusedRawNoteAppliesRemoteTextWithoutLosingFocusOrSelection() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("a.md", "alpha\nbeta")
+                setPrivateField(activity, "currentNotePath", "a.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "a.md", previewHidden = true)),
+                )
+                showNotes(activity)
+
+                val editor = activity.findViewById<EditText>(R.id.note_editor)
+                editor.requestFocus()
+                editor.setSelection(4)
+
+                applyRemoteNotes(
+                    activity,
+                    listOf(FirebaseRemoteNote("a", "a.md", "alphabet\nbeta", 1L, deleted = false)),
+                )
+
+                assertEquals("alphabet\nbeta", editor.text.toString())
+                assertEquals("a.md", getPrivateField(activity, "currentNotePath"))
+                assertTrue(editor.hasFocus())
+                assertEquals(4, editor.selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun cleanFocusedRichNoteKeepsEditorSurfaceWhenRemoteTextChanges() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("rich.md", "alpha\n\n**beta**")
+                setPrivateField(activity, "currentNotePath", "rich.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "rich.md", previewHidden = false)),
+                )
+                showNotes(activity)
+
+                val hybridBefore = getPrivateField(activity, "noteEditor")
+                val editor = activity.findViewById<EditText>(R.id.note_editor)
+                editor.requestFocus()
+                editor.setSelection(3)
+
+                applyRemoteNotes(
+                    activity,
+                    listOf(FirebaseRemoteNote("rich", "rich.md", "alphabet\n\n**beta**", 1L, deleted = false)),
+                )
+
+                assertEquals(hybridBefore, getPrivateField(activity, "noteEditor"))
+                assertEquals("rich.md", getPrivateField(activity, "currentNotePath"))
+                assertTrue(editor.hasFocus())
+                assertEquals(3, editor.selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun dirtyFocusedNoteDefersRemoteTextAndKeepsTypedContentVisible() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("dirty.md", "local")
+                setPrivateField(activity, "currentNotePath", "dirty.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "dirty.md", previewHidden = true)),
+                )
+                showNotes(activity)
+
+                val editor = activity.findViewById<EditText>(R.id.note_editor)
+                editor.requestFocus()
+                editor.setText("local draft")
+
+                applyRemoteNotes(
+                    activity,
+                    listOf(FirebaseRemoteNote("dirty", "dirty.md", "remote", 1L, deleted = false)),
+                )
+
+                assertEquals("local draft", editor.text.toString())
+                assertEquals("local", repository.read("dirty.md"))
+                val pending = getPrivateField(activity, "pendingRemoteNotes") as Map<*, *>
+                assertTrue(pending.containsKey("dirty.md"))
+            }
+        }
+    }
+
+    @Test
     fun pagesScreenRecalculatesAfterInput() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
@@ -175,6 +272,20 @@ class MainActivityTest {
         MainActivity::class.java.getDeclaredMethod("showSync").apply {
             isAccessible = true
             invoke(activity)
+        }
+    }
+
+    private fun showNotes(activity: MainActivity) {
+        MainActivity::class.java.getDeclaredMethod("showNotes").apply {
+            isAccessible = true
+            invoke(activity)
+        }
+    }
+
+    private fun applyRemoteNotes(activity: MainActivity, notes: List<FirebaseRemoteNote>) {
+        MainActivity::class.java.getDeclaredMethod("applyRemoteNotes", List::class.java).apply {
+            isAccessible = true
+            invoke(activity, notes)
         }
     }
 

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Koko Tools Account And Data Deletion</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f8f2;
+      --fg: #1f2418;
+      --muted: #5f674f;
+      --card: #ffffff;
+      --border: #d9dec8;
+      --accent: #506025;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171a12;
+        --fg: #edf2e4;
+        --muted: #b5bea3;
+        --card: #202518;
+        --border: #3b432c;
+        --accent: #a9bb72;
+      }
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+    main {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 40px 20px 56px;
+    }
+    article {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 28px;
+    }
+    h1, h2 {
+      line-height: 1.25;
+      margin: 0 0 12px;
+    }
+    h2 {
+      margin-top: 28px;
+      font-size: 1.2rem;
+    }
+    p, ul, ol {
+      margin: 0 0 14px;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    a {
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Koko Tools Account And Data Deletion</h1>
+      <p class="muted">Last updated: May 27, 2026</p>
+
+      <p>Koko Tools uses Firebase Authentication and Firebase Realtime Database when Firebase sync is enabled.</p>
+
+      <h2>Request Cloud Account Or Data Deletion</h2>
+      <p>To request deletion of your Firebase account data or synced workspace data, open a GitHub issue in the Koko Tools repository with the title <strong>Koko Tools account deletion request</strong>.</p>
+
+      <p>Include:</p>
+      <ul>
+        <li>the email address used for Firebase login,</li>
+        <li>whether you want the Firebase account deleted, synced workspace data deleted, or both.</li>
+      </ul>
+
+      <p>Do not include passwords, notes, todos, or other private content in the issue.</p>
+
+      <h2>Local Android Data</h2>
+      <p>Uninstalling the Android app removes local app-private data from the device.</p>
+
+      <h2>Desktop Data</h2>
+      <p>Desktop data is stored under the desktop app's local config directory and can be removed separately from your computer.</p>
+
+      <h2>Privacy Policy</h2>
+      <p>See the <a href="privacy-policy.html">Koko Tools Privacy Policy</a>.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -509,6 +509,54 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun updateEditorTextFromRemoteNote(text: String) {
+        suppressNoteAutosave = true
+        try {
+            noteEditor?.updateMarkdownPreservingState(text)
+            rawNoteEditor?.let { editor ->
+                val selectionStart = editor.selectionStart.coerceAtLeast(0)
+                val selectionEnd = editor.selectionEnd.coerceAtLeast(0)
+                val scrollX = editor.scrollX
+                val scrollY = editor.scrollY
+                val wasFocused = editor.hasFocus()
+                editor.setText(text)
+                val nextSelectionStart = selectionStart.coerceIn(0, editor.length())
+                val nextSelectionEnd = selectionEnd.coerceIn(0, editor.length())
+                editor.setSelection(
+                    minOf(nextSelectionStart, nextSelectionEnd),
+                    maxOf(nextSelectionStart, nextSelectionEnd),
+                )
+                if (wasFocused) {
+                    editor.requestFocus()
+                }
+                editor.post { editor.scrollTo(scrollX, scrollY) }
+            }
+        } finally {
+            suppressNoteAutosave = false
+        }
+    }
+
+    private fun applyRemoteTextToCurrentNote(text: String): Boolean {
+        val visibleText = noteEditorText()
+        if (text == loadedNoteText && text == visibleText) return false
+        if (text == visibleText) {
+            loadedNoteText = text
+            return false
+        }
+        loadedNoteText = text
+        updateEditorTextFromRemoteNote(text)
+        return true
+    }
+
+    private fun clearCurrentNoteFromRemoteDelete() {
+        if (currentNotePath.isBlank() && loadedNoteText.isEmpty() && noteEditorText().isEmpty()) return
+        currentNotePath = ""
+        loadedNoteText = ""
+        setEditorTextFromNote("")
+        persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
+        updateNoteSelector()
+    }
+
     private fun toggleNoteRendering() {
         changeNoteRenderingEnabled(settings.notesApp.previewHidden)
     }
@@ -1834,7 +1882,10 @@ class MainActivity : Activity() {
                         when (currentScreen) {
                             Screen.Pages -> showPages()
                             Screen.Settings -> showSettings()
-                            Screen.Notes -> refreshNotes()
+                            Screen.Notes -> {
+                                noteList = notesRepository.listNotes()
+                                updateNoteSelector()
+                            }
                             Screen.Assets -> refreshAssets()
                             else -> Unit
                         }
@@ -2096,6 +2147,7 @@ class MainActivity : Activity() {
     }
 
     private fun applyRemoteNotes(remoteNotes: List<FirebaseRemoteNote>) {
+        var noteFilesChanged = false
         remoteNotes.forEach { remote ->
             val path = NotesRepository.normalizePath(remote.path)
             val isCurrent = path == currentNotePath
@@ -2105,23 +2157,24 @@ class MainActivity : Activity() {
             }
             if (remote.deleted) {
                 if (isCurrent) {
-                    currentNotePath = ""
-                    loadedNoteText = ""
-                    setEditorTextFromNote("")
-                    persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
+                    clearCurrentNoteFromRemoteDelete()
                 }
                 notesRepository.delete(path)
+                noteFilesChanged = true
                 return@forEach
             }
             val localText = notesRepository.read(path)
-            if (localText == remote.text) return@forEach
-            notesRepository.save(path, remote.text)
+            if (localText != remote.text) {
+                notesRepository.save(path, remote.text)
+                noteFilesChanged = true
+            }
             if (isCurrent) {
-                loadedNoteText = remote.text
-                setEditorTextFromNote(remote.text)
+                applyRemoteTextToCurrentNote(remote.text)
             }
         }
-        noteList = notesRepository.listNotes()
+        if (noteFilesChanged) {
+            noteList = notesRepository.listNotes()
+        }
         updateNoteSelector()
     }
 
@@ -2141,9 +2194,7 @@ class MainActivity : Activity() {
             }
             notesRepository.delete(path)
             if (updateEditor) {
-                currentNotePath = ""
-                loadedNoteText = ""
-                setEditorTextFromNote("")
+                clearCurrentNoteFromRemoteDelete()
             }
             return
         }
@@ -2153,8 +2204,7 @@ class MainActivity : Activity() {
             pushNoteToFirebase(conflictPath, savedText)
             notesRepository.save(path, remote.text)
             if (updateEditor) {
-                loadedNoteText = remote.text
-                setEditorTextFromNote(remote.text)
+                applyRemoteTextToCurrentNote(remote.text)
             }
         }
     }
@@ -2380,7 +2430,7 @@ class MainActivity : Activity() {
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
         private const val FIREBASE_PULL_INTERVAL_MS = 5_000L
-        private const val PRIVACY_POLICY_URL = "https://github.com/kloneets/tools/blob/main/PRIVACY.md"
-        private const val ACCOUNT_DELETION_URL = "https://github.com/kloneets/tools/blob/main/ACCOUNT_DELETION.md"
+        private const val PRIVACY_POLICY_URL = "https://koko.lv/privacy-policy.html"
+        private const val ACCOUNT_DELETION_URL = "https://koko.lv/account-deletion.html"
     }
 }

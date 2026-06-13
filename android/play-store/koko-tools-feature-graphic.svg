@@ -1,0 +1,20 @@
+<svg width="1024" height="500" viewBox="0 0 1024 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1024" height="500" fill="#506025"/>
+  <circle cx="860" cy="92" r="180" fill="#5F7130" opacity="0.45"/>
+  <circle cx="112" cy="430" r="220" fill="#42511E" opacity="0.5"/>
+  <g transform="translate(96 94)">
+    <rect x="0" y="0" width="312" height="312" rx="72" fill="#EEF2E4"/>
+    <path fill="#506025" d="M96 78H216C227.067 78 236 86.933 236 98V238H109.333C90.933 238 76 223.067 76 204.667V98C76 86.933 84.933 78 96 78ZM109.333 104.667V198C109.333 201.667 112.333 204.667 116 204.667H202.667V104.667H109.333ZM129.333 131.333H182.667V151.333H129.333V131.333Z"/>
+  </g>
+  <text x="470" y="202" fill="#EEF2E4" font-family="Inter, Arial, sans-serif" font-size="72" font-weight="700">Koko Tools</text>
+  <text x="474" y="266" fill="#DDE6C8" font-family="Inter, Arial, sans-serif" font-size="32" font-weight="500">Notes, todos, reading progress</text>
+  <text x="474" y="314" fill="#DDE6C8" font-family="Inter, Arial, sans-serif" font-size="32" font-weight="500">and private Firebase sync</text>
+  <g transform="translate(474 362)">
+    <rect x="0" y="0" width="122" height="42" rx="21" fill="#EEF2E4" opacity="0.16"/>
+    <text x="24" y="28" fill="#EEF2E4" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Notes</text>
+    <rect x="138" y="0" width="116" height="42" rx="21" fill="#EEF2E4" opacity="0.16"/>
+    <text x="162" y="28" fill="#EEF2E4" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Todos</text>
+    <rect x="270" y="0" width="112" height="42" rx="21" fill="#EEF2E4" opacity="0.16"/>
+    <text x="292" y="28" fill="#EEF2E4" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">Sync</text>
+  </g>
+</svg>
