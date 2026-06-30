@@ -181,6 +181,7 @@ class FirebaseSyncRepository(private val context: Context) {
 
     fun pushTodos(settings: FirebaseSettings, store: TodoStore, session: FirebaseSession) {
         store.items.forEach { item ->
+            if (item.status == TodoRepository.STATUS_ARCHIVED) return@forEach
             val rev = item.updatedAt.toInstant().toEpochMilli()
             val record = JSONObject()
                 .put("item", TodoRepository.itemJson(item))
@@ -189,14 +190,10 @@ class FirebaseSyncRepository(private val context: Context) {
                 .put("deleted", false)
             putDatabase(settings, "workspaces/${settings.workspaceId}/todos/${item.id}", record, session.idToken)
         }
-        val event = JSONObject()
-            .put("device_id", "android")
-            .put("created_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
-            .put("kind", "todos_push")
         putDatabase(
             settings,
-            "workspaces/${settings.workspaceId}/events/android-${System.currentTimeMillis()}",
-            event,
+            "workspaces/${settings.workspaceId}/todo_archive_months",
+            org.json.JSONArray().apply { TodoRepository.archiveMonths(store).forEach { put(it) } }.toString(),
             session.idToken,
         )
     }
@@ -214,16 +211,6 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
             .put("deleted", false)
         putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
-        putDatabase(
-            settings,
-            "workspaces/${settings.workspaceId}/events/android-note-$rev",
-            JSONObject()
-                .put("device_id", "android")
-                .put("created_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
-                .put("kind", "note_push")
-                .put("note_id", id),
-            session.idToken,
-        )
     }
 
     fun pushNoteDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
@@ -261,7 +248,9 @@ class FirebaseSyncRepository(private val context: Context) {
 
     fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession): TodoStore {
         val remoteItems = pullRemoteTodos(settings, session)
-        val byId = local.items.associateBy { it.id }.toMutableMap()
+            .filter { it.item.status != TodoRepository.STATUS_ARCHIVED }
+        val remoteArchiveMonths = pullTodoArchiveMonths(settings, session)
+        val byId = TodoRepository.nonArchivedStore(local).items.associateBy { it.id }.toMutableMap()
         remoteItems.forEach { record ->
             val item = record.item
             if (record.deleted) {
@@ -273,11 +262,48 @@ class FirebaseSyncRepository(private val context: Context) {
                 byId[item.id] = item
             }
         }
-        return local.copy(items = sortedTodos(byId.values))
+        val merged = TodoRepository.preserveArchived(local, local.copy(items = sortedTodos(byId.values)))
+        return TodoRepository.normalize(merged.copy(archiveMonths = merged.archiveMonths + remoteArchiveMonths))
     }
 
     fun pullRemoteTodoStore(settings: FirebaseSettings, session: FirebaseSession): TodoStore {
-        return TodoStore(items = sortedTodos(pullRemoteTodos(settings, session).filterNot { it.deleted }.map { it.item }))
+        return TodoStore(
+            items = sortedTodos(
+                pullRemoteTodos(settings, session)
+                    .filterNot { it.deleted }
+                    .map { it.item }
+                    .filter { it.status != TodoRepository.STATUS_ARCHIVED },
+            ),
+        )
+    }
+
+    fun pullTodoArchiveMonth(settings: FirebaseSettings, month: String, session: FirebaseSession): List<TodoItem> {
+        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todo_archives/$month", session.idToken)
+        val records = mutableListOf<TodoItem>()
+        if (remote != null) {
+            remote.keys().forEach { id ->
+                val record = remote.optJSONObject(id) ?: return@forEach
+                if (record.optBoolean("deleted", false)) return@forEach
+                val itemJson = record.optJSONObject("item") ?: return@forEach
+                val item = TodoRepository.parseItem(itemJson)
+                if (item.status == TodoRepository.STATUS_ARCHIVED &&
+                    item.archivedAt != null &&
+                    item.archivedAt.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM")) == month
+                ) {
+                    records += item
+                }
+            }
+        }
+        return records.sortedByDescending { it.archivedAt }
+    }
+
+    fun pullTodoArchiveMonths(settings: FirebaseSettings, session: FirebaseSession): List<String> {
+        val response = request("GET", databaseUrl(settings, "workspaces/${settings.workspaceId}/todo_archive_months", session.idToken), null, null)
+        if (response.isBlank() || response == "null") return emptyList()
+        val values = org.json.JSONArray(response)
+        return (0 until values.length()).mapNotNull { index ->
+            values.optString(index).takeIf { it.isNotBlank() }
+        }
     }
 
     fun pushSharedSettings(settings: FirebaseSettings, appSettings: AppSettings, session: FirebaseSession): Boolean {
@@ -292,15 +318,6 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_at", TodoRepository.formatTime(now))
             .put("updated_by", session.uid)
         putDatabase(settings, "workspaces/${settings.workspaceId}/settings/shared", record, session.idToken)
-        putDatabase(
-            settings,
-            "workspaces/${settings.workspaceId}/events/android-settings-$rev",
-            JSONObject()
-                .put("device_id", "android")
-                .put("created_at", TodoRepository.formatTime(now))
-                .put("kind", "settings_push"),
-            session.idToken,
-        )
         markSharedSettingsSynced(settings, values)
         return true
     }
@@ -425,6 +442,10 @@ class FirebaseSyncRepository(private val context: Context) {
 
     private fun putDatabase(settings: FirebaseSettings, path: String, body: JSONObject, idToken: String) {
         requestJson("PUT", databaseUrl(settings, path, idToken), body.toString(), "application/json")
+    }
+
+    private fun putDatabase(settings: FirebaseSettings, path: String, body: String, idToken: String) {
+        requestJson("PUT", databaseUrl(settings, path, idToken), body, "application/json")
     }
 
     private fun getDatabase(settings: FirebaseSettings, path: String, idToken: String): JSONObject? {

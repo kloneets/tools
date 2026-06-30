@@ -96,6 +96,8 @@ class MainActivity : Activity() {
     private var todoMoveMode = false
     private val todoMoveRows = mutableMapOf<String, View>()
     private var todoDraggingId: String? = null
+    private val expandedTodoArchiveMonths = mutableSetOf<String>()
+    private val loadingTodoArchiveMonths = mutableSetOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -182,8 +184,16 @@ class MainActivity : Activity() {
         ) {
             showCurrentActionsMenu()
         }
+        val syncButton = toolbarIconButton(
+            icon = R.drawable.ic_sync_24,
+            id = View.generateViewId(),
+            description = "Quick sync to Firebase",
+        ) {
+            syncToFirebase()
+        }
         toolbar.addView(toolsButton)
         toolbar.addView(titleGroup)
+        toolbar.addView(syncButton)
         toolbar.addView(actionsButton)
 
         content = LinearLayout(this).apply {
@@ -1072,21 +1082,89 @@ class MainActivity : Activity() {
         addTodoSection(list, "Done", TodoRepository.doneItems(todoStore), archived = false)
         list.addView(sectionTitle("Archive"))
         val groups = TodoRepository.archiveGroups(todoStore)
-        if (groups.isEmpty()) {
+        val archiveMonths = TodoRepository.archiveMonths(todoStore)
+        if (archiveMonths.isEmpty()) {
             list.addView(emptySectionText("No archived todos"))
         } else {
-            groups.forEach { (month, items) ->
-                list.addView(TextView(this).apply {
-                    text = month
-                    textSize = 14f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                    setTextColor(COLOR_TEXT_PRIMARY)
-                    setPadding(dp(2), dp(8), 0, dp(4))
-                })
-                items.forEach { list.addView(todoRow(it, archived = true)) }
+            archiveMonths.forEach { month ->
+                val items = groups[month].orEmpty()
+                list.addView(todoArchiveMonthRow(month, items.size))
+                if (expandedTodoArchiveMonths.contains(month)) {
+                    items.forEach { list.addView(todoRow(it, archived = true)) }
+                }
             }
         }
         scheduleTodoBoundaryRefresh()
+    }
+
+    private fun todoArchiveMonthRow(month: String, cachedCount: Int): TextView {
+        return TextView(this).apply {
+            val expanded = expandedTodoArchiveMonths.contains(month)
+            val loading = loadingTodoArchiveMonths.contains(month)
+            text = when {
+                loading -> "$month - loading"
+                expanded -> "$month - $cachedCount archived"
+                else -> month
+            }
+            textSize = 14f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            setTextColor(COLOR_TEXT_PRIMARY)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), 0, dp(12), 0)
+            background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(8).toFloat())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44),
+            ).apply { bottomMargin = dp(6) }
+            setOnClickListener { openTodoArchiveMonth(month) }
+        }
+    }
+
+    private fun openTodoArchiveMonth(month: String) {
+        if (expandedTodoArchiveMonths.contains(month)) {
+            expandedTodoArchiveMonths.remove(month)
+            showTodoPreservingScroll()
+            return
+        }
+        if (!firebaseSyncRepository.configured(settings.firebase)) {
+            expandedTodoArchiveMonths.add(month)
+            showTodoPreservingScroll()
+            return
+        }
+        if (!loadingTodoArchiveMonths.add(month)) return
+        showTodoPreservingScroll()
+        Thread {
+            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            if (session == null) {
+                runOnUiThread {
+                    loadingTodoArchiveMonths.remove(month)
+                    setSyncStatus("Firebase login required")
+                    showTodoPreservingScroll()
+                }
+                return@Thread
+            }
+            firebaseSession = session
+            runCatching {
+                val remoteItems = firebaseSyncRepository.pullTodoArchiveMonth(settings.firebase, month, session)
+                val local = todoRepository.load()
+                TodoRepository.mergeArchiveMonth(local, month, remoteItems)
+            }.onSuccess { merged ->
+                todoRepository.save(merged)
+                runOnUiThread {
+                    todoStore = merged
+                    loadingTodoArchiveMonths.remove(month)
+                    expandedTodoArchiveMonths.add(month)
+                    setSyncStatus("Firebase todo archive loaded: $month")
+                    showTodoPreservingScroll()
+                }
+            }.onFailure { error ->
+                runOnUiThread {
+                    loadingTodoArchiveMonths.remove(month)
+                    setSyncStatus("Firebase todo archive load failed: ${error.message}")
+                    showTodoPreservingScroll()
+                }
+            }
+        }.start()
     }
 
     private fun showTodoPreservingScroll() {
@@ -1591,7 +1669,7 @@ class MainActivity : Activity() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         val runnable = Runnable {
             firebasePullRunnable = null
-            pullTodosFromFirebase()
+            pullFirebaseRealtimeData()
             scheduleFirebasePull()
         }
         firebasePullRunnable = runnable
@@ -1673,7 +1751,7 @@ class MainActivity : Activity() {
                             persistSettings(settings.copy(firebase = workspaceSettings))
                             setSyncStatus("Firebase workspace: ${workspaceSettings.workspaceName}")
                             scheduleFirebasePull()
-                            pullTodosFromFirebase()
+                            pullFirebaseRealtimeData()
                             pushSharedFirebaseData()
                         }
                     }.onFailure { error ->
@@ -1740,7 +1818,7 @@ class MainActivity : Activity() {
                     persistSettings(settings.copy(firebase = workspaceSettings))
                     setSyncStatus("Firebase Google login ready: ${workspaceSettings.workspaceName}")
                     scheduleFirebasePull()
-                    pullTodosFromFirebase()
+                    pullFirebaseRealtimeData()
                     pushSharedFirebaseData()
                 }
             }.onFailure { error ->
@@ -1901,7 +1979,11 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun pullTodosFromFirebase() {
+    private fun pullFirebaseRealtimeData() {
+        pullTodosFromFirebase(includeAssets = false)
+    }
+
+    private fun pullTodosFromFirebase(includeAssets: Boolean = false) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
             val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
@@ -1919,7 +2001,7 @@ class MainActivity : Activity() {
                 }
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
-                val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
+                val remoteAssets = if (includeAssets) firebaseSyncRepository.pullAssets(settings.firebase, session) else emptyList()
                 FirebasePullResult(
                     todos = merged,
                     todoChanged = todoChanged,
@@ -1944,7 +2026,7 @@ class MainActivity : Activity() {
                         settingsRepository.save(settings)
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
-                    if (!localEditActive) applyRemoteAssets(remoteAssets)
+                    if (includeAssets && !localEditActive) applyRemoteAssets(remoteAssets)
                     applyRemoteNotes(pullResult.remoteNotes)
                     todoStore = pullResult.todos
                     if (SyncUiState.shouldRebuildTodoAfterPull(
@@ -1958,9 +2040,10 @@ class MainActivity : Activity() {
                     if (currentScreen == Screen.Pages && !localEditActive) showPages()
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null) ", shared settings pulled" else ""
+                    val assetStatus = if (includeAssets) ", ${remoteAssets.count { !it.deleted }} asset(s)" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
                     setSyncStatus(
-                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
+                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$assetStatus$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
                     )
                 }
             }.onFailure { error ->
@@ -2429,7 +2512,7 @@ class MainActivity : Activity() {
         private const val FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE = 4203
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
-        private const val FIREBASE_PULL_INTERVAL_MS = 5_000L
+        private const val FIREBASE_PULL_INTERVAL_MS = 5 * 60 * 1_000L
         private const val PRIVACY_POLICY_URL = "https://koko.lv/privacy-policy.html"
         private const val ACCOUNT_DELETION_URL = "https://koko.lv/account-deletion.html"
     }

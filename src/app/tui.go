@@ -47,6 +47,7 @@ const (
 
 const manualSyncTimeout = 20 * time.Second
 const recorderDuration = 5 * time.Second
+const firebasePollingInterval = 5 * time.Minute
 
 type terminalApp struct {
 	view                   view
@@ -62,6 +63,7 @@ type terminalApp struct {
 	todoInputCursorOffset  int
 	todoEditID             string
 	todoDirty              bool
+	todoArchiveExpanded    map[string]bool
 	status                 string
 	width                  int
 	height                 int
@@ -102,6 +104,7 @@ type terminalApp struct {
 	syncOpID               atomic.Int64
 	syncSpinnerTick        atomic.Int64
 	syncTimeout            time.Duration
+	manualFirebaseSync     func(context.Context) error
 	firebaseTodoSyncer     *kokosync.TodoSyncer
 	firebaseNoteSyncer     *kokosync.NoteSyncer
 	firebaseSettingsSyncer *kokosync.SettingsSyncer
@@ -130,6 +133,11 @@ type appTab struct {
 	label string
 	view  view
 	key   string
+}
+
+type todoSelectableRow struct {
+	item         *todo.Item
+	archiveMonth string
 }
 
 type recordedKeyEvent struct {
@@ -184,15 +192,16 @@ func newTerminalApp() (*terminalApp, error) {
 		return nil, err
 	}
 	app := &terminalApp{
-		view:        defaultAppView(),
-		notes:       noteWS,
-		pages:       pages.NewModel(),
-		password:    password.NewModel(),
-		todos:       todoRepo,
-		todoStore:   todoStore,
-		width:       120,
-		height:      36,
-		syncTimeout: manualSyncTimeout,
+		view:                defaultAppView(),
+		notes:               noteWS,
+		pages:               pages.NewModel(),
+		password:            password.NewModel(),
+		todos:               todoRepo,
+		todoStore:           todoStore,
+		todoArchiveExpanded: map[string]bool{},
+		width:               120,
+		height:              36,
+		syncTimeout:         manualSyncTimeout,
 	}
 	app.initWidgets()
 	notes.SetSpellRefreshHook(func() {
@@ -1096,6 +1105,10 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		}
 		return true
 	}
+	if key.Ctrl && key.Name == "r" {
+		a.startManualFirebaseSync()
+		return true
+	}
 	if key.Ctrl {
 		switch key.Name {
 		case "tab":
@@ -1548,7 +1561,7 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		return true
 	}
 	a.reloadTodosForRender()
-	rows := a.todoSelectableItems()
+	rows := a.todoSelectableRows()
 	switch key.Name {
 	case "down", "j":
 		if a.todoIndex < len(rows)-1 {
@@ -1574,6 +1587,10 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		}
 		return true
 	case "enter", "space", " ":
+		if row, ok := a.selectedTodoRow(); ok && row.archiveMonth != "" {
+			a.openTodoArchiveMonth(row.archiveMonth)
+			return true
+		}
 		if item, ok := a.selectedTodoItem(); ok && item.Status != todo.StatusArchived {
 			store, err := a.todos.Toggle(item.ID)
 			if err != nil {
@@ -1591,6 +1608,31 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		return a.moveSelectedTodo(-1)
 	}
 	return false
+}
+
+func (a *terminalApp) openTodoArchiveMonth(month string) {
+	if a.todoArchiveExpanded == nil {
+		a.todoArchiveExpanded = map[string]bool{}
+	}
+	if a.todoArchiveExpanded[month] {
+		a.todoArchiveExpanded[month] = false
+		return
+	}
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		a.todoArchiveExpanded[month] = true
+		return
+	}
+	a.startSyncOperation("load todo archive "+month, func() error {
+		return a.pullTodoArchiveMonthFromFirebase(context.Background(), month)
+	}, func() {
+		a.todoArchiveExpanded[month] = true
+		helpers.StatusBarInst().UpdateStatusBar("Todo archive loaded: " + month)
+		a.reloadTodosForRender()
+		a.refresh()
+	}, func(err error) {
+		helpers.StatusBarInst().UpdateStatusBar("Todo archive load failed: " + err.Error())
+	})
 }
 
 func (a *terminalApp) clampTodoInputCursor(bufferLen int) {
@@ -1651,28 +1693,53 @@ func (a *terminalApp) scheduleTodoRefresh() {
 }
 
 func (a *terminalApp) todoSelectableItems() []todo.Item {
-	items := make([]todo.Item, 0)
-	items = append(items, todo.ActiveItems(a.todoStore)...)
-	items = append(items, todo.DoneItems(a.todoStore)...)
-	for _, month := range todo.ArchiveMonths(a.todoStore) {
-		items = append(items, todo.ArchiveGroups(a.todoStore)[month]...)
+	rows := a.todoSelectableRows()
+	items := make([]todo.Item, 0, len(rows))
+	for _, row := range rows {
+		if row.item != nil {
+			items = append(items, *row.item)
+		}
 	}
 	return items
 }
 
-func (a *terminalApp) selectedTodoItem() (todo.Item, bool) {
-	items := a.todoSelectableItems()
-	if len(items) == 0 {
-		return todo.Item{}, false
+func (a *terminalApp) todoSelectableRows() []todoSelectableRow {
+	rows := make([]todoSelectableRow, 0)
+	for _, item := range todo.ActiveItems(a.todoStore) {
+		item := item
+		rows = append(rows, todoSelectableRow{item: &item})
+	}
+	for _, item := range todo.DoneItems(a.todoStore) {
+		item := item
+		rows = append(rows, todoSelectableRow{item: &item})
+	}
+	for _, month := range todo.ArchiveMonths(a.todoStore) {
+		rows = append(rows, todoSelectableRow{archiveMonth: month})
+	}
+	return rows
+}
+
+func (a *terminalApp) selectedTodoRow() (todoSelectableRow, bool) {
+	rows := a.todoSelectableRows()
+	if len(rows) == 0 {
+		return todoSelectableRow{}, false
 	}
 	a.clampTodoIndex()
-	return items[a.todoIndex], true
+	return rows[a.todoIndex], true
+}
+
+func (a *terminalApp) selectedTodoItem() (todo.Item, bool) {
+	row, ok := a.selectedTodoRow()
+	if !ok || row.item == nil {
+		return todo.Item{}, false
+	}
+	return *row.item, true
 }
 
 func (a *terminalApp) selectTodoByID(id string) {
-	items := a.todoSelectableItems()
-	for i, item := range items {
-		if item.ID == id {
+	rows := a.todoSelectableRows()
+	for i, row := range rows {
+		if row.item != nil && row.item.ID == id {
 			a.todoIndex = i
 			return
 		}
@@ -1681,16 +1748,16 @@ func (a *terminalApp) selectTodoByID(id string) {
 }
 
 func (a *terminalApp) clampTodoIndex() {
-	items := a.todoSelectableItems()
-	if len(items) == 0 {
+	rows := a.todoSelectableRows()
+	if len(rows) == 0 {
 		a.todoIndex = 0
 		return
 	}
 	if a.todoIndex < 0 {
 		a.todoIndex = 0
 	}
-	if a.todoIndex >= len(items) {
-		a.todoIndex = len(items) - 1
+	if a.todoIndex >= len(rows) {
+		a.todoIndex = len(rows) - 1
 	}
 }
 
@@ -2016,16 +2083,24 @@ func (a *terminalApp) syncItems() []actionItem {
 			a.loginFirebaseWithGoogle()
 		}},
 		{Label: "sync to firebase", Apply: func() {
-			a.startSyncOperation("sync to firebase", func() error {
-				return a.syncToFirebase(context.Background())
-			}, func() {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase sync complete")
-			}, func(err error) {
-				helpers.StatusBarInst().UpdateStatusBar("Firebase sync failed: " + err.Error())
-			})
+			a.startManualFirebaseSync()
 		}},
 	}
 	return items
+}
+
+func (a *terminalApp) startManualFirebaseSync() {
+	syncFunc := a.syncToFirebase
+	if a.manualFirebaseSync != nil {
+		syncFunc = a.manualFirebaseSync
+	}
+	a.startSyncOperation("sync to firebase", func() error {
+		return syncFunc(context.Background())
+	}, func() {
+		helpers.StatusBarInst().UpdateStatusBar("Firebase sync complete")
+	}, func(err error) {
+		helpers.StatusBarInst().UpdateStatusBar("Firebase sync failed: " + err.Error())
+	})
 }
 
 func firebaseWorkspaceLabel(cfg *settings.FirebaseSettings) string {
@@ -2861,8 +2936,12 @@ func (a *terminalApp) renderTodo(height int) string {
 		lines = append(lines, "")
 	}
 	selectedID := ""
-	if item, ok := a.selectedTodoItem(); ok {
-		selectedID = item.ID
+	selectedMonth := ""
+	if row, ok := a.selectedTodoRow(); ok {
+		if row.item != nil {
+			selectedID = row.item.ID
+		}
+		selectedMonth = row.archiveMonth
 	}
 	addSection := func(title string, items []todo.Item, archived bool) {
 		lines = append(lines, title)
@@ -2898,13 +2977,19 @@ func (a *terminalApp) renderTodo(height int) string {
 	} else {
 		groups := todo.ArchiveGroups(a.todoStore)
 		for _, month := range months {
-			lines = append(lines, "  "+month)
-			for _, item := range groups[month] {
-				prefix := "    "
-				if item.ID == selectedID {
-					prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, ">   ")
+			prefix := "  "
+			if month == selectedMonth {
+				prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, "> ")
+			}
+			marker := "+"
+			if a.todoArchiveExpanded != nil && a.todoArchiveExpanded[month] {
+				marker = "-"
+			}
+			lines = append(lines, fmt.Sprintf("%s[%s] %s", prefix, marker, month))
+			if a.todoArchiveExpanded != nil && a.todoArchiveExpanded[month] {
+				for _, item := range groups[month] {
+					lines = append(lines, "    [-] ~"+item.Text+"~")
 				}
-				lines = append(lines, prefix+"[-] ~"+item.Text+"~")
 			}
 		}
 	}
@@ -3133,7 +3218,7 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 			a.runFirebaseSyncTick(ctx)
 		}
 
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(firebasePollingInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -3156,8 +3241,6 @@ func (a *terminalApp) runFirebaseSyncTick(ctx context.Context) {
 	} else if err := a.pullNotesFromFirebase(ctx); err != nil {
 		syncErr = err
 	} else if err := a.pullSettingsFromFirebase(ctx); err != nil {
-		syncErr = err
-	} else if err := a.pullAssetsFromFirebase(ctx); err != nil {
 		syncErr = err
 	}
 
@@ -3375,6 +3458,37 @@ func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
 		a.reloadTodosForRender()
 		a.refresh()
 	})
+	return nil
+}
+
+func (a *terminalApp) pullTodoArchiveMonthFromFirebase(ctx context.Context, month string) error {
+	if err := a.ensureFirebaseSyncer(ctx); err != nil {
+		return err
+	}
+	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
+		return nil
+	}
+	local, err := a.todos.Load()
+	if err != nil {
+		return err
+	}
+	merged, changed, err := a.firebaseTodoSyncer.PullArchiveMonth(ctx, local, month)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	if err := a.todos.Save(merged); err != nil {
+		return err
+	}
+	a.todoStore = merged
+	if settings.Inst().Firebase != nil {
+		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
+		settings.Inst().Firebase.LastSyncStatus = "ok"
+		settings.Inst().Firebase.LastSyncMessage = "Firebase todo archive pulled: " + month
+		settings.SaveSettingsLocal()
+	}
 	return nil
 }
 
@@ -4010,7 +4124,7 @@ func (a *terminalApp) helpText() string {
 		if a.tabSelect {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return "sync: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | j/k move | enter run action | save locally before upload"
+		return "sync: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+r quick sync | j/k move | enter run action | save locally before upload"
 	case viewSettings:
 		if a.tabSelect {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
@@ -4067,6 +4181,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "ctrl+t", desc: "activate tab bar"},
 		{keys: "ctrl+tab", desc: "cycle to the next app tab"},
 		{keys: "ctrl+" + a.appTabKeyHint(), desc: "jump directly to an app tab when visible"},
+		{keys: "ctrl+r", desc: "quick sync to Firebase"},
 		{keys: a.appTabKeyHint(), desc: "jump to tab while tab bar is active"},
 		{keys: "mouse click tab", desc: "jump directly to an app tab"},
 		{keys: "left/right", desc: "move tab selection while tab bar is active"},
@@ -4196,6 +4311,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	lines = append(lines, renderSection("Sync:", []helpEntry{
 		{keys: "j/k", desc: "move selection"},
 		{keys: "enter, space", desc: "run selected action"},
+		{keys: "ctrl+r", desc: "quick sync to Firebase"},
 	})...)
 	lines = append(lines, renderSection("Settings:", []helpEntry{
 		{keys: "j/k", desc: "move selection"},

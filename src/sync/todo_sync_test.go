@@ -1,0 +1,163 @@
+package sync
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/kloneets/tools/src/todo"
+)
+
+func TestTodoSyncerPushStoreSkipsArchivedItems(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	archivedAt := now
+	provider := &fakeTodoProvider{}
+	syncer := &TodoSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		StatePath:   filepath.Join(t.TempDir(), "state.json"),
+		Session:     Session{IDToken: "token", UID: "uid"},
+	}
+
+	err := syncer.PushStore(context.Background(), todo.Store{Items: []todo.Item{
+		{ID: "active", Text: "active", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now},
+		{ID: "old", Text: "old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
+	}})
+
+	if err != nil {
+		t.Fatalf("PushStore() error = %v", err)
+	}
+	if len(provider.pushed) != 1 || provider.pushed[0].Todo.Item.ID != "active" {
+		t.Fatalf("pushed mutations = %#v, want active todo only", provider.pushed)
+	}
+}
+
+func TestTodoSyncerPullStoreIgnoresRemoteArchivedAndPreservesLocalArchive(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	archivedAt := now
+	provider := &fakeTodoProvider{
+		todos: map[string]TodoRecord{
+			"remote-active": {Item: todo.Item{ID: "remote-active", Text: "remote", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now}},
+			"remote-old":    {Item: todo.Item{ID: "remote-old", Text: "old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt}},
+		},
+		archiveMonthList: []string{"2026-05"},
+	}
+	syncer := &TodoSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		Session:     Session{IDToken: "token", UID: "uid"},
+	}
+	local := todo.Store{Items: []todo.Item{
+		{ID: "local-old", Text: "local old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
+	}}
+
+	got, changed, err := syncer.PullStore(context.Background(), local)
+
+	if err != nil {
+		t.Fatalf("PullStore() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("items = %#v, want remote active plus local archive", got.Items)
+	}
+	if months := todo.ArchiveMonths(got); len(months) != 1 || months[0] != "2026-05" {
+		t.Fatalf("ArchiveMonths() = %#v, want remote archive title", months)
+	}
+	for _, item := range got.Items {
+		if item.ID == "remote-old" {
+			t.Fatalf("remote archived item was auto-pulled: %#v", got.Items)
+		}
+	}
+}
+
+func TestTodoSyncerPullArchiveMonthMergesRequestedMonth(t *testing.T) {
+	may := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	april := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	provider := &fakeTodoProvider{
+		archiveMonths: map[string]map[string]TodoRecord{
+			"2026-05": {
+				"may": {Item: todo.Item{ID: "may", Text: "may", Status: todo.StatusArchived, CreatedAt: may, UpdatedAt: may, ArchivedAt: &may}},
+			},
+		},
+	}
+	syncer := &TodoSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		Session:     Session{IDToken: "token", UID: "uid"},
+	}
+	local := todo.Store{Items: []todo.Item{
+		{ID: "active", Text: "active", Status: todo.StatusTodo, CreatedAt: may, UpdatedAt: may},
+		{ID: "april", Text: "april", Status: todo.StatusArchived, CreatedAt: april, UpdatedAt: april, ArchivedAt: &april},
+	}}
+
+	got, changed, err := syncer.PullArchiveMonth(context.Background(), local, "2026-05")
+
+	if err != nil {
+		t.Fatalf("PullArchiveMonth() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if len(todo.ArchiveGroups(got)["2026-05"]) != 1 || todo.ArchiveGroups(got)["2026-05"][0].ID != "may" {
+		t.Fatalf("May archive = %#v, want pulled may item", todo.ArchiveGroups(got)["2026-05"])
+	}
+	if len(todo.ArchiveGroups(got)["2026-04"]) != 1 {
+		t.Fatalf("April archive not preserved: %#v", got.Items)
+	}
+}
+
+type fakeTodoProvider struct {
+	todos            map[string]TodoRecord
+	archiveMonths    map[string]map[string]TodoRecord
+	archiveMonthList []string
+	pushed           []Mutation
+}
+
+func (p *fakeTodoProvider) Login(context.Context, string, string) (Session, error) {
+	return Session{}, nil
+}
+
+func (p *fakeTodoProvider) WatchWorkspace(context.Context, string, string, func(Change) error) error {
+	return nil
+}
+
+func (p *fakeTodoProvider) PushMutation(_ context.Context, _ string, mutation Mutation) error {
+	p.pushed = append(p.pushed, mutation)
+	return nil
+}
+
+func (p *fakeTodoProvider) PullSnapshot(context.Context, string) (Snapshot, error) {
+	return Snapshot{Todos: p.todos}, nil
+}
+
+func (p *fakeTodoProvider) PullTodos(context.Context, string) (map[string]TodoRecord, error) {
+	return p.todos, nil
+}
+
+func (p *fakeTodoProvider) PullTodoArchiveMonth(_ context.Context, _ string, month string) (map[string]TodoRecord, error) {
+	return p.archiveMonths[month], nil
+}
+
+func (p *fakeTodoProvider) PullTodoArchiveMonths(context.Context, string) ([]string, error) {
+	return p.archiveMonthList, nil
+}
+
+func (p *fakeTodoProvider) PushTodoArchiveMonths(_ context.Context, _ string, months []string) error {
+	p.archiveMonthList = months
+	return nil
+}
+
+func (p *fakeTodoProvider) CreateWorkspace(context.Context, string) (WorkspaceMeta, error) {
+	return WorkspaceMeta{}, nil
+}
+
+func (p *fakeTodoProvider) GrantMember(context.Context, string, string, string) error {
+	return nil
+}
+
+func (p *fakeTodoProvider) RevokeMember(context.Context, string, string) error {
+	return nil
+}

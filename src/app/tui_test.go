@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -368,6 +369,37 @@ func TestHandleGlobalKeyCtrlSSavesAllNotesAndSettings(t *testing.T) {
 	}
 }
 
+func TestHandleGlobalKeyCtrlRStartsQuickFirebaseSync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	helpers.InitStatusBar()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	app := &terminalApp{
+		manualFirebaseSync: func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		},
+	}
+
+	if !app.handleGlobalKey(notes.Key{Name: "r", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+r) = false, want true")
+	}
+	defer close(release)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("quick Firebase sync did not start")
+	}
+	if !app.syncInProgress {
+		t.Fatal("syncInProgress = false, want quick Firebase sync to start")
+	}
+	if app.syncProgressLabel != "sync to firebase" {
+		t.Fatalf("syncProgressLabel = %q, want %q", app.syncProgressLabel, "sync to firebase")
+	}
+}
+
 func TestNotesVimWriteRequestsSaveAllState(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -701,10 +733,59 @@ func TestRenderTodoShowsSections(t *testing.T) {
 		}},
 	}
 	got := app.renderTodo(20)
-	for _, want := range []string{"Todo", "Done", "Archive", "2026-05", "active", "~done~", "~old~"} {
+	for _, want := range []string{"Todo", "Done", "Archive", "[+] 2026-05", "active", "~done~"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("renderTodo() = %q, want %q", got, want)
 		}
+	}
+	if strings.Contains(got, "~old~") {
+		t.Fatalf("renderTodo() = %q, should hide archived item text before month is opened", got)
+	}
+}
+
+func TestRenderTodoShowsExpandedArchiveMonthFromLocalCache(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	archivedAt := now
+	app := &terminalApp{
+		view:                viewTodo,
+		todoArchiveExpanded: map[string]bool{"2026-05": true},
+		todoStore: todo.Store{Items: []todo.Item{
+			{ID: "3", Text: "old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
+		}},
+	}
+
+	got := app.renderTodo(20)
+
+	for _, want := range []string{"[-] 2026-05", "~old~"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("renderTodo() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestHandleGlobalKeyTodoArchiveMonthExpandsLocalCacheWithoutFirebase(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	archivedAt := now
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	store := todo.Store{Items: []todo.Item{
+		{ID: "3", Text: "old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
+	}}
+	if err := repo.Save(store); err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{
+		view:      viewTodo,
+		todos:     repo,
+		todoStore: store,
+	}
+
+	if !app.handleGlobalKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleGlobalKey(enter) = false, want archive month handled")
+	}
+	if !app.todoArchiveExpanded["2026-05"] {
+		t.Fatal("todoArchiveExpanded[2026-05] = false, want true")
 	}
 }
 

@@ -11,6 +11,7 @@ import java.time.format.DateTimeFormatter
 data class TodoStore(
     val version: Int = TodoRepository.SCHEMA_VERSION,
     val items: List<TodoItem> = emptyList(),
+    val archiveMonths: List<String> = emptyList(),
 )
 
 data class TodoItem(
@@ -35,22 +36,30 @@ class TodoRepository(private val context: Context) {
         if (raw.isBlank()) return TodoStore()
         val json = JSONObject(raw)
         val items = json.optJSONArray("items") ?: JSONArray()
+        val archiveMonths = json.optJSONArray("archive_months") ?: JSONArray()
         val store = TodoStore(
             version = SCHEMA_VERSION,
             items = (0 until items.length()).mapNotNull { index ->
                 items.optJSONObject(index)?.let { parseItem(it) }
             },
+            archiveMonths = (0 until archiveMonths.length()).mapNotNull { index ->
+                archiveMonths.optString(index).takeIf { it.isNotBlank() }
+            },
         )
-        val cleaned = cleanup(store, now)
+        val cleaned = cleanup(normalize(store), now)
         if (cleaned != store) save(cleaned)
         return cleaned
     }
 
     fun save(store: TodoStore) {
+        val normalized = normalize(store)
         val json = JSONObject()
             .put("version", SCHEMA_VERSION)
             .put("items", JSONArray().apply {
-                store.items.forEach { put(itemJson(it)) }
+                normalized.items.forEach { put(itemJson(it)) }
+            })
+            .put("archive_months", JSONArray().apply {
+                normalized.archiveMonths.forEach { put(it) }
             })
         todosPath().writeText(json.toString(2))
     }
@@ -165,6 +174,58 @@ class TodoRepository(private val context: Context) {
                 .mapValues { (_, items) -> items.sortedByDescending { it.archivedAt } }
         }
 
+        fun archiveMonths(store: TodoStore): List<String> {
+            return normalizeArchiveMonths(store.archiveMonths + archiveGroups(store).keys)
+        }
+
+        fun archiveMonthItems(store: TodoStore, month: String): List<TodoItem> {
+            return archiveGroups(store)[month].orEmpty()
+        }
+
+        fun nonArchivedStore(store: TodoStore): TodoStore {
+            return store.copy(items = store.items.filter { it.status != STATUS_ARCHIVED })
+        }
+
+        fun mergeArchiveMonth(store: TodoStore, month: String, items: List<TodoItem>): TodoStore {
+            val storeWithMonth = store.copy(archiveMonths = normalizeArchiveMonths(store.archiveMonths + month))
+            val monthItems = items.filter {
+                it.status == STATUS_ARCHIVED &&
+                    it.archivedAt != null &&
+                    it.archivedAt.format(DateTimeFormatter.ofPattern("yyyy-MM")) == month
+            }
+            if (monthItems.isEmpty()) return storeWithMonth
+            val remaining = storeWithMonth.items.filterNot {
+                it.status == STATUS_ARCHIVED &&
+                    it.archivedAt != null &&
+                    it.archivedAt.format(DateTimeFormatter.ofPattern("yyyy-MM")) == month
+            }
+            return normalize(storeWithMonth.copy(items = remaining + monthItems))
+        }
+
+        fun preserveArchived(local: TodoStore, synced: TodoStore): TodoStore {
+            val syncedIds = synced.items
+                .filter { it.status != STATUS_ARCHIVED }
+                .map { it.id }
+                .toSet()
+            return normalize(synced.copy(
+                items = synced.items.filter { it.status != STATUS_ARCHIVED } +
+                    local.items.filter { it.status == STATUS_ARCHIVED && !syncedIds.contains(it.id) },
+                archiveMonths = local.archiveMonths,
+            ))
+        }
+
+        fun normalize(store: TodoStore): TodoStore {
+            return store.copy(archiveMonths = normalizeArchiveMonths(store.archiveMonths + archiveGroups(store).keys))
+        }
+
+        private fun normalizeArchiveMonths(months: Iterable<String>): List<String> {
+            return months
+                .map { it.trim() }
+                .filter { it.length == "yyyy-MM".length }
+                .distinct()
+                .sortedDescending()
+        }
+
         fun cleanup(store: TodoStore, now: OffsetDateTime): TodoStore {
             var changed = false
             val updated = store.items.map { item ->
@@ -183,7 +244,7 @@ class TodoRepository(private val context: Context) {
                 }
                 next
             }
-            return if (changed) store.copy(items = updated) else store
+            return if (changed) normalize(store.copy(items = updated)) else normalize(store)
         }
 
         fun reorderActiveUnchecked(

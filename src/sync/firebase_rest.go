@@ -218,6 +218,9 @@ func (p *FirebaseRESTProvider) MigrateWorkspaceToPersonal(ctx context.Context, s
 		if todo.Item.ID == "" {
 			todo.Item.ID = id
 		}
+		if todo.Item.Status == "archived" {
+			continue
+		}
 		todo.UpdatedBy = session.UID
 		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/todos/%s", url.PathEscape(targetWorkspaceID), url.PathEscape(todo.Item.ID)), todo, nil); err != nil {
 			return result, err
@@ -293,6 +296,9 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 		}
 	}
 	if mutation.Todo != nil {
+		if mutation.Todo.Item.Status == "archived" {
+			return nil
+		}
 		path := fmt.Sprintf("workspaces/%s/todos/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Todo.Item.ID))
 		if err := p.putRTDB(ctx, path, mutation.Todo, nil); err != nil {
 			return err
@@ -310,14 +316,71 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 			return err
 		}
 	}
-	path := fmt.Sprintf("workspaces/%s/events/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.EventID))
-	return p.putRTDB(ctx, path, mutation, nil)
+	return nil
 }
 
 func (p *FirebaseRESTProvider) PullSnapshot(ctx context.Context, workspaceID string) (Snapshot, error) {
 	var snapshot Snapshot
 	err := p.getRTDB(ctx, "workspaces/"+url.PathEscape(workspaceID), &snapshot)
 	return snapshot, err
+}
+
+func (p *FirebaseRESTProvider) PullTodos(ctx context.Context, workspaceID string) (map[string]TodoRecord, error) {
+	var records map[string]TodoRecord
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/todos", url.PathEscape(workspaceID)), &records)
+	if records == nil {
+		records = map[string]TodoRecord{}
+	}
+	return records, err
+}
+
+func (p *FirebaseRESTProvider) PullTodoArchiveMonth(ctx context.Context, workspaceID string, month string) (map[string]TodoRecord, error) {
+	var records map[string]TodoRecord
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archives/%s", url.PathEscape(workspaceID), url.PathEscape(month)), &records)
+	if records == nil {
+		records = map[string]TodoRecord{}
+	}
+	return records, err
+}
+
+func (p *FirebaseRESTProvider) PullTodoArchiveMonths(ctx context.Context, workspaceID string) ([]string, error) {
+	var months []string
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archive_months", url.PathEscape(workspaceID)), &months)
+	if months == nil {
+		months = []string{}
+	}
+	return months, err
+}
+
+func (p *FirebaseRESTProvider) PushTodoArchiveMonths(ctx context.Context, workspaceID string, months []string) error {
+	return p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archive_months", url.PathEscape(workspaceID)), months, nil)
+}
+
+func (p *FirebaseRESTProvider) PullNotes(ctx context.Context, workspaceID string) (map[string]NoteRecord, error) {
+	var records map[string]NoteRecord
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/notes", url.PathEscape(workspaceID)), &records)
+	if records == nil {
+		records = map[string]NoteRecord{}
+	}
+	return records, err
+}
+
+func (p *FirebaseRESTProvider) PullSettings(ctx context.Context, workspaceID string) (map[string]any, error) {
+	var records map[string]any
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/settings", url.PathEscape(workspaceID)), &records)
+	if records == nil {
+		records = map[string]any{}
+	}
+	return records, err
+}
+
+func (p *FirebaseRESTProvider) PullAssets(ctx context.Context, workspaceID string) (map[string]AssetRecord, error) {
+	var records map[string]AssetRecord
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/assets", url.PathEscape(workspaceID)), &records)
+	if records == nil {
+		records = map[string]AssetRecord{}
+	}
+	return records, err
 }
 
 func sharedSettingsFromSnapshot(settings map[string]any) (SharedSettingsRecord, bool) {

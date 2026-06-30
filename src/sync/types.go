@@ -25,6 +25,31 @@ type Provider interface {
 	RevokeMember(ctx context.Context, workspaceID string, email string) error
 }
 
+type TodoPullProvider interface {
+	PullTodos(ctx context.Context, workspaceID string) (map[string]TodoRecord, error)
+}
+
+type TodoArchivePullProvider interface {
+	PullTodoArchiveMonths(ctx context.Context, workspaceID string) ([]string, error)
+	PullTodoArchiveMonth(ctx context.Context, workspaceID string, month string) (map[string]TodoRecord, error)
+}
+
+type TodoArchiveMonthPushProvider interface {
+	PushTodoArchiveMonths(ctx context.Context, workspaceID string, months []string) error
+}
+
+type NotePullProvider interface {
+	PullNotes(ctx context.Context, workspaceID string) (map[string]NoteRecord, error)
+}
+
+type SettingsPullProvider interface {
+	PullSettings(ctx context.Context, workspaceID string) (map[string]any, error)
+}
+
+type AssetPullProvider interface {
+	PullAssets(ctx context.Context, workspaceID string) (map[string]AssetRecord, error)
+}
+
 type Session struct {
 	UID          string    `json:"uid"`
 	Email        string    `json:"email"`

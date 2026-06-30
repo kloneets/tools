@@ -185,19 +185,19 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 	if err != nil {
 		return result, err
 	}
-	snapshot, err := s.Provider.PullSnapshot(ctx, s.WorkspaceID)
+	remoteNotes, err := pullRemoteNotes(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
 		return result, err
 	}
 	deviceID := s.deviceID(state)
 	now := s.now()
-	remoteIDs := make([]string, 0, len(snapshot.Notes))
-	for id := range snapshot.Notes {
+	remoteIDs := make([]string, 0, len(remoteNotes))
+	for id := range remoteNotes {
 		remoteIDs = append(remoteIDs, id)
 	}
 	sort.Strings(remoteIDs)
 	for _, id := range remoteIDs {
-		remote := snapshot.Notes[id]
+		remote := remoteNotes[id]
 		if remote.Rev <= state.Notes[id] {
 			continue
 		}
@@ -240,6 +240,14 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 	state.Provider = ProviderFirebase
 	result.State = state
 	return result, nil
+}
+
+func pullRemoteNotes(ctx context.Context, provider Provider, workspaceID string) (map[string]NoteRecord, error) {
+	if p, ok := provider.(NotePullProvider); ok {
+		return p.PullNotes(ctx, workspaceID)
+	}
+	snapshot, err := provider.PullSnapshot(ctx, workspaceID)
+	return snapshot.Notes, err
 }
 
 func NoteContentHash(text string) string {

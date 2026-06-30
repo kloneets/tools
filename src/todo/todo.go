@@ -23,8 +23,9 @@ const (
 )
 
 type Store struct {
-	Version int    `json:"version"`
-	Items   []Item `json:"items"`
+	Version       int      `json:"version"`
+	Items         []Item   `json:"items"`
+	ArchiveMonths []string `json:"archive_months,omitempty"`
 }
 
 type Item struct {
@@ -222,6 +223,7 @@ func Normalize(store *Store) {
 			store.Items[i].UpdatedAt = store.Items[i].CreatedAt
 		}
 	}
+	store.ArchiveMonths = normalizeArchiveMonths(append(store.ArchiveMonths, archiveMonthsFromItems(store.Items)...))
 }
 
 func Cleanup(store *Store, now time.Time) bool {
@@ -302,11 +304,89 @@ func ArchiveGroups(store Store) map[string][]Item {
 
 func ArchiveMonths(store Store) []string {
 	groups := ArchiveGroups(store)
-	months := make([]string, 0, len(groups))
+	months := make([]string, 0, len(groups)+len(store.ArchiveMonths))
+	months = append(months, store.ArchiveMonths...)
 	for month := range groups {
 		months = append(months, month)
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(months)))
+	return normalizeArchiveMonths(months)
+}
+
+func ArchiveMonthItems(store Store, month string) []Item {
+	return ArchiveGroups(store)[month]
+}
+
+func NonArchivedStore(store Store) Store {
+	items := filterItems(store.Items, func(item Item) bool {
+		return item.Status != StatusArchived
+	})
+	return Store{Version: SchemaVersion, Items: items}
+}
+
+func MergeArchiveMonth(store Store, month string, items []Item) Store {
+	store.ArchiveMonths = normalizeArchiveMonths(append(store.ArchiveMonths, month))
+	monthItems := make([]Item, 0, len(items))
+	for _, item := range items {
+		if item.Status != StatusArchived || item.ArchivedAt == nil || item.ArchivedAt.UTC().Format("2006-01") != month {
+			continue
+		}
+		monthItems = append(monthItems, item)
+	}
+	if len(monthItems) == 0 {
+		return store
+	}
+	out := Store{Version: SchemaVersion, Items: make([]Item, 0, len(store.Items)+len(items))}
+	for _, item := range store.Items {
+		if item.Status == StatusArchived && item.ArchivedAt != nil && item.ArchivedAt.UTC().Format("2006-01") == month {
+			continue
+		}
+		out.Items = append(out.Items, item)
+	}
+	for _, item := range monthItems {
+		out.Items = append(out.Items, item)
+	}
+	Normalize(&out)
+	return out
+}
+
+func PreserveArchived(local Store, synced Store) Store {
+	out := NonArchivedStore(synced)
+	out.ArchiveMonths = append([]string(nil), local.ArchiveMonths...)
+	syncedIDs := make(map[string]bool, len(out.Items))
+	for _, item := range out.Items {
+		syncedIDs[item.ID] = true
+	}
+	for _, item := range local.Items {
+		if item.Status == StatusArchived && !syncedIDs[item.ID] {
+			out.Items = append(out.Items, item)
+		}
+	}
+	Normalize(&out)
+	return out
+}
+
+func normalizeArchiveMonths(months []string) []string {
+	seen := make(map[string]bool, len(months))
+	out := make([]string, 0, len(months))
+	for _, month := range months {
+		month = strings.TrimSpace(month)
+		if len(month) != len("2006-01") || seen[month] {
+			continue
+		}
+		seen[month] = true
+		out = append(out, month)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	return out
+}
+
+func archiveMonthsFromItems(items []Item) []string {
+	months := make([]string, 0)
+	for _, item := range items {
+		if item.Status == StatusArchived && item.ArchivedAt != nil {
+			months = append(months, item.ArchivedAt.UTC().Format("2006-01"))
+		}
+	}
 	return months
 }
 

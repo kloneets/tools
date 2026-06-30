@@ -96,6 +96,109 @@ func TestArchiveGroupsByMonth(t *testing.T) {
 	}
 }
 
+func TestArchiveMonthsIncludesCachedMonthTitlesWithoutItems(t *testing.T) {
+	store := Store{ArchiveMonths: []string{"2026-05"}}
+
+	months := ArchiveMonths(store)
+
+	if len(months) != 1 || months[0] != "2026-05" {
+		t.Fatalf("ArchiveMonths() = %#v, want cached title", months)
+	}
+}
+
+func TestNonArchivedStoreFiltersArchivedItems(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	store := Store{Items: []Item{
+		newItem("active", "active", now),
+		archivedItem("old", "old", now),
+	}}
+
+	got := NonArchivedStore(store)
+
+	if len(got.Items) != 1 || got.Items[0].ID != "active" {
+		t.Fatalf("NonArchivedStore() = %#v, want only active item", got.Items)
+	}
+}
+
+func TestMergeArchiveMonthReplacesOnlyRequestedMonth(t *testing.T) {
+	may := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	april := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	store := Store{Items: []Item{
+		newItem("active", "active", may),
+		archivedItem("old-may", "old may", may),
+		archivedItem("old-april", "old april", april),
+	}}
+
+	got := MergeArchiveMonth(store, "2026-05", []Item{archivedItem("new-may", "new may", may)})
+
+	if len(got.Items) != 3 {
+		t.Fatalf("items = %#v, want 3", got.Items)
+	}
+	if len(ArchiveGroups(got)["2026-05"]) != 1 || ArchiveGroups(got)["2026-05"][0].ID != "new-may" {
+		t.Fatalf("May archive = %#v, want new-may only", ArchiveGroups(got)["2026-05"])
+	}
+	if len(ArchiveGroups(got)["2026-04"]) != 1 || ArchiveGroups(got)["2026-04"][0].ID != "old-april" {
+		t.Fatalf("April archive = %#v, want old-april preserved", ArchiveGroups(got)["2026-04"])
+	}
+}
+
+func TestMergeArchiveMonthKeepsLocalCacheWhenRemoteMonthIsEmpty(t *testing.T) {
+	may := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	store := Store{Items: []Item{
+		newItem("active", "active", may),
+		archivedItem("old-may", "old may", may),
+	}}
+
+	got := MergeArchiveMonth(store, "2026-05", nil)
+
+	if len(ArchiveGroups(got)["2026-05"]) != 1 || ArchiveGroups(got)["2026-05"][0].ID != "old-may" {
+		t.Fatalf("May archive = %#v, want local cache preserved", ArchiveGroups(got)["2026-05"])
+	}
+	if months := ArchiveMonths(got); len(months) != 1 || months[0] != "2026-05" {
+		t.Fatalf("ArchiveMonths() = %#v, want 2026-05 title preserved", months)
+	}
+}
+
+func TestMergeArchiveMonthRemembersTitleWhenRemoteMonthIsEmpty(t *testing.T) {
+	store := Store{}
+
+	got := MergeArchiveMonth(store, "2026-05", nil)
+
+	if months := ArchiveMonths(got); len(months) != 1 || months[0] != "2026-05" {
+		t.Fatalf("ArchiveMonths() = %#v, want 2026-05 title", months)
+	}
+}
+
+func TestPreserveArchivedKeepsLocalArchiveCacheAfterSync(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	local := Store{Items: []Item{
+		newItem("local-active", "local active", now),
+		archivedItem("old", "old", now),
+	}}
+	synced := Store{Items: []Item{newItem("remote-active", "remote active", now)}}
+
+	got := PreserveArchived(local, synced)
+
+	if len(got.Items) != 2 {
+		t.Fatalf("items = %#v, want synced active plus local archive", got.Items)
+	}
+	if len(ArchiveGroups(got)["2026-05"]) != 1 {
+		t.Fatalf("archive cache missing: %#v", got.Items)
+	}
+}
+
+func TestPreserveArchivedDropsArchiveCacheWhenSyncedItemHasSameID(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	local := Store{Items: []Item{archivedItem("same", "old", now)}}
+	synced := Store{Items: []Item{newItem("same", "active", now)}}
+
+	got := PreserveArchived(local, synced)
+
+	if len(got.Items) != 1 || got.Items[0].Status == StatusArchived {
+		t.Fatalf("items = %#v, want synced non-archived item only", got.Items)
+	}
+}
+
 func TestMoveActiveOnlyAffectsUncheckedActiveTodos(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	checked := newItem("2", "checked", now)

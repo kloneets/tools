@@ -124,17 +124,17 @@ func (s *AssetSyncer) PullAssets(ctx context.Context) (AssetPullResult, error) {
 	if err != nil {
 		return result, err
 	}
-	snapshot, err := s.Provider.PullSnapshot(ctx, s.WorkspaceID)
+	remoteAssets, err := pullRemoteAssets(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
 		return result, err
 	}
-	ids := make([]string, 0, len(snapshot.Assets))
-	for id := range snapshot.Assets {
+	ids := make([]string, 0, len(remoteAssets))
+	for id := range remoteAssets {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		remote := snapshot.Assets[id]
+		remote := remoteAssets[id]
 		if remote.Rev <= state.Assets[id] {
 			continue
 		}
@@ -163,6 +163,14 @@ func (s *AssetSyncer) PullAssets(ctx context.Context) (AssetPullResult, error) {
 	state.Provider = ProviderFirebase
 	result.State = state
 	return result, nil
+}
+
+func pullRemoteAssets(ctx context.Context, provider Provider, workspaceID string) (map[string]AssetRecord, error) {
+	if p, ok := provider.(AssetPullProvider); ok {
+		return p.PullAssets(ctx, workspaceID)
+	}
+	snapshot, err := provider.PullSnapshot(ctx, workspaceID)
+	return snapshot.Assets, err
 }
 
 func (s *AssetSyncer) SaveState(state State) error {

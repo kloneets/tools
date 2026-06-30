@@ -85,11 +85,11 @@ func (s *SettingsSyncer) PullSettings(ctx context.Context) (SettingsPullResult, 
 	if err != nil {
 		return SettingsPullResult{}, err
 	}
-	snapshot, err := s.Provider.PullSnapshot(ctx, s.WorkspaceID)
+	settings, err := pullRemoteSettings(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
 		return SettingsPullResult{}, err
 	}
-	record, ok := sharedSettingsFromSnapshot(snapshot.Settings)
+	record, ok := sharedSettingsFromSnapshot(settings)
 	if !ok || (state.WorkspaceID == s.WorkspaceID && record.Rev <= state.SettingsRev) {
 		return SettingsPullResult{}, nil
 	}
@@ -101,6 +101,14 @@ func (s *SettingsSyncer) PullSettings(ctx context.Context) (SettingsPullResult, 
 		return SettingsPullResult{}, err
 	}
 	return SettingsPullResult{Values: normalizeJSONMap(record.Values), Changed: true}, nil
+}
+
+func pullRemoteSettings(ctx context.Context, provider Provider, workspaceID string) (map[string]any, error) {
+	if p, ok := provider.(SettingsPullProvider); ok {
+		return p.PullSettings(ctx, workspaceID)
+	}
+	snapshot, err := provider.PullSnapshot(ctx, workspaceID)
+	return snapshot.Settings, err
 }
 
 func sharedSettingsHash(values map[string]any) string {

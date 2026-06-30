@@ -1,128 +1,120 @@
 package com.kloneets.kokotools
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 class TodoRepositoryTest {
-    private val now: OffsetDateTime = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
-
     @Test
-    fun checkedTodoStaysActiveBeforeDelay() {
-        val store = TodoStore(items = listOf(item("1", checkedAt = now)))
-
-        val cleaned = TodoRepository.cleanup(store, now.plusSeconds(9))
-
-        assertEquals(TodoRepository.STATUS_TODO, cleaned.items.single().status)
-        assertEquals("1", TodoRepository.activeItems(cleaned).single().id)
-    }
-
-    @Test
-    fun checkedTodoPromotesToDoneAfterDelay() {
-        val store = TodoStore(items = listOf(item("1", checkedAt = now)))
-
-        val cleaned = TodoRepository.cleanup(store, now.plusSeconds(10))
-
-        assertEquals(TodoRepository.STATUS_DONE, cleaned.items.single().status)
-        assertNotNull(cleaned.items.single().doneAt)
-    }
-
-    @Test
-    fun doneTodoArchivesAfterSevenDays() {
-        val doneAt = now.minusDays(7)
-        val store = TodoStore(items = listOf(item("1", status = TodoRepository.STATUS_DONE, doneAt = doneAt)))
-
-        val cleaned = TodoRepository.cleanup(store, now)
-
-        assertEquals(TodoRepository.STATUS_ARCHIVED, cleaned.items.single().status)
-        assertNotNull(cleaned.items.single().archivedAt)
-    }
-
-    @Test
-    fun archiveGroupsByMonth() {
+    fun nonArchivedStoreFiltersArchivedItems() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
         val store = TodoStore(
             items = listOf(
-                item("1", status = TodoRepository.STATUS_ARCHIVED, archivedAt = now),
-                item("2", status = TodoRepository.STATUS_ARCHIVED, archivedAt = now.minusMonths(1)),
+                todoItem("active", TodoRepository.STATUS_TODO, now),
+                todoItem("old", TodoRepository.STATUS_ARCHIVED, now, archivedAt = now),
             ),
         )
 
-        val groups = TodoRepository.archiveGroups(store)
+        val got = TodoRepository.nonArchivedStore(store)
 
-        assertEquals(listOf("2026-05", "2026-04"), groups.keys.toList())
-        assertEquals("1", groups.getValue("2026-05").single().id)
+        assertEquals(listOf("active"), got.items.map { it.id })
     }
 
     @Test
-    fun activeItemsSortUncheckedBeforePendingChecked() {
-        val store = TodoStore(
-            items = listOf(
-                item("checked", order = 0, checkedAt = now),
-                item("active", order = 1),
-            ),
-        )
+    fun archiveMonthsIncludesCachedMonthTitlesWithoutItems() {
+        val store = TodoStore(archiveMonths = listOf("2026-05"))
 
-        val active = TodoRepository.activeItems(store)
-
-        assertEquals(listOf("active", "checked"), active.map { it.id })
-        assertNull(active.first().checkedAt)
+        assertEquals(listOf("2026-05"), TodoRepository.archiveMonths(store))
     }
 
     @Test
-    fun reorderActiveUncheckedMovesDraggedItemToTargetPosition() {
+    fun mergeArchiveMonthReplacesOnlyRequestedMonth() {
+        val may = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val april = OffsetDateTime.of(2026, 4, 20, 10, 0, 0, 0, ZoneOffset.UTC)
         val store = TodoStore(
             items = listOf(
-                item("a", order = 0),
-                item("b", order = 1),
-                item("c", order = 2),
+                todoItem("active", TodoRepository.STATUS_TODO, may),
+                todoItem("old-may", TodoRepository.STATUS_ARCHIVED, may, archivedAt = may),
+                todoItem("old-april", TodoRepository.STATUS_ARCHIVED, april, archivedAt = april),
             ),
         )
 
-        val reordered = TodoRepository.reorderActiveUnchecked(store, "c", "a", now.plusMinutes(1))
+        val got = TodoRepository.mergeArchiveMonth(
+            store,
+            "2026-05",
+            listOf(todoItem("new-may", TodoRepository.STATUS_ARCHIVED, may, archivedAt = may)),
+        )
 
-        assertEquals(listOf("c", "a", "b"), TodoRepository.activeItems(reordered).map { it.id })
+        assertEquals(listOf("new-may"), TodoRepository.archiveMonthItems(got, "2026-05").map { it.id })
+        assertEquals(listOf("old-april"), TodoRepository.archiveMonthItems(got, "2026-04").map { it.id })
+        assertFalse(got.items.any { it.id == "old-may" })
     }
 
     @Test
-    fun reorderActiveUncheckedIgnoresCheckedDoneAndArchivedItems() {
+    fun mergeArchiveMonthKeepsLocalCacheWhenRemoteMonthIsEmpty() {
+        val may = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
         val store = TodoStore(
             items = listOf(
-                item("a", order = 0),
-                item("checked", order = 1, checkedAt = now),
-                item("done", status = TodoRepository.STATUS_DONE, order = 2, doneAt = now),
-                item("archived", status = TodoRepository.STATUS_ARCHIVED, order = 3, archivedAt = now),
+                todoItem("active", TodoRepository.STATUS_TODO, may),
+                todoItem("old-may", TodoRepository.STATUS_ARCHIVED, may, archivedAt = may),
             ),
         )
 
-        val checkedResult = TodoRepository.reorderActiveUnchecked(store, "checked", "a", now.plusMinutes(1))
-        val doneResult = TodoRepository.reorderActiveUnchecked(store, "done", "a", now.plusMinutes(1))
-        val archivedResult = TodoRepository.reorderActiveUnchecked(store, "archived", "a", now.plusMinutes(1))
+        val got = TodoRepository.mergeArchiveMonth(store, "2026-05", emptyList())
 
-        assertEquals(store, checkedResult)
-        assertEquals(store, doneResult)
-        assertEquals(store, archivedResult)
+        assertEquals(listOf("old-may"), TodoRepository.archiveMonthItems(got, "2026-05").map { it.id })
+        assertEquals(listOf("2026-05"), TodoRepository.archiveMonths(got))
     }
 
-    private fun item(
+    @Test
+    fun mergeArchiveMonthRemembersTitleWhenRemoteMonthIsEmpty() {
+        val got = TodoRepository.mergeArchiveMonth(TodoStore(), "2026-05", emptyList())
+
+        assertEquals(listOf("2026-05"), TodoRepository.archiveMonths(got))
+    }
+
+    @Test
+    fun preserveArchivedKeepsLocalArchiveCacheAfterSync() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoStore(
+            items = listOf(
+                todoItem("local-active", TodoRepository.STATUS_TODO, now),
+                todoItem("old", TodoRepository.STATUS_ARCHIVED, now, archivedAt = now),
+            ),
+        )
+        val synced = TodoStore(items = listOf(todoItem("remote-active", TodoRepository.STATUS_TODO, now)))
+
+        val got = TodoRepository.preserveArchived(local, synced)
+
+        assertEquals(setOf("remote-active", "old"), got.items.map { it.id }.toSet())
+    }
+
+    @Test
+    fun preserveArchivedDropsArchiveCacheWhenSyncedItemHasSameId() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoStore(items = listOf(todoItem("same", TodoRepository.STATUS_ARCHIVED, now, archivedAt = now)))
+        val synced = TodoStore(items = listOf(todoItem("same", TodoRepository.STATUS_TODO, now)))
+
+        val got = TodoRepository.preserveArchived(local, synced)
+
+        assertEquals(listOf(TodoRepository.STATUS_TODO), got.items.map { it.status })
+    }
+
+    private fun todoItem(
         id: String,
-        status: String = TodoRepository.STATUS_TODO,
-        order: Int = 0,
-        checkedAt: OffsetDateTime? = null,
-        doneAt: OffsetDateTime? = null,
+        status: String,
+        now: OffsetDateTime,
         archivedAt: OffsetDateTime? = null,
     ): TodoItem {
         return TodoItem(
             id = id,
             text = id,
             status = status,
-            order = order,
+            order = 0,
             createdAt = now,
             updatedAt = now,
-            checkedAt = checkedAt,
-            doneAt = doneAt,
             archivedAt = archivedAt,
         )
     }
