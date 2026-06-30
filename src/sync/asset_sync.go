@@ -110,6 +110,21 @@ func (s *AssetSyncer) PushAssets(ctx context.Context, assets []LocalAsset) (Asse
 		state.Assets[id] = rev
 		result.Pushed++
 	}
+	records := make(map[string]AssetRecord, len(assets))
+	for _, asset := range assets {
+		path := NormalizeAssetPath(asset.Path)
+		if path == "" || len(asset.Bytes) > MaxAssetBytes {
+			continue
+		}
+		id := asset.ID
+		if id == "" {
+			id = AssetID(path)
+		}
+		records[id] = AssetRecord{ID: id, Path: path, Rev: state.Assets[id], SHA256: assetSHA256(asset.Bytes)}
+	}
+	featureHash := AssetMetadataHash(records)
+	markFeaturePulled(&state, SyncFeatureAssets, featureHash, now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureAssets, featureHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	return result, SaveState(s.StatePath, state)
@@ -123,6 +138,11 @@ func (s *AssetSyncer) PullAssets(ctx context.Context) (AssetPullResult, error) {
 	state, err := LoadState(s.StatePath)
 	if err != nil {
 		return result, err
+	}
+	now := s.now()
+	if hashes, ok := pullSyncHashes(ctx, s.Provider, s.WorkspaceID); ok && shouldSkipFeaturePull(state, s.WorkspaceID, SyncFeatureAssets, hashes[SyncFeatureAssets], now) {
+		result.State = state
+		return result, nil
 	}
 	remoteAssets, err := pullRemoteAssets(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
@@ -159,6 +179,9 @@ func (s *AssetSyncer) PullAssets(ctx context.Context) (AssetPullResult, error) {
 		state.Assets[id] = remote.Rev
 		result.Changed = true
 	}
+	featureHash := AssetMetadataHash(remoteAssets)
+	markFeaturePulled(&state, SyncFeatureAssets, featureHash, now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureAssets, featureHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	result.State = state

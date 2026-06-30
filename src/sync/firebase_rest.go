@@ -353,7 +353,11 @@ func (p *FirebaseRESTProvider) PullTodoArchiveMonths(ctx context.Context, worksp
 }
 
 func (p *FirebaseRESTProvider) PushTodoArchiveMonths(ctx context.Context, workspaceID string, months []string) error {
-	return p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archive_months", url.PathEscape(workspaceID)), months, nil)
+	if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archive_months", url.PathEscape(workspaceID)), months, nil); err != nil {
+		return err
+	}
+	pushSyncHashBestEffort(ctx, p, workspaceID, SyncFeatureTodoArchiveMonths, TodoArchiveMonthsHash(months), time.Now().UTC(), p.session.UID)
+	return nil
 }
 
 func (p *FirebaseRESTProvider) PullNotes(ctx context.Context, workspaceID string) (map[string]NoteRecord, error) {
@@ -381,6 +385,22 @@ func (p *FirebaseRESTProvider) PullAssets(ctx context.Context, workspaceID strin
 		records = map[string]AssetRecord{}
 	}
 	return records, err
+}
+
+func (p *FirebaseRESTProvider) PullSyncHashes(ctx context.Context, workspaceID string) (map[string]SyncHashRecord, error) {
+	var records map[string]SyncHashRecord
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/sync_hashes", url.PathEscape(workspaceID)), &records)
+	if records == nil {
+		records = map[string]SyncHashRecord{}
+	}
+	return records, err
+}
+
+func (p *FirebaseRESTProvider) PushSyncHash(ctx context.Context, workspaceID string, feature string, record SyncHashRecord) error {
+	if strings.TrimSpace(feature) == "" {
+		return nil
+	}
+	return p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/sync_hashes/%s", url.PathEscape(workspaceID), url.PathEscape(feature)), record, nil)
 }
 
 func sharedSettingsFromSnapshot(settings map[string]any) (SharedSettingsRecord, bool) {

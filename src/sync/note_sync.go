@@ -123,6 +123,21 @@ func (s *NoteSyncer) PushNotes(ctx context.Context, notes []NoteFile) (NotePushR
 		state.NoteHashes[id] = hash
 		result.Pushed++
 	}
+	records := make(map[string]NoteRecord, len(notes))
+	for _, note := range notes {
+		path := NormalizeNotePath(note.Path)
+		if path == "" || strings.ToLower(filepath.Ext(path)) != ".md" {
+			continue
+		}
+		id := note.ID
+		if id == "" {
+			id = NoteID(path)
+		}
+		records[id] = NoteRecord{ID: id, Path: path, Rev: state.Notes[id]}
+	}
+	featureHash := NoteMetadataHash(records)
+	markFeaturePulled(&state, SyncFeatureNotes, featureHash, now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureNotes, featureHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	if err := SaveState(s.StatePath, state); err != nil {
@@ -168,6 +183,7 @@ func (s *NoteSyncer) PushDelete(ctx context.Context, path string) error {
 	}
 	state.Notes[id] = rev
 	delete(state.NoteHashes, id)
+	delete(state.SyncHashes, SyncFeatureNotes)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	return SaveState(s.StatePath, state)
@@ -185,12 +201,16 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 	if err != nil {
 		return result, err
 	}
+	now := s.now()
+	if hashes, ok := pullSyncHashes(ctx, s.Provider, s.WorkspaceID); ok && shouldSkipFeaturePull(state, s.WorkspaceID, SyncFeatureNotes, hashes[SyncFeatureNotes], now) {
+		result.State = state
+		return result, nil
+	}
 	remoteNotes, err := pullRemoteNotes(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
 		return result, err
 	}
 	deviceID := s.deviceID(state)
-	now := s.now()
 	remoteIDs := make([]string, 0, len(remoteNotes))
 	for id := range remoteNotes {
 		remoteIDs = append(remoteIDs, id)
@@ -236,6 +256,9 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 			result.Changed = true
 		}
 	}
+	featureHash := NoteMetadataHash(remoteNotes)
+	markFeaturePulled(&state, SyncFeatureNotes, featureHash, now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureNotes, featureHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	result.State = state

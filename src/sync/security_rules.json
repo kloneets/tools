@@ -46,6 +46,12 @@
             ".validate": "newData.hasChildren(['id', 'path', 'rev', 'updated_at', 'updated_by', 'deleted']) && newData.child('id').isString() && newData.child('path').isString() && newData.child('rev').isNumber() && newData.child('updated_at').isString() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean() && (newData.child('deleted').val() == true || (newData.hasChildren(['bytes_base64', 'sha256', 'mime']) && newData.child('bytes_base64').isString() && newData.child('sha256').isString() && newData.child('mime').isString()))"
           }
         },
+        "sync_hashes": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          "$feature": {
+            ".validate": "newData.hasChildren(['hash', 'updated_at', 'updated_by']) && newData.child('hash').isString() && newData.child('updated_at').isString() && newData.child('updated_by').val() == auth.uid"
+          }
+        },
         "events": {
           ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
           "$event": {

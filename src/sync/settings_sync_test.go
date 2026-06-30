@@ -96,3 +96,38 @@ func TestSettingsSyncerPushSkipsUnchangedSharedSettings(t *testing.T) {
 		t.Fatalf("mutations len = %d, want unchanged local-only settings push skipped", len(provider.mutations))
 	}
 }
+
+func TestSettingsSyncerPullSkipsFreshMatchingHash(t *testing.T) {
+	values := map[string]any{"pages_app": map[string]any{"first_book": 10}}
+	hash := sharedSettingsHash(values)
+	provider := &fakeAssetProvider{
+		hashes: map[string]SyncHashRecord{SyncFeatureSettings: {Hash: hash}},
+		snapshot: Snapshot{Settings: map[string]any{
+			"shared": map[string]any{"values": values, "rev": float64(5)},
+		}},
+	}
+	statePath := t.TempDir() + "/state.json"
+	state := defaultState()
+	state.WorkspaceID = "workspace"
+	markFeaturePulled(&state, SyncFeatureSettings, hash, time.Now().UTC())
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	syncer := SettingsSyncer{
+		Provider:    provider,
+		WorkspaceID: "workspace",
+		StatePath:   statePath,
+		Session:     Session{UID: "uid", IDToken: "token"},
+	}
+
+	result, err := syncer.PullSettings(context.Background())
+	if err != nil {
+		t.Fatalf("PullSettings() error = %v", err)
+	}
+	if result.Changed {
+		t.Fatal("Changed = true, want skipped settings pull")
+	}
+	if provider.snapshotPulls != 0 {
+		t.Fatalf("snapshotPulls = %d, want no settings pull", provider.snapshotPulls)
+	}
+}

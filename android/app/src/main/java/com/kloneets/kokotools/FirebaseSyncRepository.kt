@@ -62,6 +62,12 @@ data class FirebaseSharedSettings(
     val rev: Long,
 )
 
+data class FirebaseSyncHash(
+    val hash: String,
+    val updatedAt: String,
+    val updatedBy: String,
+)
+
 class FirebaseSyncRepository(private val context: Context) {
     private val tokenFile: File
         get() = File(context.filesDir, TOKEN_FILE)
@@ -196,6 +202,9 @@ class FirebaseSyncRepository(private val context: Context) {
             org.json.JSONArray().apply { TodoRepository.archiveMonths(store).forEach { put(it) } }.toString(),
             session.idToken,
         )
+        val now = TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC))
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_TODOS, todoStoreHash(store), now, session)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, todoArchiveMonthsHash(TodoRepository.archiveMonths(store)), now, session)
     }
 
     fun pushNote(settings: FirebaseSettings, path: String, text: String, session: FirebaseSession) {
@@ -211,6 +220,7 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
             .put("deleted", false)
         putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
+        clearLocalSyncHash(settings, SYNC_FEATURE_NOTES)
     }
 
     fun pushNoteDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
@@ -226,9 +236,13 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
             .put("deleted", true)
         putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
+        clearLocalSyncHash(settings, SYNC_FEATURE_NOTES)
     }
 
     fun pullNotes(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteNote> {
+        syncHashes(settings, session)[SYNC_FEATURE_NOTES]?.let { remote ->
+            if (shouldSkipFeature(settings, SYNC_FEATURE_NOTES, remote)) return emptyList()
+        }
         val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/notes", session.idToken) ?: return emptyList()
         val notes = mutableListOf<FirebaseRemoteNote>()
         remote.keys().forEach { id ->
@@ -243,13 +257,22 @@ class FirebaseSyncRepository(private val context: Context) {
                 deleted = record.optBoolean("deleted", false),
             )
         }
-        return notes.sortedBy { it.path.lowercase() }
+        val sorted = notes.sortedBy { it.path.lowercase() }
+        val hash = noteMetadataHash(sorted)
+        markFeaturePulled(settings, SYNC_FEATURE_NOTES, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_NOTES, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+        return sorted
     }
 
     fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession): TodoStore {
-        val remoteItems = pullRemoteTodos(settings, session)
-            .filter { it.item.status != TodoRepository.STATUS_ARCHIVED }
-        val remoteArchiveMonths = pullTodoArchiveMonths(settings, session)
+        val hashes = syncHashes(settings, session)
+        val skipTodos = hashes[SYNC_FEATURE_TODOS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODOS, it) } == true
+        val skipMonths = hashes[SYNC_FEATURE_TODO_ARCHIVE_MONTHS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, it) } == true
+        val remoteItems = if (skipTodos) emptyList() else {
+            pullRemoteTodos(settings, session)
+                .filter { it.item.status != TodoRepository.STATUS_ARCHIVED }
+        }
+        val remoteArchiveMonths = if (skipMonths) emptyList() else pullTodoArchiveMonths(settings, session)
         val byId = TodoRepository.nonArchivedStore(local).items.associateBy { it.id }.toMutableMap()
         remoteItems.forEach { record ->
             val item = record.item
@@ -263,7 +286,18 @@ class FirebaseSyncRepository(private val context: Context) {
             }
         }
         val merged = TodoRepository.preserveArchived(local, local.copy(items = sortedTodos(byId.values)))
-        return TodoRepository.normalize(merged.copy(archiveMonths = merged.archiveMonths + remoteArchiveMonths))
+        val normalized = TodoRepository.normalize(merged.copy(archiveMonths = merged.archiveMonths + remoteArchiveMonths))
+        if (!skipTodos) {
+            val hash = remoteTodoHash(remoteItems)
+            markFeaturePulled(settings, SYNC_FEATURE_TODOS, hash)
+            writeSyncHashBestEffort(settings, SYNC_FEATURE_TODOS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+        }
+        if (!skipMonths) {
+            val hash = todoArchiveMonthsHash(remoteArchiveMonths)
+            markFeaturePulled(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, hash)
+            writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+        }
+        return normalized
     }
 
     fun pullRemoteTodoStore(settings: FirebaseSettings, session: FirebaseSession): TodoStore {
@@ -278,6 +312,10 @@ class FirebaseSyncRepository(private val context: Context) {
     }
 
     fun pullTodoArchiveMonth(settings: FirebaseSettings, month: String, session: FirebaseSession): List<TodoItem> {
+        val feature = "$SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX$month"
+        syncHashes(settings, session)[feature]?.let { remote ->
+            if (shouldSkipFeature(settings, feature, remote)) return emptyList()
+        }
         val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todo_archives/$month", session.idToken)
         val records = mutableListOf<TodoItem>()
         if (remote != null) {
@@ -294,7 +332,11 @@ class FirebaseSyncRepository(private val context: Context) {
                 }
             }
         }
-        return records.sortedByDescending { it.archivedAt }
+        val sorted = records.sortedByDescending { it.archivedAt }
+        val hash = todoArchiveMonthHash(sorted)
+        markFeaturePulled(settings, feature, hash)
+        writeSyncHashBestEffort(settings, feature, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+        return sorted
     }
 
     fun pullTodoArchiveMonths(settings: FirebaseSettings, session: FirebaseSession): List<String> {
@@ -319,12 +361,20 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
         putDatabase(settings, "workspaces/${settings.workspaceId}/settings/shared", record, session.idToken)
         markSharedSettingsSynced(settings, values)
+        markFeaturePulled(settings, SYNC_FEATURE_SETTINGS, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_SETTINGS, hash, TodoRepository.formatTime(now), session)
         return true
     }
 
     fun pullSharedSettings(settings: FirebaseSettings, session: FirebaseSession): FirebaseSharedSettings? {
+        syncHashes(settings, session)[SYNC_FEATURE_SETTINGS]?.let { remote ->
+            if (shouldSkipFeature(settings, SYNC_FEATURE_SETTINGS, remote)) return null
+        }
         val record = getDatabase(settings, "workspaces/${settings.workspaceId}/settings/shared", session.idToken) ?: return null
         val values = record.optJSONObject("values") ?: return null
+        val hash = sharedSettingsHash(values)
+        markFeaturePulled(settings, SYNC_FEATURE_SETTINGS, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_SETTINGS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
         return FirebaseSharedSettings(values = values, rev = record.optLong("rev", 0L))
     }
 
@@ -363,6 +413,9 @@ class FirebaseSyncRepository(private val context: Context) {
             putDatabase(settings, "workspaces/${settings.workspaceId}/assets/$id", record, session.idToken)
             pushed++
         }
+        val hash = localAssetMetadataHash(assets)
+        markFeaturePulled(settings, SYNC_FEATURE_ASSETS, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_ASSETS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
         return pushed
     }
 
@@ -379,10 +432,14 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
             .put("deleted", true)
         putDatabase(settings, "workspaces/${settings.workspaceId}/assets/$id", record, session.idToken)
+        clearLocalSyncHash(settings, SYNC_FEATURE_ASSETS)
     }
 
 
     fun pullAssets(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteAsset> {
+        syncHashes(settings, session)[SYNC_FEATURE_ASSETS]?.let { remote ->
+            if (shouldSkipFeature(settings, SYNC_FEATURE_ASSETS, remote)) return emptyList()
+        }
         val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/assets", session.idToken) ?: return emptyList()
         val assets = mutableListOf<FirebaseRemoteAsset>()
         remote.keys().forEach { id ->
@@ -403,7 +460,11 @@ class FirebaseSyncRepository(private val context: Context) {
                 deleted = deleted,
             )
         }
-        return assets.sortedBy { it.path.lowercase() }
+        val sorted = assets.sortedBy { it.path.lowercase() }
+        val hash = assetMetadataHash(sorted)
+        markFeaturePulled(settings, SYNC_FEATURE_ASSETS, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_ASSETS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+        return sorted
     }
 
     private fun pullRemoteTodos(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteTodo> {
@@ -454,6 +515,58 @@ class FirebaseSyncRepository(private val context: Context) {
         return JSONObject(response)
     }
 
+    private fun syncHashes(settings: FirebaseSettings, session: FirebaseSession): Map<String, FirebaseSyncHash> {
+        return runCatching {
+            val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/sync_hashes", session.idToken) ?: return emptyMap()
+            val hashes = mutableMapOf<String, FirebaseSyncHash>()
+            remote.keys().forEach { feature ->
+                val record = remote.optJSONObject(feature) ?: return@forEach
+                val hash = record.optString("hash", "")
+                if (hash.isBlank()) return@forEach
+                hashes[feature] = FirebaseSyncHash(
+                    hash = hash,
+                    updatedAt = record.optString("updated_at", ""),
+                    updatedBy = record.optString("updated_by", ""),
+                )
+            }
+            hashes
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun writeSyncHashBestEffort(settings: FirebaseSettings, feature: String, hash: String, updatedAt: String, session: FirebaseSession) {
+        if (hash.isBlank()) return
+        runCatching {
+            val record = JSONObject()
+                .put("hash", hash)
+                .put("updated_at", updatedAt)
+                .put("updated_by", session.uid)
+            putDatabase(settings, "workspaces/${settings.workspaceId}/sync_hashes/${encodePath(feature)}", record, session.idToken)
+        }
+    }
+
+    private fun shouldSkipFeature(settings: FirebaseSettings, feature: String, remote: FirebaseSyncHash): Boolean {
+        val hashKey = syncHashKey(settings, feature)
+        if (syncState.getString(hashKey, null) != remote.hash) return false
+        val lastFullPull = syncState.getLong(syncHashPulledAtKey(settings, feature), 0L)
+        if (lastFullPull <= 0L) return false
+        return System.currentTimeMillis() - lastFullPull < SYNC_HASH_FULL_VALIDATION_MS
+    }
+
+    private fun markFeaturePulled(settings: FirebaseSettings, feature: String, hash: String) {
+        if (hash.isBlank()) return
+        syncState.edit()
+            .putString(syncHashKey(settings, feature), hash)
+            .putLong(syncHashPulledAtKey(settings, feature), System.currentTimeMillis())
+            .apply()
+    }
+
+    private fun clearLocalSyncHash(settings: FirebaseSettings, feature: String) {
+        syncState.edit()
+            .remove(syncHashKey(settings, feature))
+            .remove(syncHashPulledAtKey(settings, feature))
+            .apply()
+    }
+
     private fun requestJson(method: String, url: String, body: String?, contentType: String): JSONObject {
         val response = request(method, url, body, contentType)
         return JSONObject(response)
@@ -485,6 +598,10 @@ class FirebaseSyncRepository(private val context: Context) {
         return URLEncoder.encode(value, Charsets.UTF_8.name())
     }
 
+    private fun encodePath(value: String): String {
+        return value.split("/").joinToString("/") { encode(it) }
+    }
+
     private fun noteId(path: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(path.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
@@ -514,6 +631,13 @@ class FirebaseSyncRepository(private val context: Context) {
         const val TOKEN_FILE = "firebase_token.json"
         const val MAX_ASSET_BYTES = 1 * 1024 * 1024
         private const val SYNC_STATE_PREFERENCES = "firebase_sync_state"
+        private const val SYNC_FEATURE_TODOS = "todos"
+        private const val SYNC_FEATURE_TODO_ARCHIVE_MONTHS = "todo_archive_months"
+        private const val SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX = "todo_archive_month:"
+        private const val SYNC_FEATURE_NOTES = "notes"
+        private const val SYNC_FEATURE_SETTINGS = "settings"
+        private const val SYNC_FEATURE_ASSETS = "assets"
+        private const val SYNC_HASH_FULL_VALIDATION_MS = 24L * 60L * 60L * 1000L
 
         fun personalWorkspaceId(uid: String): String = "user_$uid"
 
@@ -524,6 +648,81 @@ class FirebaseSyncRepository(private val context: Context) {
         fun sharedSettingsHash(values: JSONObject): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(canonicalJson(values).toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }
+        }
+
+        fun todoArchiveMonthsHash(months: List<String>): String {
+            return sha256String(org.json.JSONArray().apply { months.sorted().forEach { put(it) } }.toString())
+        }
+
+        fun todoStoreHash(store: TodoStore): String {
+            return remoteTodoHash(store.items
+                .filter { it.status != TodoRepository.STATUS_ARCHIVED }
+                .map { FirebaseRemoteTodo(item = it, rev = it.updatedAt.toInstant().toEpochMilli(), deleted = false) })
+        }
+
+        fun remoteTodoHash(records: List<FirebaseRemoteTodo>): String {
+            val values = org.json.JSONArray()
+            records.sortedBy { it.item.id }.forEach { record ->
+                values.put(JSONObject()
+                    .put("id", record.item.id)
+                    .put("rev", record.rev)
+                    .put("deleted", record.deleted))
+            }
+            return sha256String(values.toString())
+        }
+
+        fun todoArchiveMonthHash(items: List<TodoItem>): String {
+            val values = org.json.JSONArray()
+            items.sortedBy { it.id }.forEach { item ->
+                values.put(JSONObject()
+                    .put("id", item.id)
+                    .put("rev", item.updatedAt.toInstant().toEpochMilli())
+                    .put("deleted", false))
+            }
+            return sha256String(values.toString())
+        }
+
+        fun noteMetadataHash(notes: List<FirebaseRemoteNote>): String {
+            val values = org.json.JSONArray()
+            notes.sortedBy { it.id }.forEach { note ->
+                values.put(JSONObject()
+                    .put("id", note.id)
+                    .put("path", NotesRepository.normalizePath(note.path).replace('\\', '/'))
+                    .put("rev", note.rev)
+                    .put("deleted", note.deleted))
+            }
+            return sha256String(values.toString())
+        }
+
+        fun assetMetadataHash(assets: List<FirebaseRemoteAsset>): String {
+            val values = org.json.JSONArray()
+            assets.sortedBy { it.id }.forEach { asset ->
+                values.put(JSONObject()
+                    .put("id", asset.id)
+                    .put("path", NotesRepository.normalizeAssetPath(asset.path))
+                    .put("rev", asset.rev)
+                    .put("deleted", asset.deleted)
+                    .put("sha256", if (asset.deleted) "" else sha256Bytes(asset.bytes)))
+            }
+            return sha256String(values.toString())
+        }
+
+        fun localAssetMetadataHash(assets: List<LocalAssetFile>): String {
+            val values = org.json.JSONArray()
+            assets
+                .filter { it.bytes.size <= MAX_ASSET_BYTES }
+                .mapNotNull { asset ->
+                    val path = NotesRepository.normalizeAssetPath(asset.relativePath)
+                    if (path.isBlank()) null else JSONObject()
+                        .put("id", sha256String(path))
+                        .put("path", path)
+                        .put("rev", asset.lastModified)
+                        .put("deleted", false)
+                        .put("sha256", sha256Bytes(asset.bytes))
+                }
+                .sortedBy { it.optString("id") }
+                .forEach { values.put(it) }
+            return sha256String(values.toString())
         }
 
         private fun canonicalJson(value: Any?): String {
@@ -549,10 +748,28 @@ class FirebaseSyncRepository(private val context: Context) {
         private fun encodeQueryComponent(value: String): String {
             return URLEncoder.encode(value, Charsets.UTF_8.name())
         }
+
+        private fun sha256String(value: String): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
+
+        private fun sha256Bytes(value: ByteArray): String {
+            val digest = MessageDigest.getInstance("SHA-256").digest(value)
+            return digest.joinToString("") { "%02x".format(it) }
+        }
     }
 
     private fun sharedSettingsHashKey(settings: FirebaseSettings): String {
         return "shared_settings_hash:${settings.workspaceId.ifBlank { "default" }}"
+    }
+
+    private fun syncHashKey(settings: FirebaseSettings, feature: String): String {
+        return "sync_hash:${settings.workspaceId.ifBlank { "default" }}:$feature"
+    }
+
+    private fun syncHashPulledAtKey(settings: FirebaseSettings, feature: String): String {
+        return "sync_hash_pulled_at:${settings.workspaceId.ifBlank { "default" }}:$feature"
     }
 }
 

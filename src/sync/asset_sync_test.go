@@ -66,8 +66,10 @@ func TestAssetSyncerPullAppliesNewerRemoteAssets(t *testing.T) {
 }
 
 type fakeAssetProvider struct {
-	snapshot  Snapshot
-	mutations []Mutation
+	snapshot      Snapshot
+	mutations     []Mutation
+	hashes        map[string]SyncHashRecord
+	snapshotPulls int
 }
 
 func (p *fakeAssetProvider) Login(context.Context, string, string) (Session, error) {
@@ -81,7 +83,18 @@ func (p *fakeAssetProvider) PushMutation(_ context.Context, _ string, mutation M
 	return nil
 }
 func (p *fakeAssetProvider) PullSnapshot(context.Context, string) (Snapshot, error) {
+	p.snapshotPulls++
 	return p.snapshot, nil
+}
+func (p *fakeAssetProvider) PullSyncHashes(context.Context, string) (map[string]SyncHashRecord, error) {
+	return p.hashes, nil
+}
+func (p *fakeAssetProvider) PushSyncHash(_ context.Context, _ string, feature string, record SyncHashRecord) error {
+	if p.hashes == nil {
+		p.hashes = map[string]SyncHashRecord{}
+	}
+	p.hashes[feature] = record
+	return nil
 }
 func (p *fakeAssetProvider) CreateWorkspace(context.Context, string) (WorkspaceMeta, error) {
 	return WorkspaceMeta{}, nil

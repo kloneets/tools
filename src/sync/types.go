@@ -50,6 +50,20 @@ type AssetPullProvider interface {
 	PullAssets(ctx context.Context, workspaceID string) (map[string]AssetRecord, error)
 }
 
+type SyncHashPullProvider interface {
+	PullSyncHashes(ctx context.Context, workspaceID string) (map[string]SyncHashRecord, error)
+}
+
+type SyncHashPushProvider interface {
+	PushSyncHash(ctx context.Context, workspaceID string, feature string, record SyncHashRecord) error
+}
+
+type SyncHashRecord struct {
+	Hash      string    `json:"hash"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedBy string    `json:"updated_by"`
+}
+
 type Session struct {
 	UID          string    `json:"uid"`
 	Email        string    `json:"email"`

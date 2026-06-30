@@ -8,21 +8,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kloneets/tools/src/helpers"
 )
 
 type State struct {
-	Provider       string            `json:"provider"`
-	WorkspaceID    string            `json:"workspace_id"`
-	LastEventToken string            `json:"last_event_token"`
-	DeviceID       string            `json:"device_id"`
-	Notes          map[string]int64  `json:"notes"`
-	NoteHashes     map[string]string `json:"note_hashes,omitempty"`
-	Todos          map[string]int64  `json:"todos"`
-	Assets         map[string]int64  `json:"assets,omitempty"`
-	SettingsRev    int64             `json:"settings_rev,omitempty"`
-	SettingsHash   string            `json:"settings_hash,omitempty"`
+	Provider       string               `json:"provider"`
+	WorkspaceID    string               `json:"workspace_id"`
+	LastEventToken string               `json:"last_event_token"`
+	DeviceID       string               `json:"device_id"`
+	Notes          map[string]int64     `json:"notes"`
+	NoteHashes     map[string]string    `json:"note_hashes,omitempty"`
+	Todos          map[string]int64     `json:"todos"`
+	Assets         map[string]int64     `json:"assets,omitempty"`
+	SettingsRev    int64                `json:"settings_rev,omitempty"`
+	SettingsHash   string               `json:"settings_hash,omitempty"`
+	SyncHashes     map[string]HashState `json:"sync_hashes,omitempty"`
+}
+
+type HashState struct {
+	Hash           string    `json:"hash"`
+	LastFullPullAt time.Time `json:"last_full_pull_at,omitempty"`
 }
 
 type TokenFile struct {
@@ -116,6 +123,7 @@ func defaultState() State {
 		NoteHashes: map[string]string{},
 		Todos:      map[string]int64{},
 		Assets:     map[string]int64{},
+		SyncHashes: map[string]HashState{},
 	}
 }
 
@@ -137,6 +145,9 @@ func normalizeState(state *State) {
 	}
 	if state.Assets == nil {
 		state.Assets = map[string]int64{}
+	}
+	if state.SyncHashes == nil {
+		state.SyncHashes = map[string]HashState{}
 	}
 }
 

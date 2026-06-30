@@ -60,6 +60,11 @@ func (s *TodoSyncer) PushStore(ctx context.Context, store todo.Store) error {
 			return err
 		}
 	}
+	now := time.Now().UTC()
+	markFeaturePulled(&state, SyncFeatureTodos, TodoStoreHash(store), now)
+	markFeaturePulled(&state, SyncFeatureTodoArchiveMonths, TodoArchiveMonthsHash(todo.ArchiveMonths(store)), now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureTodos, TodoStoreHash(store), now, s.Session.UID)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureTodoArchiveMonths, TodoArchiveMonthsHash(todo.ArchiveMonths(store)), now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	return SaveState(s.StatePath, state)
@@ -69,17 +74,47 @@ func (s *TodoSyncer) PullStore(ctx context.Context, local todo.Store) (todo.Stor
 	if !s.Ready() {
 		return local, false, nil
 	}
-	remote, err := pullRemoteTodos(ctx, s.Provider, s.WorkspaceID)
+	state, err := LoadState(s.StatePath)
 	if err != nil {
 		return local, false, err
 	}
-	merged := todo.PreserveArchived(local, MergeTodos(todo.NonArchivedStore(local), nonArchivedTodoRecords(remote)))
-	months, err := pullRemoteTodoArchiveMonths(ctx, s.Provider, s.WorkspaceID)
-	if err != nil {
-		return local, false, err
+	now := time.Now().UTC()
+	hashes, hasHashes := pullSyncHashes(ctx, s.Provider, s.WorkspaceID)
+	skipTodos := hasHashes && shouldSkipFeaturePull(state, s.WorkspaceID, SyncFeatureTodos, hashes[SyncFeatureTodos], now)
+	skipMonths := hasHashes && shouldSkipFeaturePull(state, s.WorkspaceID, SyncFeatureTodoArchiveMonths, hashes[SyncFeatureTodoArchiveMonths], now)
+	merged := local
+	if !skipTodos {
+		remote, err := pullRemoteTodos(ctx, s.Provider, s.WorkspaceID)
+		if err != nil {
+			return local, false, err
+		}
+		merged = todo.PreserveArchived(local, MergeTodos(todo.NonArchivedStore(local), nonArchivedTodoRecords(remote)))
+		hash := TodoRecordsHash(remote)
+		markFeaturePulled(&state, SyncFeatureTodos, hash, now)
+		if !hasHashes || hashes[SyncFeatureTodos].Hash == "" {
+			pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureTodos, hash, now, s.Session.UID)
+		}
 	}
-	merged.ArchiveMonths = append(merged.ArchiveMonths, months...)
+	if !skipMonths {
+		months, err := pullRemoteTodoArchiveMonths(ctx, s.Provider, s.WorkspaceID)
+		if err != nil {
+			return local, false, err
+		}
+		merged.ArchiveMonths = append(merged.ArchiveMonths, months...)
+		hash := TodoArchiveMonthsHash(months)
+		markFeaturePulled(&state, SyncFeatureTodoArchiveMonths, hash, now)
+		if !hasHashes || hashes[SyncFeatureTodoArchiveMonths].Hash == "" {
+			pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureTodoArchiveMonths, hash, now, s.Session.UID)
+		}
+	}
 	todo.Normalize(&merged)
+	state.WorkspaceID = s.WorkspaceID
+	state.Provider = ProviderFirebase
+	if s.StatePath != "" {
+		if err := SaveState(s.StatePath, state); err != nil {
+			return local, false, err
+		}
+	}
 	if sameTodoStore(local, merged) {
 		return local, false, nil
 	}
@@ -90,10 +125,29 @@ func (s *TodoSyncer) PullArchiveMonth(ctx context.Context, local todo.Store, mon
 	if !s.Ready() {
 		return local, false, nil
 	}
+	state, err := LoadState(s.StatePath)
+	if err != nil {
+		return local, false, err
+	}
+	now := time.Now().UTC()
+	feature := archiveMonthFeature(month)
+	if hashes, ok := pullSyncHashes(ctx, s.Provider, s.WorkspaceID); ok && shouldSkipFeaturePull(state, s.WorkspaceID, feature, hashes[feature], now) {
+		return local, false, nil
+	}
 	remote, err := pullRemoteTodoArchiveMonth(ctx, s.Provider, s.WorkspaceID, month)
 	if err != nil {
 		return local, false, err
 	}
+	hash := TodoArchiveMonthHash(remote)
+	markFeaturePulled(&state, feature, hash, now)
+	state.WorkspaceID = s.WorkspaceID
+	state.Provider = ProviderFirebase
+	if s.StatePath != "" {
+		if err := SaveState(s.StatePath, state); err != nil {
+			return local, false, err
+		}
+	}
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, feature, hash, now, s.Session.UID)
 	items := make([]todo.Item, 0, len(remote))
 	for id, record := range remote {
 		if record.Deleted {
@@ -154,6 +208,14 @@ func sameTodoStore(left todo.Store, right todo.Store) bool {
 	}
 	for i := range left.Items {
 		if left.Items[i] != right.Items[i] {
+			return false
+		}
+	}
+	if len(left.ArchiveMonths) != len(right.ArchiveMonths) {
+		return false
+	}
+	for i := range left.ArchiveMonths {
+		if left.ArchiveMonths[i] != right.ArchiveMonths[i] {
 			return false
 		}
 	}

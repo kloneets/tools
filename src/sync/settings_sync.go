@@ -69,6 +69,8 @@ func (s *SettingsSyncer) PushSettings(ctx context.Context, fullSettings map[stri
 	}
 	state.SettingsRev = rev
 	state.SettingsHash = hash
+	markFeaturePulled(&state, SyncFeatureSettings, hash, now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureSettings, hash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	if err := SaveState(s.StatePath, state); err != nil {
@@ -85,6 +87,10 @@ func (s *SettingsSyncer) PullSettings(ctx context.Context) (SettingsPullResult, 
 	if err != nil {
 		return SettingsPullResult{}, err
 	}
+	now := s.now()
+	if hashes, ok := pullSyncHashes(ctx, s.Provider, s.WorkspaceID); ok && shouldSkipFeaturePull(state, s.WorkspaceID, SyncFeatureSettings, hashes[SyncFeatureSettings], now) {
+		return SettingsPullResult{}, nil
+	}
 	settings, err := pullRemoteSettings(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
 		return SettingsPullResult{}, err
@@ -95,6 +101,8 @@ func (s *SettingsSyncer) PullSettings(ctx context.Context) (SettingsPullResult, 
 	}
 	state.SettingsRev = record.Rev
 	state.SettingsHash = sharedSettingsHash(record.Values)
+	markFeaturePulled(&state, SyncFeatureSettings, state.SettingsHash, now)
+	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureSettings, state.SettingsHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	if err := SaveState(s.StatePath, state); err != nil {

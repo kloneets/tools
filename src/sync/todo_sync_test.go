@@ -109,11 +109,77 @@ func TestTodoSyncerPullArchiveMonthMergesRequestedMonth(t *testing.T) {
 	}
 }
 
+func TestTodoSyncerPullStoreSkipsFreshMatchingHashes(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	local := todo.Store{Items: []todo.Item{{ID: "local", Text: "local", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now}}, ArchiveMonths: []string{"2026-05"}}
+	hashes := map[string]SyncHashRecord{
+		SyncFeatureTodos:             {Hash: TodoStoreHash(local)},
+		SyncFeatureTodoArchiveMonths: {Hash: TodoArchiveMonthsHash(local.ArchiveMonths)},
+	}
+	provider := &fakeTodoProvider{hashes: hashes}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := defaultState()
+	state.WorkspaceID = "ws"
+	markFeaturePulled(&state, SyncFeatureTodos, hashes[SyncFeatureTodos].Hash, time.Now().UTC())
+	markFeaturePulled(&state, SyncFeatureTodoArchiveMonths, hashes[SyncFeatureTodoArchiveMonths].Hash, time.Now().UTC())
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	syncer := &TodoSyncer{Provider: provider, WorkspaceID: "ws", StatePath: statePath, Session: Session{IDToken: "token", UID: "uid"}}
+
+	got, changed, err := syncer.PullStore(context.Background(), local)
+
+	if err != nil {
+		t.Fatalf("PullStore() error = %v", err)
+	}
+	if changed || !sameTodoStore(got, local) {
+		t.Fatalf("PullStore() = %#v, %v; want unchanged local", got, changed)
+	}
+	if provider.todoPulls != 0 || provider.archiveMonthListPulls != 0 {
+		t.Fatalf("pull counts = todos %d months %d, want skipped", provider.todoPulls, provider.archiveMonthListPulls)
+	}
+}
+
+func TestTodoSyncerPullStoreMissingHashFallsBackAndRecordsHash(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	provider := &fakeTodoProvider{
+		hashes: map[string]SyncHashRecord{},
+		todos: map[string]TodoRecord{
+			"remote": {Item: todo.Item{ID: "remote", Text: "remote", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now}},
+		},
+		archiveMonthList: []string{"2026-05"},
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	syncer := &TodoSyncer{Provider: provider, WorkspaceID: "ws", StatePath: statePath, Session: Session{IDToken: "token", UID: "uid"}}
+
+	_, changed, err := syncer.PullStore(context.Background(), todo.Store{})
+
+	if err != nil {
+		t.Fatalf("PullStore() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want fallback pull to apply remote")
+	}
+	state, err := LoadState(statePath)
+	if err != nil {
+		t.Fatalf("LoadState() error = %v", err)
+	}
+	if state.SyncHashes[SyncFeatureTodos].Hash == "" || state.SyncHashes[SyncFeatureTodoArchiveMonths].Hash == "" {
+		t.Fatalf("sync hashes not recorded: %#v", state.SyncHashes)
+	}
+	if provider.hashes[SyncFeatureTodos].Hash == "" || provider.hashes[SyncFeatureTodoArchiveMonths].Hash == "" {
+		t.Fatalf("remote hashes not populated: %#v", provider.hashes)
+	}
+}
+
 type fakeTodoProvider struct {
-	todos            map[string]TodoRecord
-	archiveMonths    map[string]map[string]TodoRecord
-	archiveMonthList []string
-	pushed           []Mutation
+	todos                 map[string]TodoRecord
+	archiveMonths         map[string]map[string]TodoRecord
+	archiveMonthList      []string
+	pushed                []Mutation
+	hashes                map[string]SyncHashRecord
+	todoPulls             int
+	archiveMonthListPulls int
 }
 
 func (p *fakeTodoProvider) Login(context.Context, string, string) (Session, error) {
@@ -134,6 +200,7 @@ func (p *fakeTodoProvider) PullSnapshot(context.Context, string) (Snapshot, erro
 }
 
 func (p *fakeTodoProvider) PullTodos(context.Context, string) (map[string]TodoRecord, error) {
+	p.todoPulls++
 	return p.todos, nil
 }
 
@@ -142,11 +209,24 @@ func (p *fakeTodoProvider) PullTodoArchiveMonth(_ context.Context, _ string, mon
 }
 
 func (p *fakeTodoProvider) PullTodoArchiveMonths(context.Context, string) ([]string, error) {
+	p.archiveMonthListPulls++
 	return p.archiveMonthList, nil
 }
 
 func (p *fakeTodoProvider) PushTodoArchiveMonths(_ context.Context, _ string, months []string) error {
 	p.archiveMonthList = months
+	return nil
+}
+
+func (p *fakeTodoProvider) PullSyncHashes(context.Context, string) (map[string]SyncHashRecord, error) {
+	return p.hashes, nil
+}
+
+func (p *fakeTodoProvider) PushSyncHash(_ context.Context, _ string, feature string, record SyncHashRecord) error {
+	if p.hashes == nil {
+		p.hashes = map[string]SyncHashRecord{}
+	}
+	p.hashes[feature] = record
 	return nil
 }
 
