@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 	"github.com/kloneets/tools/src/todo"
 )
 
-func TestTodoSyncerPushStoreSkipsArchivedItems(t *testing.T) {
+func TestTodoSyncerPushStoreWritesArchivedTombstoneWithoutBody(t *testing.T) {
 	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
 	archivedAt := now
 	provider := &fakeTodoProvider{}
@@ -28,8 +29,37 @@ func TestTodoSyncerPushStoreSkipsArchivedItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PushStore() error = %v", err)
 	}
+	if len(provider.pushed) != 2 {
+		t.Fatalf("pushed mutations = %#v, want active todo plus archived tombstone", provider.pushed)
+	}
+	if provider.pushed[0].Todo.Item.ID != "active" || provider.pushed[0].Todo.Deleted {
+		t.Fatalf("first mutation = %#v, want active upsert", provider.pushed[0])
+	}
+	tombstone := provider.pushed[1].Todo
+	if tombstone.Item.ID != "old" || !tombstone.Deleted || tombstone.Item.Text != "" {
+		t.Fatalf("archived mutation = %#v, want bodyless delete tombstone", tombstone)
+	}
+}
+
+func TestTodoSyncerPushStoreIgnoresArchiveMonthWriteFailure(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	provider := &fakeTodoProvider{archiveMonthPushErr: errors.New("permission denied")}
+	syncer := &TodoSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		StatePath:   filepath.Join(t.TempDir(), "state.json"),
+		Session:     Session{IDToken: "token", UID: "uid"},
+	}
+
+	err := syncer.PushStore(context.Background(), todo.Store{Items: []todo.Item{
+		{ID: "active", Text: "active", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now},
+	}})
+
+	if err != nil {
+		t.Fatalf("PushStore() error = %v, want nil", err)
+	}
 	if len(provider.pushed) != 1 || provider.pushed[0].Todo.Item.ID != "active" {
-		t.Fatalf("pushed mutations = %#v, want active todo only", provider.pushed)
+		t.Fatalf("pushed mutations = %#v, want active todo", provider.pushed)
 	}
 }
 
@@ -180,6 +210,7 @@ type fakeTodoProvider struct {
 	hashes                map[string]SyncHashRecord
 	todoPulls             int
 	archiveMonthListPulls int
+	archiveMonthPushErr   error
 }
 
 func (p *fakeTodoProvider) Login(context.Context, string, string) (Session, error) {
@@ -214,6 +245,9 @@ func (p *fakeTodoProvider) PullTodoArchiveMonths(context.Context, string) ([]str
 }
 
 func (p *fakeTodoProvider) PushTodoArchiveMonths(_ context.Context, _ string, months []string) error {
+	if p.archiveMonthPushErr != nil {
+		return p.archiveMonthPushErr
+	}
 	p.archiveMonthList = months
 	return nil
 }

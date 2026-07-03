@@ -90,6 +90,10 @@ class FirebaseSyncRepository(private val context: Context) {
         return tokenStore.load() != null
     }
 
+    fun clearSavedSession() {
+        tokenStore.clear()
+    }
+
     fun currentSession(settings: FirebaseSettings): FirebaseSession? {
         val saved = loadToken() ?: return null
         return refresh(settings, saved.refreshToken).getOrNull()
@@ -125,10 +129,10 @@ class FirebaseSyncRepository(private val context: Context) {
 
     fun ensurePersonalWorkspace(settings: FirebaseSettings, session: FirebaseSession): FirebaseSettings {
         val personalWorkspaceId = personalWorkspaceId(session.uid)
-        if (settings.workspaceId.isNotBlank() && settings.workspaceId != personalWorkspaceId) {
+        if (settings.workspaceId.isNotBlank() && settings.workspaceId != personalWorkspaceId && !settings.workspaceId.startsWith("user_")) {
             return settings
         }
-        val workspaceId = settings.workspaceId.ifBlank { personalWorkspaceId }
+        val workspaceId = personalWorkspaceId
         val workspaceName = settings.workspaceName.ifBlank { "Personal workspace" }
         val workspaceSettings = settings.copy(workspaceId = workspaceId, workspaceName = workspaceName)
         val member = JSONObject()
@@ -187,8 +191,16 @@ class FirebaseSyncRepository(private val context: Context) {
 
     fun pushTodos(settings: FirebaseSettings, store: TodoStore, session: FirebaseSession) {
         store.items.forEach { item ->
-            if (item.status == TodoRepository.STATUS_ARCHIVED) return@forEach
             val rev = item.updatedAt.toInstant().toEpochMilli()
+            if (item.status == TodoRepository.STATUS_ARCHIVED) {
+                val record = JSONObject()
+                    .put("item", TodoRepository.itemJson(item.copy(text = "")))
+                    .put("rev", rev)
+                    .put("updated_by", session.uid)
+                    .put("deleted", true)
+                putDatabase(settings, "workspaces/${settings.workspaceId}/todos/${item.id}", record, session.idToken)
+                return@forEach
+            }
             val record = JSONObject()
                 .put("item", TodoRepository.itemJson(item))
                 .put("rev", rev)
@@ -196,12 +208,14 @@ class FirebaseSyncRepository(private val context: Context) {
                 .put("deleted", false)
             putDatabase(settings, "workspaces/${settings.workspaceId}/todos/${item.id}", record, session.idToken)
         }
-        putDatabase(
-            settings,
-            "workspaces/${settings.workspaceId}/todo_archive_months",
-            org.json.JSONArray().apply { TodoRepository.archiveMonths(store).forEach { put(it) } }.toString(),
-            session.idToken,
-        )
+        runCatching {
+            putDatabaseBestEffort(
+                settings,
+                "workspaces/${settings.workspaceId}/todo_archive_months",
+                org.json.JSONArray().apply { TodoRepository.archiveMonths(store).forEach { put(it) } }.toString(),
+                session.idToken,
+            )
+        }
         val now = TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC))
         writeSyncHashBestEffort(settings, SYNC_FEATURE_TODOS, todoStoreHash(store), now, session)
         writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, todoArchiveMonthsHash(TodoRepository.archiveMonths(store)), now, session)
@@ -264,20 +278,31 @@ class FirebaseSyncRepository(private val context: Context) {
         return sorted
     }
 
-    fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession): TodoStore {
+    fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession, forceFull: Boolean = false): TodoStore {
         val hashes = syncHashes(settings, session)
-        val skipTodos = hashes[SYNC_FEATURE_TODOS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODOS, it) } == true
-        val skipMonths = hashes[SYNC_FEATURE_TODO_ARCHIVE_MONTHS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, it) } == true
+        val skipTodos = !forceFull && hashes[SYNC_FEATURE_TODOS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODOS, it) } == true
+        val skipMonths = !forceFull && hashes[SYNC_FEATURE_TODO_ARCHIVE_MONTHS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, it) } == true
         val remoteItems = if (skipTodos) emptyList() else {
             pullRemoteTodos(settings, session)
-                .filter { it.item.status != TodoRepository.STATUS_ARCHIVED }
+                .filter { it.deleted || it.item.status != TodoRepository.STATUS_ARCHIVED }
         }
         val remoteArchiveMonths = if (skipMonths) emptyList() else pullTodoArchiveMonths(settings, session)
-        val byId = TodoRepository.nonArchivedStore(local).items.associateBy { it.id }.toMutableMap()
+        val byId = if (forceFull && !skipTodos) {
+            mutableMapOf()
+        } else {
+            TodoRepository.nonArchivedStore(local).items.associateBy { it.id }.toMutableMap()
+        }
+        val localArchivedById = local.items
+            .filter { it.status == TodoRepository.STATUS_ARCHIVED }
+            .associateBy { it.id }
         remoteItems.forEach { record ->
             val item = record.item
             if (record.deleted) {
                 byId.remove(item.id)
+                return@forEach
+            }
+            val archivedLocal = localArchivedById[item.id]
+            if (archivedLocal != null && !archivedLocal.updatedAt.isBefore(item.updatedAt)) {
                 return@forEach
             }
             val localItem = byId[item.id]
@@ -502,15 +527,31 @@ class FirebaseSyncRepository(private val context: Context) {
     }
 
     private fun putDatabase(settings: FirebaseSettings, path: String, body: JSONObject, idToken: String) {
-        requestJson("PUT", databaseUrl(settings, path, idToken), body.toString(), "application/json")
+        runCatching {
+            requestJson("PUT", databaseUrl(settings, path, idToken), body.toString(), "application/json")
+        }.getOrElse { error ->
+            throw IllegalStateException("Firebase PUT $path failed: ${error.message}", error)
+        }
     }
 
     private fun putDatabase(settings: FirebaseSettings, path: String, body: String, idToken: String) {
+        runCatching {
+            requestJson("PUT", databaseUrl(settings, path, idToken), body, "application/json")
+        }.getOrElse { error ->
+            throw IllegalStateException("Firebase PUT $path failed: ${error.message}", error)
+        }
+    }
+
+    private fun putDatabaseBestEffort(settings: FirebaseSettings, path: String, body: String, idToken: String) {
         requestJson("PUT", databaseUrl(settings, path, idToken), body, "application/json")
     }
 
     private fun getDatabase(settings: FirebaseSettings, path: String, idToken: String): JSONObject? {
-        val response = request("GET", databaseUrl(settings, path, idToken), null, null)
+        val response = runCatching {
+            request("GET", databaseUrl(settings, path, idToken), null, null)
+        }.getOrElse { error ->
+            throw IllegalStateException("Firebase GET $path failed: ${error.message}", error)
+        }
         if (response.isBlank() || response == "null") return null
         return JSONObject(response)
     }
@@ -656,8 +697,13 @@ class FirebaseSyncRepository(private val context: Context) {
 
         fun todoStoreHash(store: TodoStore): String {
             return remoteTodoHash(store.items
-                .filter { it.status != TodoRepository.STATUS_ARCHIVED }
-                .map { FirebaseRemoteTodo(item = it, rev = it.updatedAt.toInstant().toEpochMilli(), deleted = false) })
+                .map {
+                    FirebaseRemoteTodo(
+                        item = it,
+                        rev = it.updatedAt.toInstant().toEpochMilli(),
+                        deleted = it.status == TodoRepository.STATUS_ARCHIVED,
+                    )
+                })
         }
 
         fun remoteTodoHash(records: List<FirebaseRemoteTodo>): String {
@@ -802,6 +848,11 @@ private class EncryptedFirebaseTokenStore(
         preferences.edit()
             .putString(KEY_PAYLOAD, encrypt(json.toString()))
             .apply()
+    }
+
+    fun clear() {
+        preferences.edit().clear().apply()
+        runCatching { legacyTokenFile().delete() }
     }
 
     private fun migrateLegacyToken() {

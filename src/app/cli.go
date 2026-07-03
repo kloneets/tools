@@ -86,8 +86,14 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		return 1
 	}
 	workspaceID := strings.TrimSpace(cfg.WorkspaceID)
-	if workspaceID == "" {
-		workspaceID = kokosync.PersonalWorkspaceID(session.UID)
+	personalWorkspaceID := kokosync.PersonalWorkspaceID(session.UID)
+	if workspaceID == "" || workspaceID == personalWorkspaceID {
+		meta, err := provider.EnsurePersonalWorkspace(context.Background(), session, "Personal workspace")
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		workspaceID = meta.ID
 	}
 	todoRepo := todo.NewRepository()
 	store, err := todoRepo.Load()

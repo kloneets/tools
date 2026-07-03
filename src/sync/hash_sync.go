@@ -94,10 +94,7 @@ func TodoStoreHash(store todo.Store) string {
 	}
 	records := make([]metadata, 0, len(store.Items))
 	for _, item := range store.Items {
-		if item.Status == todo.StatusArchived {
-			continue
-		}
-		records = append(records, metadata{ID: item.ID, Rev: item.UpdatedAt.UnixMilli()})
+		records = append(records, metadata{ID: item.ID, Rev: item.UpdatedAt.UnixMilli(), Deleted: item.Status == todo.StatusArchived})
 	}
 	sort.SliceStable(records, func(i, j int) bool { return records[i].ID < records[j].ID })
 	return hashCanonical(records)
@@ -111,7 +108,7 @@ func TodoRecordsHash(records map[string]TodoRecord) string {
 	}
 	items := make([]metadata, 0, len(records))
 	for id, record := range records {
-		if record.Item.Status == todo.StatusArchived {
+		if record.Item.Status == todo.StatusArchived && !record.Deleted {
 			continue
 		}
 		if record.Item.ID == "" {

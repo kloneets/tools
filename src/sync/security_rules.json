@@ -31,6 +31,18 @@
             ".validate": "newData.hasChildren(['item', 'rev', 'updated_by', 'deleted']) && newData.child('item').hasChildren(['id', 'text', 'status']) && newData.child('item').child('id').isString() && newData.child('item').child('text').isString() && newData.child('item').child('status').isString() && newData.child('rev').isNumber() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
           }
         },
+        "todo_archive_months": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          ".validate": true
+        },
+        "todo_archives": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+          "$month": {
+            "$todo": {
+              ".validate": "newData.hasChildren(['item', 'rev', 'updated_by', 'deleted']) && newData.child('item').hasChildren(['id', 'text', 'status']) && newData.child('item').child('id').isString() && newData.child('item').child('text').isString() && newData.child('item').child('status').isString() && newData.child('rev').isNumber() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
+            }
+          }
+        },
         "settings": {
           "shared": {
             ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",

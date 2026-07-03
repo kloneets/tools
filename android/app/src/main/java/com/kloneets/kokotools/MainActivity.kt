@@ -91,7 +91,8 @@ class MainActivity : Activity() {
     private var firebaseSettingsPushRunnable: Runnable? = null
     private var pagesLocalEditUntilMs = 0L
     private var pagesLocalEditAtMs = 0L
-    private var todoDraftText = ""
+	private var todoDraftText = ""
+	private var lastSyncStatus = ""
     private val pendingRemoteNotes = mutableMapOf<String, FirebaseRemoteNote>()
     private var todoMoveMode = false
     private val todoMoveRows = mutableMapOf<String, View>()
@@ -881,8 +882,7 @@ class MainActivity : Activity() {
     private fun pushAssetDeleteToFirebase(path: String) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase) ?: return@Thread
-            firebaseSession = session
+            val session = freshFirebaseSession() ?: return@Thread
             runCatching {
                 firebaseSyncRepository.pushAssetDelete(settings.firebase, path, session)
             }.onFailure { error ->
@@ -1079,7 +1079,6 @@ class MainActivity : Activity() {
         content.addView(scroll)
 
         addTodoSection(list, "Todo", TodoRepository.activeItems(todoStore), archived = false)
-        addTodoSection(list, "Done", TodoRepository.doneItems(todoStore), archived = false)
         list.addView(sectionTitle("Archive"))
         val groups = TodoRepository.archiveGroups(todoStore)
         val archiveMonths = TodoRepository.archiveMonths(todoStore)
@@ -1134,7 +1133,7 @@ class MainActivity : Activity() {
         if (!loadingTodoArchiveMonths.add(month)) return
         showTodoPreservingScroll()
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread {
                     loadingTodoArchiveMonths.remove(month)
@@ -1143,7 +1142,6 @@ class MainActivity : Activity() {
                 }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 val remoteItems = firebaseSyncRepository.pullTodoArchiveMonth(settings.firebase, month, session)
                 val local = todoRepository.load()
@@ -1664,6 +1662,19 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun freshFirebaseSession(): FirebaseSession? {
+        val session = firebaseSyncRepository.currentSession(settings.firebase)
+        if (session != null) {
+            firebaseSession = session
+            val workspaceSettings = firebaseSyncRepository.ensurePersonalWorkspace(settings.firebase, session)
+            if (workspaceSettings != settings.firebase) {
+                settings = settings.copy(firebase = workspaceSettings)
+                settingsRepository.save(settings)
+            }
+        }
+        return session
+    }
+
     private fun scheduleFirebasePull() {
         firebasePullRunnable?.let { noteAutosaveHandler.removeCallbacks(it) }
         if (!firebaseSyncRepository.configured(settings.firebase)) return
@@ -1779,7 +1790,11 @@ class MainActivity : Activity() {
             .build()
         val client = GoogleSignIn.getClient(this, options)
         setSyncStatus("Opening Google sign-in")
-        startActivityForResult(client.signInIntent, FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE)
+        firebaseSyncRepository.clearSavedSession()
+        firebaseSession = null
+        client.signOut().addOnCompleteListener {
+            startActivityForResult(client.signInIntent, FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE)
+        }
     }
 
     private fun handleFirebaseGoogleSignInResult(resultCode: Int, data: Intent?) {
@@ -1843,12 +1858,11 @@ class MainActivity : Activity() {
     private fun pushTodosToFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
             }.onSuccess {
@@ -1862,12 +1876,11 @@ class MainActivity : Activity() {
     private fun pushNoteToFirebase(path: String, text: String) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 firebaseSyncRepository.pushNote(settings.firebase, path, text, session)
             }.onSuccess {
@@ -1881,8 +1894,7 @@ class MainActivity : Activity() {
     private fun pushNoteDeleteToFirebase(path: String) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase) ?: return@Thread
-            firebaseSession = session
+            val session = freshFirebaseSession() ?: return@Thread
             runCatching {
                 firebaseSyncRepository.pushNoteDelete(settings.firebase, path, session)
             }.onFailure { error ->
@@ -1905,12 +1917,11 @@ class MainActivity : Activity() {
     private fun pushSharedFirebaseData(pushSettings: Boolean = true, pushAssets: Boolean = true) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 val settingsPushed = if (pushSettings) firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session) else false
                 val assetCount = if (pushAssets) firebaseSyncRepository.pushAssets(settings.firebase, notesRepository.listAssets(), session) else 0
@@ -1930,12 +1941,11 @@ class MainActivity : Activity() {
     private fun pullSharedFirebaseData() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
                 val assets = firebaseSyncRepository.pullAssets(settings.firebase, session)
@@ -1986,12 +1996,11 @@ class MainActivity : Activity() {
     private fun pullTodosFromFirebase(includeAssets: Boolean = false) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 val local = todoRepository.load()
                 val merged = firebaseSyncRepository.pullTodos(settings.firebase, local, session)
@@ -2052,19 +2061,19 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun syncToFirebase() {
-        if (!firebaseSyncRepository.configured(settings.firebase)) return
+	private fun syncToFirebase() {
+		if (!firebaseSyncRepository.configured(settings.firebase)) return
+		setSyncStatus("Firebase sync started", transient = true)
         saveCurrentNoteSilently()
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 val localTodos = todoRepository.load()
-                val mergedTodos = firebaseSyncRepository.pullTodos(settings.firebase, localTodos, session)
+                val mergedTodos = firebaseSyncRepository.pullTodos(settings.firebase, localTodos, session, forceFull = true)
                 val todoChanged = mergedTodos != localTodos
                 if (todoChanged) {
                     todoRepository.save(mergedTodos)
@@ -2114,11 +2123,11 @@ class MainActivity : Activity() {
                     if (currentScreen == Screen.Assets && !localEditActive) refreshAssets()
                     pushLocalStateAfterManualFirebasePull(pullResult, shared, remoteAssets)
                 }
-            }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}") }
-            }
-        }.start()
-    }
+			}.onFailure { error ->
+				runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}", transient = true) }
+			}
+		}.start()
+	}
 
     private fun pushLocalStateAfterManualFirebasePull(
         pullResult: FirebasePullResult,
@@ -2126,12 +2135,11 @@ class MainActivity : Activity() {
         remoteAssets: List<FirebaseRemoteAsset>,
     ) {
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
                 notesRepository.listNotes().forEach { note ->
@@ -2145,15 +2153,16 @@ class MainActivity : Activity() {
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null || settingsPushed) ", shared settings synced" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
-                    setSyncStatus(
-                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s), $pushedAssets asset(s) pushed$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
-                    )
-                }
-            }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}") }
-            }
-        }.start()
-    }
+					setSyncStatus(
+						"Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s), $pushedAssets asset(s) pushed$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
+						transient = true,
+					)
+				}
+			}.onFailure { error ->
+				runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}", transient = true) }
+			}
+		}.start()
+	}
 
     private fun replaceLocalFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
@@ -2162,12 +2171,11 @@ class MainActivity : Activity() {
             return
         }
         Thread {
-            val session = firebaseSession ?: firebaseSyncRepository.currentSession(settings.firebase)
+            val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread { setSyncStatus("Firebase login required") }
                 return@Thread
             }
-            firebaseSession = session
             runCatching {
                 val remoteTodos = firebaseSyncRepository.pullRemoteTodoStore(settings.firebase, session)
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
@@ -2306,12 +2314,17 @@ class MainActivity : Activity() {
         return todoDraftText.isBlank()
     }
 
-    private fun setSyncStatus(status: String) {
-        syncStatusText?.text = status
-    }
+	private fun setSyncStatus(status: String, transient: Boolean = false) {
+		lastSyncStatus = status
+		syncStatusText?.text = status
+		if (transient && currentScreen != Screen.Sync) {
+			Toast.makeText(this, status, Toast.LENGTH_SHORT).show()
+		}
+	}
 
-    private fun currentSyncStatus(): String {
-        if (settings.firebase.enabled) {
+	private fun currentSyncStatus(): String {
+		if (lastSyncStatus.isNotBlank()) return lastSyncStatus
+		if (settings.firebase.enabled) {
             val workspace = settings.firebase.workspaceName.ifBlank { settings.firebase.workspaceId }
             return if (firebaseSyncRepository.configured(settings.firebase)) {
                 "Firebase realtime: ${workspace.ifBlank { "configured" }} (${settings.firebase.workspaceId})"
@@ -2512,7 +2525,7 @@ class MainActivity : Activity() {
         private const val FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE = 4203
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
-        private const val FIREBASE_PULL_INTERVAL_MS = 5 * 60 * 1_000L
+        private const val FIREBASE_PULL_INTERVAL_MS = 30 * 1_000L
         private const val PRIVACY_POLICY_URL = "https://koko.lv/privacy-policy.html"
         private const val ACCOUNT_DELETION_URL = "https://koko.lv/account-deletion.html"
     }

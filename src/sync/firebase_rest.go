@@ -296,7 +296,7 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 		}
 	}
 	if mutation.Todo != nil {
-		if mutation.Todo.Item.Status == "archived" {
+		if mutation.Todo.Item.Status == "archived" && !mutation.Todo.Deleted {
 			return nil
 		}
 		path := fmt.Sprintf("workspaces/%s/todos/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Todo.Item.ID))
@@ -453,11 +453,17 @@ func (p *FirebaseRESTProvider) RevokeMember(ctx context.Context, workspaceID str
 }
 
 func (p *FirebaseRESTProvider) getRTDB(ctx context.Context, path string, out any) error {
-	return p.doJSON(ctx, http.MethodGet, p.rtdbURL(path), nil, out)
+	if err := p.doJSON(ctx, http.MethodGet, p.rtdbURL(path), nil, out); err != nil {
+		return fmt.Errorf("firebase GET %s failed: %w", path, err)
+	}
+	return nil
 }
 
 func (p *FirebaseRESTProvider) putRTDB(ctx context.Context, path string, in any, out any) error {
-	return p.doJSON(ctx, http.MethodPut, p.rtdbURL(path), in, out)
+	if err := p.doJSON(ctx, http.MethodPut, p.rtdbURL(path), in, out); err != nil {
+		return fmt.Errorf("firebase PUT %s failed: %w", path, err)
+	}
+	return nil
 }
 
 func (p *FirebaseRESTProvider) postJSON(ctx context.Context, endpoint string, in any, out any) error {

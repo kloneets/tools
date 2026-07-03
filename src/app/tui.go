@@ -3292,7 +3292,8 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 		return err
 	}
 	workspaceID := firebaseWorkspaceID(cfg, fileCfg)
-	if workspaceID == "" {
+	personalWorkspaceID := kokosync.PersonalWorkspaceID(session.UID)
+	if workspaceID == "" || workspaceID == personalWorkspaceID {
 		meta, err := provider.EnsurePersonalWorkspace(ctx, session, "Personal workspace")
 		if err != nil {
 			return err

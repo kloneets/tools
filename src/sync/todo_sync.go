@@ -33,12 +33,27 @@ func (s *TodoSyncer) PushStore(ctx context.Context, store todo.Store) error {
 		state.DeviceID = s.DeviceID
 	}
 	for _, item := range store.Items {
-		if item.Status == todo.StatusArchived {
-			continue
-		}
 		rev := item.UpdatedAt.UnixMilli()
 		if rev <= 0 {
 			rev = time.Now().UnixMilli()
+		}
+		if item.Status == todo.StatusArchived {
+			record := TodoRecord{
+				Item:      todo.Item{ID: item.ID, Status: todo.StatusArchived, UpdatedAt: item.UpdatedAt},
+				Rev:       rev,
+				UpdatedBy: s.Session.UID,
+				Deleted:   true,
+			}
+			if err := s.Provider.PushMutation(ctx, s.WorkspaceID, Mutation{
+				EventID:   fmt.Sprintf("todo-delete-%s-%d", item.ID, rev),
+				DeviceID:  state.DeviceID,
+				Todo:      &record,
+				CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				return err
+			}
+			state.Todos[item.ID] = rev
+			continue
 		}
 		record := TodoRecord{
 			Item:      item,
@@ -56,9 +71,7 @@ func (s *TodoSyncer) PushStore(ctx context.Context, store todo.Store) error {
 		state.Todos[item.ID] = rev
 	}
 	if p, ok := s.Provider.(TodoArchiveMonthPushProvider); ok {
-		if err := p.PushTodoArchiveMonths(ctx, s.WorkspaceID, todo.ArchiveMonths(store)); err != nil {
-			return err
-		}
+		_ = p.PushTodoArchiveMonths(ctx, s.WorkspaceID, todo.ArchiveMonths(store))
 	}
 	now := time.Now().UTC()
 	markFeaturePulled(&state, SyncFeatureTodos, TodoStoreHash(store), now)
@@ -88,7 +101,7 @@ func (s *TodoSyncer) PullStore(ctx context.Context, local todo.Store) (todo.Stor
 		if err != nil {
 			return local, false, err
 		}
-		merged = todo.PreserveArchived(local, MergeTodos(todo.NonArchivedStore(local), nonArchivedTodoRecords(remote)))
+		merged = todo.PreserveArchived(local, MergeTodos(todo.NonArchivedStore(local), remoteTodoRecordsForLocal(local, remote)))
 		hash := TodoRecordsHash(remote)
 		markFeaturePulled(&state, SyncFeatureTodos, hash, now)
 		if !hasHashes || hashes[SyncFeatureTodos].Hash == "" {
@@ -194,10 +207,30 @@ func pullRemoteTodoArchiveMonths(ctx context.Context, provider Provider, workspa
 func nonArchivedTodoRecords(records map[string]TodoRecord) map[string]TodoRecord {
 	out := make(map[string]TodoRecord, len(records))
 	for id, record := range records {
-		if record.Item.Status == todo.StatusArchived {
+		if record.Item.Status == todo.StatusArchived && !record.Deleted {
 			continue
 		}
 		out[id] = record
+	}
+	return out
+}
+
+func remoteTodoRecordsForLocal(local todo.Store, records map[string]TodoRecord) map[string]TodoRecord {
+	out := nonArchivedTodoRecords(records)
+	archived := map[string]todo.Item{}
+	for _, item := range local.Items {
+		if item.Status == todo.StatusArchived {
+			archived[item.ID] = item
+		}
+	}
+	for id, record := range out {
+		if record.Deleted {
+			continue
+		}
+		localArchived, ok := archived[id]
+		if ok && !localArchived.UpdatedAt.Before(record.Item.UpdatedAt) {
+			delete(out, id)
+		}
 	}
 	return out
 }
