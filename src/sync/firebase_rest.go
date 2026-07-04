@@ -176,7 +176,6 @@ type MigrationResult struct {
 	TargetWorkspaceID string
 	Notes             int
 	Todos             int
-	Assets            int
 	Settings          int
 }
 
@@ -227,19 +226,6 @@ func (p *FirebaseRESTProvider) MigrateWorkspaceToPersonal(ctx context.Context, s
 		}
 		result.Todos++
 	}
-	for id, asset := range snapshot.Assets {
-		if asset.ID == "" {
-			asset.ID = id
-		}
-		if asset.UpdatedAt.IsZero() {
-			asset.UpdatedAt = time.Now().UTC()
-		}
-		asset.UpdatedBy = session.UID
-		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/assets/%s", url.PathEscape(targetWorkspaceID), url.PathEscape(asset.ID)), asset, nil); err != nil {
-			return result, err
-		}
-		result.Assets++
-	}
 	if record, ok := sharedSettingsFromSnapshot(snapshot.Settings); ok {
 		record.UpdatedBy = session.UID
 		if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/settings/shared", url.PathEscape(targetWorkspaceID)), record, nil); err != nil {
@@ -283,8 +269,6 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 			mutation.Kind = "todo_push"
 		case mutation.Settings != nil:
 			mutation.Kind = "settings_push"
-		case mutation.Asset != nil:
-			mutation.Kind = "asset_push"
 		default:
 			mutation.Kind = "sync"
 		}
@@ -307,12 +291,6 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 	if mutation.Settings != nil {
 		path := fmt.Sprintf("workspaces/%s/settings/shared", url.PathEscape(workspaceID))
 		if err := p.putRTDB(ctx, path, mutation.Settings, nil); err != nil {
-			return err
-		}
-	}
-	if mutation.Asset != nil {
-		path := fmt.Sprintf("workspaces/%s/assets/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Asset.ID))
-		if err := p.putRTDB(ctx, path, mutation.Asset, nil); err != nil {
 			return err
 		}
 	}
@@ -378,15 +356,6 @@ func (p *FirebaseRESTProvider) PullSettings(ctx context.Context, workspaceID str
 	return records, err
 }
 
-func (p *FirebaseRESTProvider) PullAssets(ctx context.Context, workspaceID string) (map[string]AssetRecord, error) {
-	var records map[string]AssetRecord
-	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/assets", url.PathEscape(workspaceID)), &records)
-	if records == nil {
-		records = map[string]AssetRecord{}
-	}
-	return records, err
-}
-
 func (p *FirebaseRESTProvider) PullSyncHashes(ctx context.Context, workspaceID string) (map[string]SyncHashRecord, error) {
 	var records map[string]SyncHashRecord
 	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/sync_hashes", url.PathEscape(workspaceID)), &records)
@@ -401,6 +370,15 @@ func (p *FirebaseRESTProvider) PushSyncHash(ctx context.Context, workspaceID str
 		return nil
 	}
 	return p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/sync_hashes/%s", url.PathEscape(workspaceID), url.PathEscape(feature)), record, nil)
+}
+
+func (p *FirebaseRESTProvider) DeleteLegacyAssetsBestEffort(ctx context.Context, workspaceID string) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return
+	}
+	escapedWorkspace := url.PathEscape(workspaceID)
+	_ = p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/assets", escapedWorkspace), nil, nil)
+	_ = p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/sync_hashes/assets", escapedWorkspace), nil, nil)
 }
 
 func sharedSettingsFromSnapshot(settings map[string]any) (SharedSettingsRecord, bool) {

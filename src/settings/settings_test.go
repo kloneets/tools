@@ -83,7 +83,7 @@ func TestNormalizeSettings(t *testing.T) {
 
 func TestNormalizeTabOrderRepairsUnknownDuplicatesAndMissing(t *testing.T) {
 	got := NormalizeTabOrder([]string{" sync ", "notes", "bogus", "sync", "todo"})
-	want := []string{"sync", "notes", "todo", "files", "pages", "password", "settings"}
+	want := []string{"sync", "notes", "todo", "pages", "password", "settings"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("NormalizeTabOrder() = %v, want %v", got, want)
 	}
@@ -216,7 +216,7 @@ func TestSaveSettingsLocalPersistsPreviewAndTabOrderAcrossInit(t *testing.T) {
 	t.Setenv("HOME", home)
 	settingsInstance = defaultSettings()
 	settingsInstance.NotesApp.PreviewHidden = true
-	settingsInstance.UI.TabOrder = []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	settingsInstance.UI.TabOrder = []string{"todo", "notes", "sync", "settings", "pages", "password"}
 
 	SaveSettingsLocal()
 	settingsInstance = nil
@@ -225,7 +225,7 @@ func TestSaveSettingsLocalPersistsPreviewAndTabOrderAcrossInit(t *testing.T) {
 	if !settingsInstance.NotesApp.PreviewHidden {
 		t.Fatal("PreviewHidden = false after Init, want true")
 	}
-	wantOrder := []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	wantOrder := []string{"todo", "notes", "sync", "settings", "pages", "password"}
 	if got := settingsInstance.UI.TabOrder; strings.Join(got, ",") != strings.Join(wantOrder, ",") {
 		t.Fatalf("TabOrder = %v after Init, want %v", got, wantOrder)
 	}
@@ -243,7 +243,7 @@ func TestInitRecoversSettingsFromValidBackup(t *testing.T) {
 	backup := getFileName("settings.json_bup")
 	backupSettings := defaultSettings()
 	backupSettings.NotesApp.PreviewHidden = true
-	backupSettings.UI.TabOrder = []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	backupSettings.UI.TabOrder = []string{"todo", "notes", "sync", "settings", "pages", "password"}
 	data, err := json.Marshal(backupSettings)
 	if err != nil {
 		t.Fatalf("Marshal(backup settings) error = %v", err)
@@ -258,7 +258,7 @@ func TestInitRecoversSettingsFromValidBackup(t *testing.T) {
 	if !settingsInstance.NotesApp.PreviewHidden {
 		t.Fatal("PreviewHidden = false after recovery, want true")
 	}
-	wantOrder := []string{"todo", "notes", "sync", "settings", "files", "pages", "password"}
+	wantOrder := []string{"todo", "notes", "sync", "settings", "pages", "password"}
 	if got := settingsInstance.UI.TabOrder; strings.Join(got, ",") != strings.Join(wantOrder, ",") {
 		t.Fatalf("TabOrder = %v after recovery, want %v", got, wantOrder)
 	}

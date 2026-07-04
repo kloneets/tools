@@ -2,10 +2,10 @@
 
 Koko Tools is a Go terminal desktop app that collects a few everyday utilities in one keyboard-driven interface:
 
-- Markdown notes with Vim-style editing, syntax highlighting, note tabs, file asset management, and link opening.
+- Markdown notes with Vim-style editing, syntax highlighting, note tabs, and link opening.
 - Page conversion for comparing progress between different editions of a book.
 - Password generation.
-- Optional Firebase sync for todos, notes, managed assets, and shared settings.
+- Optional Firebase sync for todos, notes, and shared settings.
 - App settings for editor behavior, theme, transparent background, and local preferences.
 
 The app is built as a local desktop binary and stores its configuration under the user home directory.
@@ -38,7 +38,7 @@ The first build or test run can take longer while Go downloads and compiles depe
 
 ## Android Companion App
 
-A Kotlin Android companion app lives in `android/`. It supports Markdown note editing, managed note assets, todos, Pages calculations, and Firebase sync.
+A Kotlin Android companion app lives in `android/`. It supports Markdown note editing, todos, Pages calculations, and Firebase sync.
 
 See `android/README.md` for Android Studio import, build commands, local data paths, Firebase setup, and Play Store release notes.
 
@@ -76,7 +76,7 @@ Supported link schemes are `http`, `https`, `ftp`, and `file`. Duplicate links a
 
 ### Firebase Push Local
 
-`firebase-push-local` pushes the current desktop todos, notes, managed note assets, and shared app settings to the configured Firebase personal workspace. Use this when the desktop data is the source of truth and another device needs to pull the latest data.
+`firebase-push-local` pushes the current desktop todos, notes, and shared app settings to the configured Firebase personal workspace. Use this when the desktop data is the source of truth and another device needs to pull the latest data.
 
 ```sh
 ./koko-tools firebase-push-local
@@ -90,7 +90,7 @@ KOKO_FIREBASE_EMAIL="you@example.com" KOKO_FIREBASE_PASSWORD="password" ./koko-t
 
 ### Firebase Migrate
 
-`firebase-migrate` copies notes, todos, managed note assets, and shared settings from an old workspace into the current Firebase user's personal workspace, named `user_<uid>`, and updates the desktop Firebase config to use that personal workspace.
+`firebase-migrate` copies notes, todos, and shared settings from an old workspace into the current Firebase user's personal workspace, named `user_<uid>`, and updates the desktop Firebase config to use that personal workspace.
 
 ```sh
 KOKO_FIREBASE_EMAIL="you@example.com" KOKO_FIREBASE_PASSWORD="password" ./koko-tools firebase-migrate <old-workspace-id> --confirm-owner-copy
@@ -103,16 +103,14 @@ Safety checks:
 - The logged-in Firebase user must be an `owner` in `workspaces/<old-workspace-id>/members/<uid>`.
 - The command copies data into `user_<uid>` and does not delete the source workspace.
 
-Managed note assets are stored in Firebase Realtime Database as base64 records under `workspaces/<workspace>/assets`. Assets larger than 1 MiB are skipped and reported by push commands.
-
 ## Terminal UI
 
 The app has six main views:
 
 - `1` Notes
-- `2` Files
-- `3` Pages
-- `4` Password
+- `2` Pages
+- `3` Password
+- `4` Todo
 - `5` Sync
 - `6` Settings
 
@@ -192,32 +190,6 @@ One-character command chaining is supported for commands such as `:wq`.
 
 Spell checking is configured from Settings. Dictionaries are downloaded only when selected in Settings, starting with English, Russian, and Latvian plus several additional Hunspell dictionaries. The app uses native `nuspell` when available, then native `hunspell`, then a basic `.dic` fallback. On macOS, install the preferred native checker with `brew install nuspell` for full Hunspell dictionary support. Settings shows whether each installed dictionary is using a native checker, fallback mode, or cannot load. Words are accepted if they exist in any loaded dictionary or in `.config/koko-tools/spell/custom.txt`.
 
-## Files
-
-The Files view manages note-related files and assets. It supports:
-
-- Importing files into the current note asset scope.
-- Creating nested folders.
-- Creating scope folders.
-- Opening selected files.
-- Renaming, moving, and deleting managed assets.
-- Copying Markdown references or relative paths for selected files.
-- Staging file changes before saving them into the real notes directory.
-
-Useful keys:
-
-- `a`: import a file.
-- `f`: create a nested folder.
-- `F`: create a scope folder.
-- `o`: open selected file or folder.
-- `r`: rename.
-- `m`: move.
-- `d`: delete.
-- `y`: copy Markdown reference.
-- `Y`: copy relative path.
-- `D`: discard staged file changes.
-- `/`: filter files.
-
 ## Pages
 
 The Pages view helps convert reading progress between two editions of a book.
@@ -273,9 +245,9 @@ Actions include:
 - Log in with Google.
 - Sync to Firebase.
 
-Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, managed note assets, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Markdown rendering mode, Firebase credentials, and the currently open note session. The app can save locally without uploading to Firebase.
+Firebase uses the app-owned backend by default and syncs data under a personal workspace named `user_<uid>`. Realtime sync covers todos, notes, and shared settings. Shared settings include pages, password generator options, and cross-device notes behavior such as Vim mode, tab spaces, undo levels, spell checking, and dictionaries. Device-local state stays local, including window/UI layout, Android theme, Markdown rendering mode, Firebase credentials, and the currently open note session. The app can save locally without uploading to Firebase.
 
-Remote Firebase data is not applied over active local edits. If pages, notes, todos, settings, or managed files are currently being edited or have unsaved local changes, the app defers the remote apply and retries on a later sync after the local action is saved or finished.
+Remote Firebase data is not applied over active local edits. If pages, notes, todos, or settings are currently being edited or have unsaved local changes, the app defers the remote apply and retries on a later sync after the local action is saved or finished.
 
 ## Settings
 
@@ -304,7 +276,7 @@ Transparent background is independent from the theme. When transparent backgroun
 
 ## Data and Configuration
 
-The app creates its config directory under the user home directory at startup. Settings and note session state are persisted locally. Firebase sync, when enabled and configured, can sync todos, notes, managed note assets, and shared settings.
+The app creates its config directory under the user home directory at startup. Settings and note session state are persisted locally. Firebase sync, when enabled and configured, can sync todos, notes, and shared settings.
 
 Changes to settings, file paths, notes, or sync behavior should handle missing directories and read failures safely.
 
@@ -314,7 +286,7 @@ Project structure:
 
 - `main.go`: process entrypoint and CLI dispatch.
 - `src/app`: terminal app shell, views, CLI helpers, theming, and TUI integration.
-- `src/notes`: notes workspace, Markdown rendering, Vim commands, managed files, and editor behavior.
+- `src/notes`: notes workspace, Markdown rendering, Vim commands, and editor behavior.
 - `src/pages`: page conversion model.
 - `src/password`: password generation model.
 - `src/settings`: persisted settings and local sync state.

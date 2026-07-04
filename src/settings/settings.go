@@ -131,7 +131,7 @@ var statusUpdater = func(text string) {
 
 const DefaultTheme = "tokyo-night"
 
-var defaultTabOrder = []string{"notes", "files", "pages", "password", "todo", "sync", "settings"}
+var defaultTabOrder = []string{"notes", "pages", "password", "todo", "sync", "settings"}
 
 var BuiltInThemes = []string{
 	"tokyo-night",

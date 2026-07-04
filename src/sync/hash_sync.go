@@ -17,7 +17,6 @@ const (
 	SyncFeatureTodoArchiveMonths = "todo_archive_months"
 	SyncFeatureNotes             = "notes"
 	SyncFeatureSettings          = "settings"
-	SyncFeatureAssets            = "assets"
 
 	hashFullValidationInterval = 24 * time.Hour
 )
@@ -156,25 +155,6 @@ func NoteMetadataHash(records map[string]NoteRecord) string {
 			record.ID = id
 		}
 		items = append(items, metadata{ID: record.ID, Path: NormalizeNotePath(record.Path), Rev: record.Rev, Deleted: record.Deleted})
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
-	return hashCanonical(items)
-}
-
-func AssetMetadataHash(records map[string]AssetRecord) string {
-	type metadata struct {
-		ID      string `json:"id"`
-		Path    string `json:"path"`
-		Rev     int64  `json:"rev"`
-		Deleted bool   `json:"deleted"`
-		SHA256  string `json:"sha256"`
-	}
-	items := make([]metadata, 0, len(records))
-	for id, record := range records {
-		if record.ID == "" {
-			record.ID = id
-		}
-		items = append(items, metadata{ID: record.ID, Path: NormalizeAssetPath(record.Path), Rev: record.Rev, Deleted: record.Deleted, SHA256: record.SHA256})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	return hashCanonical(items)

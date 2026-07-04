@@ -7,7 +7,7 @@ import (
 )
 
 func TestSettingsSyncerPushWritesSharedSettingsRecord(t *testing.T) {
-	provider := &fakeAssetProvider{}
+	provider := &fakeSettingsProvider{}
 	syncer := SettingsSyncer{
 		Provider:    provider,
 		WorkspaceID: "workspace",
@@ -36,7 +36,7 @@ func TestSettingsSyncerPushWritesSharedSettingsRecord(t *testing.T) {
 }
 
 func TestSettingsSyncerPullReturnsNewerSharedSettings(t *testing.T) {
-	provider := &fakeAssetProvider{snapshot: Snapshot{Settings: map[string]any{
+	provider := &fakeSettingsProvider{snapshot: Snapshot{Settings: map[string]any{
 		"shared": map[string]any{
 			"values": map[string]any{"pages_app": map[string]any{"first_book": 10}},
 			"rev":    float64(5),
@@ -63,7 +63,7 @@ func TestSettingsSyncerPullReturnsNewerSharedSettings(t *testing.T) {
 }
 
 func TestSettingsSyncerPushSkipsUnchangedSharedSettings(t *testing.T) {
-	provider := &fakeAssetProvider{}
+	provider := &fakeSettingsProvider{}
 	syncer := SettingsSyncer{
 		Provider:    provider,
 		WorkspaceID: "workspace",
@@ -100,7 +100,7 @@ func TestSettingsSyncerPushSkipsUnchangedSharedSettings(t *testing.T) {
 func TestSettingsSyncerPullSkipsFreshMatchingHash(t *testing.T) {
 	values := map[string]any{"pages_app": map[string]any{"first_book": 10}}
 	hash := sharedSettingsHash(values)
-	provider := &fakeAssetProvider{
+	provider := &fakeSettingsProvider{
 		hashes: map[string]SyncHashRecord{SyncFeatureSettings: {Hash: hash}},
 		snapshot: Snapshot{Settings: map[string]any{
 			"shared": map[string]any{"values": values, "rev": float64(5)},
@@ -130,4 +130,58 @@ func TestSettingsSyncerPullSkipsFreshMatchingHash(t *testing.T) {
 	if provider.snapshotPulls != 0 {
 		t.Fatalf("snapshotPulls = %d, want no settings pull", provider.snapshotPulls)
 	}
+}
+
+type fakeSettingsProvider struct {
+	snapshot      Snapshot
+	mutations     []Mutation
+	hashes        map[string]SyncHashRecord
+	snapshotPulls int
+}
+
+func (p *fakeSettingsProvider) Login(context.Context, string, string) (Session, error) {
+	return Session{}, nil
+}
+
+func (p *fakeSettingsProvider) WatchWorkspace(context.Context, string, string, func(Change) error) error {
+	return nil
+}
+
+func (p *fakeSettingsProvider) PushMutation(_ context.Context, _ string, mutation Mutation) error {
+	p.mutations = append(p.mutations, mutation)
+	return nil
+}
+
+func (p *fakeSettingsProvider) PullSnapshot(context.Context, string) (Snapshot, error) {
+	p.snapshotPulls++
+	return p.snapshot, nil
+}
+
+func (p *fakeSettingsProvider) PullSettings(context.Context, string) (map[string]any, error) {
+	p.snapshotPulls++
+	return p.snapshot.Settings, nil
+}
+
+func (p *fakeSettingsProvider) PullSyncHashes(context.Context, string) (map[string]SyncHashRecord, error) {
+	return p.hashes, nil
+}
+
+func (p *fakeSettingsProvider) PushSyncHash(_ context.Context, _ string, feature string, record SyncHashRecord) error {
+	if p.hashes == nil {
+		p.hashes = map[string]SyncHashRecord{}
+	}
+	p.hashes[feature] = record
+	return nil
+}
+
+func (p *fakeSettingsProvider) CreateWorkspace(context.Context, string) (WorkspaceMeta, error) {
+	return WorkspaceMeta{}, nil
+}
+
+func (p *fakeSettingsProvider) GrantMember(context.Context, string, string, string) error {
+	return nil
+}
+
+func (p *fakeSettingsProvider) RevokeMember(context.Context, string, string) error {
+	return nil
 }

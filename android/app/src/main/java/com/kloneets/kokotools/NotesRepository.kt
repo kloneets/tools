@@ -34,32 +34,15 @@ class NotesRepository(private val context: Context) {
         return resolveNote(relativePath).delete()
     }
 
-    fun listAssets(): List<LocalAssetFile> {
-        notesRoot.mkdirs()
-        return notesRoot
-            .walkTopDown()
-            .filter { it.isFile }
-            .map { it.relativeTo(notesRoot).invariantSeparatorsPath }
-            .filter { isManagedAssetPath(it) }
-            .sortedBy { it.lowercase() }
-            .mapNotNull { rel ->
-                val file = resolveLocalPath(rel)
-                if (!file.isFile) null else LocalAssetFile(rel, file.readBytes(), file.lastModified())
-            }
-            .toList()
-    }
-
-    fun writeAsset(relativePath: String, bytes: ByteArray) {
-        val file = resolveLocalPath(normalizeAssetPath(relativePath))
-        file.parentFile?.mkdirs()
-        file.writeBytes(bytes)
-    }
-
-    fun deleteAsset(relativePath: String): Boolean {
-        return resolveLocalPath(normalizeAssetPath(relativePath)).delete()
-    }
-
     fun notesPath(): File = notesRoot
+
+    fun cleanupManagedAssetDirs() {
+        if (!notesRoot.exists()) return
+        notesRoot.walkTopDown()
+            .filter { it.isDirectory && it != notesRoot && isManagedAssetDirName(it.name) }
+            .toList()
+            .forEach { it.deleteRecursively() }
+    }
 
     fun clearAll() {
         if (notesRoot.exists()) {
@@ -107,33 +90,6 @@ class NotesRepository(private val context: Context) {
             return if (withName.endsWith(".md", ignoreCase = true)) withName else "$withName.md"
         }
 
-        fun normalizeAssetPath(input: String): String {
-            return input
-                .trim()
-                .replace('\\', '/')
-                .split('/')
-                .filter { it.isNotBlank() && it != "." && it != ".." }
-                .joinToString("/")
-        }
-
-        fun isManagedAssetPath(relativePath: String): Boolean {
-            return normalizeAssetPath(relativePath)
-                .split('/')
-                .any { it == "assets" || it.endsWith(".assets") }
-        }
-
-        fun managedAssetPathForNote(notePath: String, fileName: String): String {
-            val cleanName = normalizeAssetPath(fileName).substringAfterLast('/').ifBlank { "asset" }
-            val note = normalizePath(notePath).takeIf { notePath.isNotBlank() }
-            if (note == null) return "assets/$cleanName"
-            val folder = note.removeSuffix(".md") + ".assets"
-            return normalizeAssetPath("$folder/$cleanName")
-        }
+        fun isManagedAssetDirName(name: String): Boolean = name == "assets" || name.endsWith(".assets")
     }
 }
-
-data class LocalAssetFile(
-    val relativePath: String,
-    val bytes: ByteArray,
-    val lastModified: Long,
-)

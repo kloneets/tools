@@ -23,6 +23,7 @@ data class NotesSettings(
 
 data class AndroidSettings(
     val themeMode: ThemeMode = ThemeMode.System,
+    val lastScreen: String = "todo",
 )
 
 enum class ThemeMode(val value: String, val label: String) {

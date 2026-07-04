@@ -23,7 +23,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
-import android.provider.OpenableColumns
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -69,7 +68,6 @@ class MainActivity : Activity() {
 
     private var noteListView: ListView? = null
     private var noteSelector: TextView? = null
-    private var assetListView: ListView? = null
     private var noteEditor: HybridMarkdownEditor? = null
     private var rawNoteEditor: EditText? = null
     private var rawNoteSpellChecker: AndroidSpellChecker? = null
@@ -106,24 +104,19 @@ class MainActivity : Activity() {
         notesRepository = NotesRepository(this)
         todoRepository = TodoRepository(this)
         firebaseSyncRepository = FirebaseSyncRepository(this)
+        notesRepository.cleanupManagedAssetDirs()
         settings = settingsRepository.load()
         todoStore = todoRepository.load()
         palette = resolvePalette()
         applySystemBars()
         currentNotePath = settings.notesApp.currentNotePath
         buildRoot()
-        showTodo()
+        showLastScreen()
         startFirebaseRealtimeIfEnabled()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == ASSET_IMPORT_REQUEST_CODE) {
-            if (resultCode == RESULT_OK && data?.data != null) {
-                handleImportedAsset(data.data!!)
-            }
-            return
-        }
         if (requestCode == FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE) {
             handleFirebaseGoogleSignInResult(resultCode, data)
             return
@@ -265,21 +258,17 @@ class MainActivity : Activity() {
                 setTextColor(COLOR_TEXT_PRIMARY)
                 setPadding(dp(4), 0, dp(4), dp(16))
             })
+            addView(drawerRow("Todo", R.id.tab_todo) {
+                hideNavigationDrawer()
+                showTodo()
+            })
             addView(drawerRow("Notes", R.id.tab_notes) {
                 hideNavigationDrawer()
                 showNotes()
             })
-            addView(drawerRow("Assets", R.id.tab_assets) {
-                hideNavigationDrawer()
-                showAssets()
-            })
             addView(drawerRow("Pages", R.id.tab_pages) {
                 hideNavigationDrawer()
                 showPages()
-            })
-            addView(drawerRow("Todo", R.id.tab_todo) {
-                hideNavigationDrawer()
-                showTodo()
             })
             addView(drawerRow("Sync", R.id.tab_sync) {
                 hideNavigationDrawer()
@@ -349,7 +338,6 @@ class MainActivity : Activity() {
     private fun showCurrentActionsMenu() {
         when (currentScreen) {
             Screen.Notes -> showNotesActionsMenu(actionsButton)
-            Screen.Assets -> showAssetsActionsMenu(actionsButton)
             Screen.Pages -> showPagesActionsMenu(actionsButton)
             Screen.Todo -> showTodoActionsMenu(actionsButton)
             Screen.Sync -> showSyncActionsMenu(actionsButton)
@@ -357,8 +345,26 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun showLastScreen() {
+        when (AndroidScreenState.normalize(settings.androidApp.lastScreen)) {
+            AndroidScreenState.NOTES -> showNotes()
+            AndroidScreenState.PAGES -> showPages()
+            AndroidScreenState.SYNC -> showSync()
+            AndroidScreenState.SETTINGS -> showSettings()
+            else -> showTodo()
+        }
+    }
+
+    private fun showScreen(screen: Screen) {
+        currentScreen = screen
+        val lastScreen = screen.settingValue
+        if (settings.androidApp.lastScreen != lastScreen) {
+            persistLocalSettings(settings.copy(androidApp = settings.androidApp.copy(lastScreen = lastScreen)))
+        }
+    }
+
     private fun showNotes() {
-        currentScreen = Screen.Notes
+        showScreen(Screen.Notes)
         setScreenHeader("Notes", currentNoteLabel())
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
@@ -798,125 +804,6 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun showAssets() {
-        currentScreen = Screen.Assets
-        setScreenHeader("Assets", "Managed note files")
-        content.removeAllViews()
-        content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(16), dp(16), dp(16), dp(16))
-
-        content.addView(commandButton("Import asset", R.id.asset_import) {
-            importAsset()
-        })
-        content.addView(commandButton("Refresh", R.id.asset_refresh) {
-            refreshAssets()
-        })
-        assetListView = ListView(this).apply {
-            id = R.id.asset_list
-            divider = null
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f,
-            ).apply {
-                topMargin = dp(10)
-            }
-        }
-        content.addView(assetListView)
-        refreshAssets()
-    }
-
-    private fun showAssetsActionsMenu(anchor: View) {
-        PopupMenu(this, anchor).apply {
-            menu.add("Import asset").setOnMenuItemClickListener {
-                importAsset()
-                true
-            }
-            menu.add("Refresh").setOnMenuItemClickListener {
-                refreshAssets()
-                true
-            }
-            menu.add("Open notes").setOnMenuItemClickListener {
-                showNotes()
-                true
-            }
-            show()
-        }
-    }
-
-    private fun refreshAssets() {
-        val assets = notesRepository.listAssets()
-        val labels = if (assets.isEmpty()) {
-            listOf("No managed assets yet")
-        } else {
-            assets.map { "${it.relativePath}\n${formatBytes(it.bytes.size)}" }
-        }
-        assetListView?.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)
-        assetListView?.setOnItemClickListener { _, _, position, _ ->
-            if (assets.isEmpty()) return@setOnItemClickListener
-            showAssetOptions(assets[position])
-        }
-    }
-
-    private fun showAssetOptions(asset: LocalAssetFile) {
-        AlertDialog.Builder(this)
-            .setTitle(asset.relativePath)
-            .setMessage("${formatBytes(asset.bytes.size)}\nSynced as a managed note asset.")
-            .setPositiveButton("Delete") { _, _ ->
-                notesRepository.deleteAsset(asset.relativePath)
-                pushAssetDeleteToFirebase(asset.relativePath)
-                refreshAssets()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun importAsset() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-        }
-        startActivityForResult(intent, ASSET_IMPORT_REQUEST_CODE)
-    }
-
-    private fun pushAssetDeleteToFirebase(path: String) {
-        if (!firebaseSyncRepository.configured(settings.firebase)) return
-        Thread {
-            val session = freshFirebaseSession() ?: return@Thread
-            runCatching {
-                firebaseSyncRepository.pushAssetDelete(settings.firebase, path, session)
-            }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase asset delete failed: ${error.message}") }
-            }
-        }.start()
-    }
-
-    private fun handleImportedAsset(uri: Uri) {
-        val name = displayNameForUri(uri)
-        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return
-        if (bytes.size > FirebaseSyncRepository.MAX_ASSET_BYTES) {
-            Toast.makeText(this, "Asset is larger than 1 MiB and will not sync", Toast.LENGTH_LONG).show()
-        }
-        val target = NotesRepository.managedAssetPathForNote(currentNotePath, name)
-        notesRepository.writeAsset(target, bytes)
-        pushSharedFirebaseData(pushSettings = false, pushAssets = true)
-        if (currentScreen == Screen.Assets) refreshAssets()
-        Toast.makeText(this, "Imported $target", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun displayNameForUri(uri: Uri): String {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0) {
-                    val name = cursor.getString(index)
-                    if (!name.isNullOrBlank()) return name
-                }
-            }
-        }
-        return uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { "asset" } ?: "asset"
-    }
-
     private fun formatBytes(size: Int): String {
         if (size < 1024) return "$size B"
         if (size < 1024 * 1024) return "${size / 1024} KB"
@@ -924,7 +811,7 @@ class MainActivity : Activity() {
     }
 
     private fun showPages() {
-        currentScreen = Screen.Pages
+        showScreen(Screen.Pages)
         setScreenHeader("Pages", "Reading progress converter")
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
@@ -1012,7 +899,7 @@ class MainActivity : Activity() {
     }
 
     private fun showTodo() {
-        currentScreen = Screen.Todo
+        showScreen(Screen.Todo)
         setScreenHeader("Todo", if (todoMoveMode) "Move tasks" else "Tasks and archive")
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
@@ -1388,7 +1275,7 @@ class MainActivity : Activity() {
     }
 
     private fun showSync() {
-        currentScreen = Screen.Sync
+        showScreen(Screen.Sync)
         setScreenHeader("Sync", "Firebase sync")
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
@@ -1440,13 +1327,31 @@ class MainActivity : Activity() {
     }
 
     private fun showSettings() {
-        currentScreen = Screen.Settings
+        showScreen(Screen.Settings)
         setScreenHeader("Settings", "App preferences")
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(16), dp(16), dp(16), dp(16))
+        content.setPadding(0, 0, 0, 0)
 
-        content.addView(sectionTitle("Theme"))
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+        val settingsBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        scroll.addView(settingsBody)
+        content.addView(scroll)
+
+        settingsBody.addView(sectionTitle("Theme"))
         val group = RadioGroup(this).apply {
             id = R.id.settings_theme_group
             orientation = RadioGroup.VERTICAL
@@ -1466,9 +1371,9 @@ class MainActivity : Activity() {
                 changeThemeMode(mode)
             }
         }
-        content.addView(group)
+        settingsBody.addView(group)
 
-        content.addView(sectionTitle("Notes"))
+        settingsBody.addView(sectionTitle("Notes"))
         val richRendering = CheckBox(this).apply {
             id = R.id.settings_note_rendering
             text = "Rich text rendering"
@@ -1491,7 +1396,7 @@ class MainActivity : Activity() {
                 }
             }
         }
-        content.addView(richRendering)
+        settingsBody.addView(richRendering)
         val spellCheck = CheckBox(this).apply {
             id = R.id.settings_spell_check
             text = "Spell checking"
@@ -1514,19 +1419,19 @@ class MainActivity : Activity() {
                 }
             }
         }
-        content.addView(spellCheck)
+        settingsBody.addView(spellCheck)
 
-        content.addView(sectionTitle("Spell dictionaries"))
+        settingsBody.addView(sectionTitle("Spell dictionaries"))
         val selectedSpellDictionaries = SpellLanguages.normalizeCodes(settings.notesApp.spellDictionaries).toSet()
         SpellLanguages.supported.forEach { language ->
-            content.addView(spellDictionaryCheckBox(language, selectedSpellDictionaries))
+            settingsBody.addView(spellDictionaryCheckBox(language, selectedSpellDictionaries))
         }
 
-        content.addView(sectionTitle("Privacy"))
-        content.addView(commandButton("Privacy policy", R.id.settings_privacy_policy) {
+        settingsBody.addView(sectionTitle("Privacy"))
+        settingsBody.addView(commandButton("Privacy policy", R.id.settings_privacy_policy) {
             openExternalUrl(PRIVACY_POLICY_URL)
         })
-        content.addView(commandButton("Delete account or data", R.id.settings_delete_account) {
+        settingsBody.addView(commandButton("Delete account or data", R.id.settings_delete_account) {
             openExternalUrl(ACCOUNT_DELETION_URL)
         })
     }
@@ -1603,9 +1508,12 @@ class MainActivity : Activity() {
         palette = resolvePalette()
         applySystemBars()
         buildRoot()
+        showCurrentScreen()
+    }
+
+    private fun showCurrentScreen() {
         when (currentScreen) {
             Screen.Notes -> showNotes()
-            Screen.Assets -> showAssets()
             Screen.Pages -> showPages()
             Screen.Todo -> showTodo()
             Screen.Sync -> showSync()
@@ -1652,6 +1560,11 @@ class MainActivity : Activity() {
         settings = next
         settingsRepository.save(settings)
         scheduleSharedSettingsPush()
+    }
+
+    private fun persistLocalSettings(next: AppSettings) {
+        settings = next
+        settingsRepository.save(settings)
     }
 
     private fun startFirebaseRealtimeIfEnabled() {
@@ -1908,13 +1821,13 @@ class MainActivity : Activity() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         val runnable = Runnable {
             firebaseSettingsPushRunnable = null
-            pushSharedFirebaseData(pushSettings = true, pushAssets = false)
+            pushSharedFirebaseData(pushSettings = true)
         }
         firebaseSettingsPushRunnable = runnable
         noteAutosaveHandler.postDelayed(runnable, 1_000L)
     }
 
-    private fun pushSharedFirebaseData(pushSettings: Boolean = true, pushAssets: Boolean = true) {
+    private fun pushSharedFirebaseData(pushSettings: Boolean = true) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
             val session = freshFirebaseSession()
@@ -1924,13 +1837,12 @@ class MainActivity : Activity() {
             }
             runCatching {
                 val settingsPushed = if (pushSettings) firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session) else false
-                val assetCount = if (pushAssets) firebaseSyncRepository.pushAssets(settings.firebase, notesRepository.listAssets(), session) else 0
-                settingsPushed to assetCount
-            }.onSuccess { (settingsPushed, assetCount) ->
+                firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
+                settingsPushed
+            }.onSuccess { settingsPushed ->
                 runOnUiThread {
-                    val suffix = if (pushAssets) ", $assetCount asset(s)" else ""
                     val verb = if (pushSettings && settingsPushed) "pushed" else "unchanged"
-                    setSyncStatus("Firebase shared settings $verb$suffix")
+                    setSyncStatus("Firebase shared settings $verb")
                 }
             }.onFailure { error ->
                 runOnUiThread { setSyncStatus("Firebase shared push failed: ${error.message}") }
@@ -1947,10 +1859,9 @@ class MainActivity : Activity() {
                 return@Thread
             }
             runCatching {
-                val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
-                val assets = firebaseSyncRepository.pullAssets(settings.firebase, session)
-                Pair(shared, assets)
-            }.onSuccess { (shared, assets) ->
+                firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
+                firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
+            }.onSuccess { shared ->
                 runOnUiThread {
                     val localEditActive = hasActiveLocalEdit()
                     if (shared != null && localEditActive) {
@@ -1966,7 +1877,6 @@ class MainActivity : Activity() {
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
                     if (!localEditActive) {
-                        applyRemoteAssets(assets)
                         when (currentScreen) {
                             Screen.Pages -> showPages()
                             Screen.Settings -> showSettings()
@@ -1974,13 +1884,12 @@ class MainActivity : Activity() {
                                 noteList = notesRepository.listNotes()
                                 updateNoteSelector()
                             }
-                            Screen.Assets -> refreshAssets()
                             else -> Unit
                         }
                     }
                     if (!localEditActive) {
                         val settingsStatus = if (shared != null) "shared settings pulled, " else ""
-                        setSyncStatus("Firebase shared sync: $settingsStatus${assets.count { !it.deleted }} asset(s)")
+                        setSyncStatus("Firebase shared sync: ${settingsStatus}complete")
                     }
                 }
             }.onFailure { error ->
@@ -1990,10 +1899,10 @@ class MainActivity : Activity() {
     }
 
     private fun pullFirebaseRealtimeData() {
-        pullTodosFromFirebase(includeAssets = false)
+        pullTodosFromFirebase()
     }
 
-    private fun pullTodosFromFirebase(includeAssets: Boolean = false) {
+    private fun pullTodosFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
             val session = freshFirebaseSession()
@@ -2010,19 +1919,18 @@ class MainActivity : Activity() {
                 }
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
-                val remoteAssets = if (includeAssets) firebaseSyncRepository.pullAssets(settings.firebase, session) else emptyList()
+                firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
                 FirebasePullResult(
                     todos = merged,
                     todoChanged = todoChanged,
                     remoteNotes = remoteNotes,
                     remoteTodoCount = merged.items.size,
                     remoteNoteCount = remoteNotes.count { !it.deleted },
-                ) to Pair(shared, remoteAssets)
+                ) to shared
             }.onSuccess { result ->
                 runOnUiThread {
                     val pullResult = result.first
-                    val shared = result.second.first
-                    val remoteAssets = result.second.second
+                    val shared = result.second
                     val localEditActive = hasActiveLocalEdit()
                     if (shared != null && localEditActive) {
                         setSyncStatus("Firebase shared settings deferred while local edits are active")
@@ -2035,7 +1943,6 @@ class MainActivity : Activity() {
                         settingsRepository.save(settings)
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
-                    if (includeAssets && !localEditActive) applyRemoteAssets(remoteAssets)
                     applyRemoteNotes(pullResult.remoteNotes)
                     todoStore = pullResult.todos
                     if (SyncUiState.shouldRebuildTodoAfterPull(
@@ -2049,10 +1956,9 @@ class MainActivity : Activity() {
                     if (currentScreen == Screen.Pages && !localEditActive) showPages()
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null) ", shared settings pulled" else ""
-                    val assetStatus = if (includeAssets) ", ${remoteAssets.count { !it.deleted }} asset(s)" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
                     setSyncStatus(
-                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$assetStatus$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
+                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
                     )
                 }
             }.onFailure { error ->
@@ -2080,7 +1986,7 @@ class MainActivity : Activity() {
                 }
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
-                val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
+                firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
                 Pair(
                     FirebasePullResult(
                         todos = mergedTodos,
@@ -2089,13 +1995,12 @@ class MainActivity : Activity() {
                         remoteTodoCount = mergedTodos.items.size,
                         remoteNoteCount = remoteNotes.count { !it.deleted },
                     ),
-                    Pair(shared, remoteAssets),
+                    shared,
                 )
             }.onSuccess { result ->
                 runOnUiThread {
                     val pullResult = result.first
-                    val shared = result.second.first
-                    val remoteAssets = result.second.second
+                    val shared = result.second
                     val localEditActive = hasActiveLocalEdit()
                     if (shared != null && localEditActive) {
                         setSyncStatus("Firebase shared settings deferred while local edits are active")
@@ -2108,7 +2013,6 @@ class MainActivity : Activity() {
                         settingsRepository.save(settings)
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
-                    if (!localEditActive) applyRemoteAssets(remoteAssets)
                     applyRemoteNotes(pullResult.remoteNotes)
                     todoStore = pullResult.todos
                     if (SyncUiState.shouldRebuildTodoAfterPull(
@@ -2120,8 +2024,7 @@ class MainActivity : Activity() {
                         showTodoPreservingScroll()
                     }
                     if (currentScreen == Screen.Pages && !localEditActive) showPages()
-                    if (currentScreen == Screen.Assets && !localEditActive) refreshAssets()
-                    pushLocalStateAfterManualFirebasePull(pullResult, shared, remoteAssets)
+                    pushLocalStateAfterManualFirebasePull(pullResult, shared)
                 }
 			}.onFailure { error ->
 				runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}", transient = true) }
@@ -2132,7 +2035,6 @@ class MainActivity : Activity() {
     private fun pushLocalStateAfterManualFirebasePull(
         pullResult: FirebasePullResult,
         shared: FirebaseSharedSettings?,
-        remoteAssets: List<FirebaseRemoteAsset>,
     ) {
         Thread {
             val session = freshFirebaseSession()
@@ -2146,15 +2048,15 @@ class MainActivity : Activity() {
                     firebaseSyncRepository.pushNote(settings.firebase, note.relativePath, notesRepository.read(note.relativePath), session)
                 }
                 val settingsPushed = firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
-                val pushedAssets = firebaseSyncRepository.pushAssets(settings.firebase, notesRepository.listAssets(), session)
-                settingsPushed to pushedAssets
-            }.onSuccess { (settingsPushed, pushedAssets) ->
+                firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
+                settingsPushed
+            }.onSuccess { settingsPushed ->
                 runOnUiThread {
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null || settingsPushed) ", shared settings synced" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
 					setSyncStatus(
-						"Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s), ${remoteAssets.count { !it.deleted }} asset(s), $pushedAssets asset(s) pushed$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
+						"Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
 						transient = true,
 					)
 				}
@@ -2180,14 +2082,13 @@ class MainActivity : Activity() {
                 val remoteTodos = firebaseSyncRepository.pullRemoteTodoStore(settings.firebase, session)
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
-                val remoteAssets = firebaseSyncRepository.pullAssets(settings.firebase, session)
-                Pair(Pair(remoteTodos, remoteNotes), Pair(shared, remoteAssets))
+                firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
+                Pair(Pair(remoteTodos, remoteNotes), shared)
             }.onSuccess { result ->
                 runOnUiThread {
                     val remoteTodos = result.first.first
                     val remoteNotes = result.first.second
-                    val shared = result.second.first
-                    val remoteAssets = result.second.second
+                    val shared = result.second
                     todoRepository.save(remoteTodos)
                     todoStore = remoteTodos
                     notesRepository.clearAll()
@@ -2197,7 +2098,6 @@ class MainActivity : Activity() {
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, it.values)
                     }
                     applyRemoteNotes(remoteNotes)
-                    applyRemoteAssets(remoteAssets)
                     if (currentScreen == Screen.Todo && canRebuildTodoAfterRemotePull()) {
                         showTodo()
                     }
@@ -2207,26 +2107,15 @@ class MainActivity : Activity() {
                             selectNote(currentNotePath)
                         }
                     }
-                    if (currentScreen == Screen.Assets) refreshAssets()
                     if (currentScreen == Screen.Pages) showPages()
                     setSyncStatus(
-                        "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s), ${remoteAssets.count { !it.deleted }} asset(s)",
+                        "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s)",
                     )
                 }
             }.onFailure { error ->
                 runOnUiThread { setSyncStatus("Firebase replace failed: ${error.message}") }
             }
         }.start()
-    }
-
-    private fun applyRemoteAssets(remoteAssets: List<FirebaseRemoteAsset>) {
-        remoteAssets.forEach { remote ->
-            if (remote.deleted) {
-                notesRepository.deleteAsset(remote.path)
-            } else {
-                notesRepository.writeAsset(remote.path, remote.bytes)
-            }
-        }
     }
 
     private fun hasActiveLocalEdit(): Boolean {
@@ -2511,17 +2400,15 @@ class MainActivity : Activity() {
     private val COLOR_TEXT_MUTED: Int get() = palette.textMuted
     private val COLOR_SCRIM: Int get() = palette.scrim
 
-    private enum class Screen {
-        Notes,
-        Assets,
-        Pages,
-        Todo,
-        Sync,
-        Settings,
+    private enum class Screen(val settingValue: String) {
+        Notes(AndroidScreenState.NOTES),
+        Pages(AndroidScreenState.PAGES),
+        Todo(AndroidScreenState.TODO),
+        Sync(AndroidScreenState.SYNC),
+        Settings(AndroidScreenState.SETTINGS),
     }
 
     companion object {
-        private const val ASSET_IMPORT_REQUEST_CODE = 4200
         private const val FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE = 4203
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L

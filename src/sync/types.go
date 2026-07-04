@@ -46,10 +46,6 @@ type SettingsPullProvider interface {
 	PullSettings(ctx context.Context, workspaceID string) (map[string]any, error)
 }
 
-type AssetPullProvider interface {
-	PullAssets(ctx context.Context, workspaceID string) (map[string]AssetRecord, error)
-}
-
 type SyncHashPullProvider interface {
 	PullSyncHashes(ctx context.Context, workspaceID string) (map[string]SyncHashRecord, error)
 }
@@ -109,25 +105,12 @@ type SharedSettingsRecord struct {
 	UpdatedBy string         `json:"updated_by"`
 }
 
-type AssetRecord struct {
-	ID          string    `json:"id"`
-	Path        string    `json:"path"`
-	BytesBase64 string    `json:"bytes_base64,omitempty"`
-	SHA256      string    `json:"sha256,omitempty"`
-	MIME        string    `json:"mime,omitempty"`
-	Rev         int64     `json:"rev"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	UpdatedBy   string    `json:"updated_by"`
-	Deleted     bool      `json:"deleted"`
-}
-
 type Snapshot struct {
-	Meta     WorkspaceMeta          `json:"meta"`
-	Members  map[string]Member      `json:"members"`
-	Notes    map[string]NoteRecord  `json:"notes"`
-	Todos    map[string]TodoRecord  `json:"todos"`
-	Settings map[string]any         `json:"settings"`
-	Assets   map[string]AssetRecord `json:"assets"`
+	Meta     WorkspaceMeta         `json:"meta"`
+	Members  map[string]Member     `json:"members"`
+	Notes    map[string]NoteRecord `json:"notes"`
+	Todos    map[string]TodoRecord `json:"todos"`
+	Settings map[string]any        `json:"settings"`
 }
 
 type Mutation struct {
@@ -137,7 +120,6 @@ type Mutation struct {
 	Note      *NoteRecord           `json:"note,omitempty"`
 	Todo      *TodoRecord           `json:"todo,omitempty"`
 	Settings  *SharedSettingsRecord `json:"settings,omitempty"`
-	Asset     *AssetRecord          `json:"asset,omitempty"`
 	CreatedAt time.Time             `json:"created_at"`
 }
 

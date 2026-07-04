@@ -36,7 +36,6 @@ type view int
 
 const (
 	viewNotes view = iota
-	viewFiles
 	viewPages
 	viewPassword
 	viewTodo
@@ -82,7 +81,6 @@ type terminalApp struct {
 	single                 *tview.TextView
 	helpOverlay            *tview.TextView
 	quitModal              *tview.Modal
-	discardFilesModal      *tview.Modal
 	deleteNoteModal        *tview.Modal
 	deleteNoteFolder       bool
 	openLinksModal         *tview.Modal
@@ -108,7 +106,6 @@ type terminalApp struct {
 	firebaseTodoSyncer     *kokosync.TodoSyncer
 	firebaseNoteSyncer     *kokosync.NoteSyncer
 	firebaseSettingsSyncer *kokosync.SettingsSyncer
-	firebaseAssetSyncer    *kokosync.AssetSyncer
 	openLinks              []string
 	deleteNotePath         string
 	deleteNoteLabel        string
@@ -151,7 +148,6 @@ type recordedKeyEvent struct {
 
 var baseAppTabs = []appTab{
 	{"notes", "Notes", viewNotes, ""},
-	{"files", "Files", viewFiles, ""},
 	{"pages", "Pages", viewPages, ""},
 	{"password", "Password", viewPassword, ""},
 	{"todo", "Todo", viewTodo, ""},
@@ -268,34 +264,12 @@ func (a *terminalApp) initWidgets() {
 			}
 			a.stopTUI()
 		case "Discard":
-			if a.notes != nil {
-				_ = a.notes.DiscardPendingFiles()
-			}
 			a.stopTUI()
 		default:
 			a.cancelShutdown()
 		}
 	})
 	a.pagesRoot.AddPage("quit", a.quitModal, true, false)
-	a.discardFilesModal = tview.NewModal().
-		SetText("Discard staged file changes?").
-		AddButtons([]string{"Discard", "Cancel"})
-	a.discardFilesModal.SetDoneFunc(func(_ int, label string) {
-		switch label {
-		case "Discard":
-			if a.notes != nil {
-				if err := a.notes.DiscardPendingFiles(); err != nil {
-					helpers.StatusBarInst().UpdateStatusBar("Discard staged files failed: " + err.Error())
-				} else {
-					helpers.StatusBarInst().UpdateStatusBar("Discarded staged file changes")
-				}
-			}
-		}
-		if a.pagesRoot != nil {
-			a.pagesRoot.HidePage("discard-files")
-		}
-	})
-	a.pagesRoot.AddPage("discard-files", a.discardFilesModal, true, false)
 	a.deleteNoteModal = tview.NewModal().
 		AddButtons([]string{"Delete", "Cancel"})
 	a.deleteNoteModal.SetDoneFunc(func(_ int, label string) {
@@ -432,7 +406,7 @@ func (a *terminalApp) applyWidgetBackgroundStyle() {
 			box.SetBackgroundColor(background)
 		}
 	}
-	for _, modal := range []*tview.Modal{a.quitModal, a.discardFilesModal, a.deleteNoteModal, a.openLinksModal} {
+	for _, modal := range []*tview.Modal{a.quitModal, a.deleteNoteModal, a.openLinksModal} {
 		if modal != nil {
 			modal.SetBackgroundColor(background)
 			modal.SetTextColor(themeColor(theme.Primary))
@@ -479,12 +453,10 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 			a.requestShutdown()
 			return nil
 		case "help":
-			fmt.Println("views: notes, files, pages, password, todo, sync, settings")
+			fmt.Println("views: notes, pages, password, todo, sync, settings")
 			fmt.Println("save: :w, quit: :q, save and quit: :wq")
 		case "notes":
 			a.view = viewNotes
-		case "files":
-			a.view = viewFiles
 		case "pages":
 			a.view = viewPages
 		case "password":
@@ -526,14 +498,6 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 			handler(event, func(tview.Primitive) {})
 		}
 		return nil
-	}
-	if a.pagesRoot != nil && a.pagesRoot.HasPage("discard-files") {
-		if front, _ := a.pagesRoot.GetFrontPage(); front == "discard-files" && a.discardFilesModal != nil {
-			if handler := a.discardFilesModal.InputHandler(); handler != nil {
-				handler(event, func(tview.Primitive) {})
-			}
-			return nil
-		}
 	}
 	if a.pagesRoot != nil && a.pagesRoot.HasPage("delete-note") {
 		if front, _ := a.pagesRoot.GetFrontPage(); front == "delete-note" && a.deleteNoteModal != nil {
@@ -1173,21 +1137,6 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		a.consumePendingNoteActions()
 		a.scheduleYankHighlightClear()
 		return handled
-	case viewFiles:
-		if !key.Ctrl && key.Name == "D" && a.notes != nil {
-			if !a.notes.FilesDirty {
-				helpers.StatusBarInst().UpdateStatusBar("No staged file changes")
-				return true
-			}
-			if a.pagesRoot != nil {
-				a.pagesRoot.ShowPage("discard-files")
-			}
-			if a.tui != nil && a.discardFilesModal != nil {
-				a.tui.SetFocus(a.discardFilesModal)
-			}
-			return true
-		}
-		return a.notes.HandleFilesKey(key)
 	case viewPages:
 		return a.handlePagesKey(key)
 	case viewPassword:
@@ -1347,8 +1296,6 @@ func (a *terminalApp) wantsQuitOnQ() bool {
 	switch a.view {
 	case viewNotes:
 		return a.notes == nil || !a.notes.IsEditableContext()
-	case viewFiles:
-		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
 	case viewTodo:
@@ -1370,8 +1317,6 @@ func (a *terminalApp) wantsPlainTabAppCycle() bool {
 	switch a.view {
 	case viewNotes:
 		return a.notes == nil || !a.notes.IsEditableContext()
-	case viewFiles:
-		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
 	case viewTodo:
@@ -1390,8 +1335,6 @@ func (a *terminalApp) wantsHelpToggle() bool {
 	switch a.view {
 	case viewNotes:
 		return a.notes == nil || !a.notes.IsEditableContext()
-	case viewFiles:
-		return a.notes == nil || !a.notes.IsFilesEditableContext()
 	case viewPages:
 		return a.pages == nil || !a.pages.IsEditing()
 	case viewTodo:
@@ -2290,8 +2233,6 @@ func (a *terminalApp) refresh() {
 	switch a.view {
 	case viewNotes:
 		a.refreshNotesBody()
-	case viewFiles:
-		a.refreshFilesBody()
 	case viewPages:
 		a.refreshSingle("Pages", a.renderPages(maxInt(3, a.height-10)))
 	case viewPassword:
@@ -2333,8 +2274,6 @@ func (a *terminalApp) viewDirty(v view) bool {
 	switch v {
 	case viewNotes:
 		return a.notes != nil && a.notes.HasDirty()
-	case viewFiles:
-		return a.notes != nil && a.notes.FilesDirty
 	case viewPages:
 		return a.pages != nil && a.pages.Dirty
 	case viewPassword:
@@ -2457,36 +2396,6 @@ func (a *terminalApp) refreshNotesBody() {
 	if previewOuter > 0 {
 		content.AddItem(a.preview, 0, 1, false)
 	}
-
-	a.body.SetDirection(tview.FlexRow)
-	a.body.AddItem(content, 0, 1, false)
-	a.body.AddItem(a.commandBar, 3, 0, false)
-}
-
-func (a *terminalApp) refreshFilesBody() {
-	sidebarOuter := a.notes.SidebarWidth + 2
-	if sidebarOuter <= 2 || sidebarOuter > 122 {
-		sidebarOuter = 30
-	}
-	if sidebarOuter > a.width/3 {
-		sidebarOuter = a.width / 3
-	}
-	if sidebarOuter < 20 {
-		sidebarOuter = 20
-	}
-	bodyHeight := maxInt(3, a.height-6)
-	contentHeight := maxInt(1, bodyHeight-3)
-
-	a.sidebar.SetTitle("Files")
-	a.editor.SetTitle("Details")
-	a.sidebar.SetText(joinTViewLines(a.notes.FileRows(maxInt(1, contentHeight-2))))
-	a.editor.SetText(joinTViewLines(a.notes.FilePreviewRows(maxInt(10, a.width-sidebarOuter-4), maxInt(1, contentHeight-2))))
-	a.commandBar.SetTitle("File Command")
-	a.commandBar.SetText(joinTViewLines([]string{a.notes.FileCommandLineText(maxInt(10, a.width-6))}))
-
-	content := tview.NewFlex().SetDirection(tview.FlexColumn)
-	content.AddItem(a.sidebar, sidebarOuter, 0, false)
-	content.AddItem(a.editor, 0, 1, false)
 
 	a.body.SetDirection(tview.FlexRow)
 	a.body.AddItem(content, 0, 1, false)
@@ -2681,26 +2590,6 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 					col = 0
 				}
 				screen.SetCursorStyle(tcell.CursorStyleSteadyBar)
-				screen.ShowCursor(x+col, y+row)
-				return
-			}
-		}
-		if a.view == viewFiles {
-			if col, ok := a.notes.FileCommandCursor(); ok {
-				x, y, width, _ := a.commandBar.GetInnerRect()
-				if col >= width {
-					col = width - 1
-				}
-				if col < 0 {
-					col = 0
-				}
-				screen.SetCursorStyle(tcell.CursorStyleSteadyBar)
-				screen.ShowCursor(x+col, y)
-				return
-			}
-			if row, col, ok := a.notes.FileCursor(); ok {
-				x, y, _, _ := a.sidebar.GetInnerRect()
-				screen.SetCursorStyle(tcell.CursorStyleSteadyBlock)
 				screen.ShowCursor(x+col, y+row)
 				return
 			}
@@ -3178,9 +3067,6 @@ func (a *terminalApp) saveLocalState() error {
 		if _, err := a.notes.SaveAllDirtyLocal(); err != nil {
 			return err
 		}
-		if _, err := a.notes.SavePendingFiles(); err != nil {
-			return err
-		}
 	}
 	if a.pages != nil && a.pages.Dirty {
 		a.pages.Save()
@@ -3203,7 +3089,6 @@ func (a *terminalApp) saveLocalState() error {
 	a.pushTodosToFirebaseSoon()
 	a.pushNotesToFirebaseSoon()
 	a.pushSettingsToFirebaseSoon()
-	a.pushAssetsToFirebaseSoon()
 	return nil
 }
 
@@ -3266,7 +3151,6 @@ func (a *terminalApp) ensureFirebaseSyncer(ctx context.Context) error {
 	if a.firebaseTodoSyncer == nil ||
 		a.firebaseNoteSyncer == nil ||
 		a.firebaseSettingsSyncer == nil ||
-		a.firebaseAssetSyncer == nil ||
 		a.firebaseTodoSyncer.Session.IDToken == "" ||
 		a.firebaseTodoSyncer.Session.ExpiresAt.Before(time.Now().Add(5*time.Minute)) {
 		return a.configureFirebaseTodoSyncer(ctx)
@@ -3322,13 +3206,8 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 		Session:     session,
 		DeviceID:    "",
 	}
-	a.firebaseAssetSyncer = &kokosync.AssetSyncer{
-		Provider:    provider,
-		WorkspaceID: workspaceID,
-		StatePath:   kokosync.StatePath(),
-		Session:     session,
-		DeviceID:    "",
-	}
+	_ = notes.CleanupManagedAssetDirs(a.notesRootPath())
+	provider.DeleteLegacyAssetsBestEffort(ctx, workspaceID)
 	cfg.WorkspaceID = workspaceID
 	cfg.LastSyncStatus = "ok"
 	cfg.LastSyncMessage = "Firebase sync configured"
@@ -3503,9 +3382,6 @@ func (a *terminalApp) syncToFirebase(ctx context.Context) error {
 	if err := a.pullSettingsFromFirebase(ctx); err != nil {
 		return err
 	}
-	if err := a.pullAssetsFromFirebase(ctx); err != nil {
-		return err
-	}
 	if err := a.pushTodosToFirebase(ctx); err != nil {
 		return err
 	}
@@ -3513,9 +3389,6 @@ func (a *terminalApp) syncToFirebase(ctx context.Context) error {
 		return err
 	}
 	if err := a.pushSettingsToFirebase(ctx); err != nil {
-		return err
-	}
-	if err := a.pushAssetsToFirebase(ctx); err != nil {
 		return err
 	}
 	if settings.Inst().Firebase != nil {
@@ -3752,7 +3625,7 @@ func (a *terminalApp) pullSettingsFromFirebase(ctx context.Context) error {
 		if a.password != nil && !a.viewDirty(viewPassword) {
 			a.password = password.NewModel()
 		}
-		if a.notes != nil && !a.viewDirty(viewNotes) && !a.viewDirty(viewFiles) {
+		if a.notes != nil && !a.viewDirty(viewNotes) {
 			a.notes.Refresh()
 		}
 		a.refresh()
@@ -3765,94 +3638,6 @@ func (a *terminalApp) deferRemoteSettingsApply() bool {
 		return false
 	}
 	return a.hasUnsavedChanges()
-}
-
-func (a *terminalApp) pushAssetsToFirebaseSoon() {
-	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
-	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
-		return
-	}
-	go func() {
-		_ = a.pushAssetsToFirebase(context.Background())
-	}()
-}
-
-func (a *terminalApp) pushAssetsToFirebase(ctx context.Context) error {
-	if err := a.ensureFirebaseSyncer(ctx); err != nil {
-		return err
-	}
-	if a.firebaseAssetSyncer == nil || !a.firebaseAssetSyncer.Ready() {
-		return nil
-	}
-	assets, err := a.localAssetFiles()
-	if err != nil {
-		return err
-	}
-	result, err := a.firebaseAssetSyncer.PushAssets(ctx, assets)
-	if err != nil {
-		return err
-	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = fmt.Sprintf("Firebase assets pushed: %d", result.Pushed)
-		if len(result.Skipped) > 0 {
-			settings.Inst().Firebase.LastSyncMessage += fmt.Sprintf(", skipped %d oversized", len(result.Skipped))
-		}
-		settings.SaveSettingsLocal()
-	}
-	return nil
-}
-
-func (a *terminalApp) pullAssetsFromFirebase(ctx context.Context) error {
-	if err := a.ensureFirebaseSyncer(ctx); err != nil {
-		return err
-	}
-	if a.firebaseAssetSyncer == nil || !a.firebaseAssetSyncer.Ready() {
-		return nil
-	}
-	if a.notes != nil && a.notes.FilesDirty {
-		if settings.Inst().Firebase != nil {
-			settings.Inst().Firebase.LastSyncStatus = "deferred"
-			settings.Inst().Firebase.LastSyncMessage = "Firebase assets pull deferred while local file edits are active"
-			settings.SaveSettingsLocal()
-		}
-		return nil
-	}
-	result, err := a.firebaseAssetSyncer.PullAssets(ctx)
-	if err != nil || !result.Changed {
-		return err
-	}
-	for _, rel := range result.Deletes {
-		if err := os.Remove(a.assetAbsPath(rel)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	for _, asset := range result.Upserts {
-		path := a.assetAbsPath(asset.Path)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, asset.Bytes, 0o644); err != nil {
-			return err
-		}
-	}
-	if err := a.firebaseAssetSyncer.SaveState(result.State); err != nil {
-		return err
-	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase assets pulled"
-		settings.SaveSettingsLocal()
-	}
-	a.queueUIDraw(func() {
-		if a.notes != nil {
-			a.notes.Refresh()
-		}
-		a.refresh()
-	})
-	return nil
 }
 
 func (a *terminalApp) localNoteFiles() ([]kokosync.NoteFile, error) {
@@ -3910,53 +3695,6 @@ func (a *terminalApp) localNoteMap() (map[string]kokosync.LocalNote, error) {
 		}
 	}
 	return out, nil
-}
-
-func (a *terminalApp) localAssetFiles() ([]kokosync.LocalAsset, error) {
-	root := a.notesRootPath()
-	assets := make([]kokosync.LocalAsset, 0)
-	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		rel := kokosync.NormalizeAssetPath(a.noteRelPath(path))
-		if rel == "" || settings.IsTrashRelativePath(rel) || !isManagedAssetRel(rel) {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		assets = append(assets, kokosync.LocalAsset{ID: kokosync.AssetID(rel), Path: rel, Bytes: data, ModTime: info.ModTime()})
-		return nil
-	}); err != nil {
-		if os.IsNotExist(err) {
-			return assets, nil
-		}
-		return nil, err
-	}
-	sort.SliceStable(assets, func(i, j int) bool { return assets[i].Path < assets[j].Path })
-	return assets, nil
-}
-
-func (a *terminalApp) assetAbsPath(rel string) string {
-	return filepath.Join(a.notesRootPath(), filepath.FromSlash(kokosync.NormalizeAssetPath(rel)))
-}
-
-func isManagedAssetRel(rel string) bool {
-	for _, part := range strings.Split(kokosync.NormalizeAssetPath(rel), "/") {
-		if part == "assets" || strings.HasSuffix(part, ".assets") {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *terminalApp) updateOpenCleanNote(rel string, text string) {
@@ -4095,11 +3833,6 @@ func (a *terminalApp) helpText() string {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		return a.notes.HelpText() + " | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
-	case viewFiles:
-		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
-		}
-		return "files: ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | j/k move | / filter | a import into scope | f nested folder | F scope folder | D discard staged | i smart | I link | p image | o open | y copy md | Y copy path | M migrate | : command"
 	case viewPages:
 		if a.tabSelect {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
@@ -4266,27 +3999,6 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: ":recordkeys", desc: "open the recorder tab from Notes and start a timed capture"},
 		{keys: "5-second capture", desc: "record keys and block all other app key bindings while active"},
 		{keys: "status + history", desc: "show latest key details and recent captured events"},
-	})...)
-	lines = append(lines, renderSection("Files:", []helpEntry{
-		{keys: "j/k, arrows", desc: "move selection"},
-		{keys: "enter, l", desc: "toggle folder"},
-		{keys: "/", desc: "filter files"},
-		{keys: "a", desc: "import path(s) into current scope"},
-		{keys: "f", desc: "create nested folder"},
-		{keys: "F", desc: "create scope-root folder"},
-		{keys: "r", desc: "rename selected item"},
-		{keys: "m", desc: "move selected item"},
-		{keys: "d", desc: "delete selected item"},
-		{keys: "D", desc: "discard staged file changes"},
-		{keys: "i", desc: "smart insert selected file into current note"},
-		{keys: "I", desc: "force link insert"},
-		{keys: "p", desc: "force image insert"},
-		{keys: "o", desc: "open selected file externally"},
-		{keys: "y", desc: "copy markdown reference"},
-		{keys: "Y", desc: "copy relative path"},
-		{keys: "M", desc: "confirm loose-file migration"},
-		{keys: ":", desc: "enter file command mode"},
-		{keys: "import | mkdir | rename | move | insert | migrate", desc: "available file commands"},
 	})...)
 	lines = append(lines, renderSection("Pages:", []helpEntry{
 		{keys: "j/k, tab", desc: "move field focus"},

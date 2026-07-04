@@ -123,17 +123,8 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	assetSyncer := kokosync.AssetSyncer{Provider: provider, WorkspaceID: workspaceID, StatePath: kokosync.StatePath(), Session: session}
-	assetFiles, err := app.localAssetFiles()
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	assetResult, err := assetSyncer.PushAssets(context.Background(), assetFiles)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
+	_ = notes.CleanupManagedAssetDirs(app.notesRootPath())
+	provider.DeleteLegacyAssetsBestEffort(context.Background(), workspaceID)
 	settings.Init()
 	settingsSyncer := kokosync.SettingsSyncer{Provider: provider, WorkspaceID: workspaceID, StatePath: kokosync.StatePath(), Session: session}
 	settingsMap, err := currentSettingsMap()
@@ -155,11 +146,7 @@ func runFirebasePushLocalCLI(args []string, stdout io.Writer, stderr io.Writer) 
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "pushed %d todo(s), %d note(s), %d asset(s), and shared settings to %s", len(store.Items), len(noteFiles), assetResult.Pushed, workspaceID)
-	if len(assetResult.Skipped) > 0 {
-		fmt.Fprintf(stdout, " (skipped %d oversized asset(s))", len(assetResult.Skipped))
-	}
-	fmt.Fprintln(stdout)
+	fmt.Fprintf(stdout, "pushed %d todo(s), %d note(s), and shared settings to %s\n", len(store.Items), len(noteFiles), workspaceID)
 	return 0
 }
 
@@ -223,10 +210,9 @@ func runFirebaseMigrateCLI(args []string, stdout io.Writer, stderr io.Writer) in
 	}
 	fmt.Fprintf(
 		stdout,
-		"migrated %d note(s), %d todo(s), %d asset(s), and %d shared settings record(s) from %s to %s\n",
+		"migrated %d note(s), %d todo(s), and %d shared settings record(s) from %s to %s\n",
 		result.Notes,
 		result.Todos,
-		result.Assets,
 		result.Settings,
 		result.SourceWorkspaceID,
 		result.TargetWorkspaceID,

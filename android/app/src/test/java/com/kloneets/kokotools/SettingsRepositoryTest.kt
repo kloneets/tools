@@ -18,7 +18,7 @@ class SettingsRepositoryTest {
                 "spell_check_enabled": true,
                 "spell_dictionaries": ["EN", "lv"]
               },
-              "android_app": {"theme_mode": "dark"},
+              "android_app": {"theme_mode": "dark", "last_screen": "sync"},
               "firebase": {"enabled": true, "realtime": true, "workspace_id": "ws-1", "workspace_name": "Team"},
               "gdrive": {
                 "folder_id": "folder-1",
@@ -38,6 +38,7 @@ class SettingsRepositoryTest {
         assertEquals(true, settings.notesApp.spellCheckEnabled)
         assertEquals(listOf("EN", "lv"), settings.notesApp.spellDictionaries)
         assertEquals(ThemeMode.Dark, settings.androidApp.themeMode)
+        assertEquals("sync", settings.androidApp.lastScreen)
         assertEquals(true, settings.firebase.enabled)
         assertEquals("ws-1", settings.firebase.workspaceId)
     }
@@ -53,7 +54,7 @@ class SettingsRepositoryTest {
                     spellCheckEnabled = true,
                     spellDictionaries = listOf("en", "lv"),
                 ),
-                androidApp = AndroidSettings(themeMode = ThemeMode.Light),
+                androidApp = AndroidSettings(themeMode = ThemeMode.Light, lastScreen = "pages"),
                 firebase = FirebaseSettings(
                     enabled = true,
                     realtime = true,
@@ -73,6 +74,7 @@ class SettingsRepositoryTest {
         assertEquals("en", json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").getString(0))
         assertEquals("lv", json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").getString(1))
         assertEquals("light", json.getJSONObject("android_app").getString("theme_mode"))
+        assertEquals("pages", json.getJSONObject("android_app").getString("last_screen"))
         assertEquals(true, json.getJSONObject("firebase").getBoolean("enabled"))
         assertEquals("project", json.getJSONObject("firebase").getString("project_id"))
         assertEquals("ws", json.getJSONObject("firebase").getString("workspace_id"))
@@ -147,6 +149,7 @@ class SettingsRepositoryTest {
         assertEquals(true, json.getJSONObject("ui").getBoolean("show_notes"))
         assertEquals("tokyo-night", json.getJSONObject("ui").getString("theme"))
         assertEquals("system", json.getJSONObject("android_app").getString("theme_mode"))
+        assertEquals("todo", json.getJSONObject("android_app").getString("last_screen"))
         assertEquals(4, json.getJSONObject("notes_app").getInt("tab_spaces"))
         assertEquals(1000, json.getJSONObject("notes_app").getInt("undo_levels"))
         assertEquals("mobile.md", json.getJSONObject("notes_app").getString("current_note_path"))
@@ -175,7 +178,7 @@ class SettingsRepositoryTest {
                 "sidebar_visible": false,
                 "vim_mode": false
               },
-              "android_app": {"theme_mode": "dark", "unknown_mobile_field": true},
+              "android_app": {"theme_mode": "dark", "last_screen": "notes", "unknown_mobile_field": true},
               "app_window": {"width": 900, "height": 700, "maximized": true},
                 "ui": {"show_pages": false, "show_password": true, "show_notes": true, "theme": "gruvbox"},
               "gdrive": {"enabled": true, "sync_interval_sec": 25, "folder_id": "old", "last_sync_status": "ok"}
@@ -196,6 +199,7 @@ class SettingsRepositoryTest {
         assertEquals("en", json.getJSONObject("notes_app").getJSONArray("spell_dictionaries").getString(0))
         assertEquals("b.md", json.getJSONObject("notes_app").getString("current_note_path"))
         assertEquals("dark", json.getJSONObject("android_app").getString("theme_mode"))
+        assertEquals("notes", json.getJSONObject("android_app").getString("last_screen"))
         assertEquals(true, json.getJSONObject("android_app").getBoolean("unknown_mobile_field"))
         assertEquals(900, json.getJSONObject("app_window").getInt("width"))
         assertEquals("gruvbox", json.getJSONObject("ui").getString("theme"))
@@ -207,6 +211,13 @@ class SettingsRepositoryTest {
         val settings = SettingsRepository.parse("""{"android_app": {"theme_mode": "neon"}}""")
 
         assertEquals(ThemeMode.System, settings.androidApp.themeMode)
+    }
+
+    @Test
+    fun invalidAndroidLastScreenFallsBackToTodo() {
+        val settings = SettingsRepository.parse("""{"android_app": {"last_screen": "password"}}""")
+
+        assertEquals("todo", settings.androidApp.lastScreen)
     }
 
     @Test

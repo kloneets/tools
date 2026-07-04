@@ -52,6 +52,7 @@ class SettingsRepository(private val context: Context) {
                 ),
                 androidApp = AndroidSettings(
                     themeMode = ThemeMode.fromValue(android.optString("theme_mode", ThemeMode.System.value)),
+                    lastScreen = AndroidScreenState.normalize(android.optString("last_screen", AndroidScreenState.TODO)),
                 ),
                 firebase = FirebaseDefaults.applyBundledDefaults(
                     FirebaseSettings(
@@ -93,6 +94,7 @@ class SettingsRepository(private val context: Context) {
 
             val android = root.objectOrPut("android_app")
             android.put("theme_mode", settings.androidApp.themeMode.value)
+            android.put("last_screen", AndroidScreenState.normalize(settings.androidApp.lastScreen))
 
             root.objectOrPut("password_app").apply {
                 putIfMissing("letters", true)
@@ -208,7 +210,8 @@ class SettingsRepository(private val context: Context) {
                 .put(
                     "android_app",
                     JSONObject()
-                        .put("theme_mode", ThemeMode.System.value),
+                        .put("theme_mode", ThemeMode.System.value)
+                        .put("last_screen", AndroidScreenState.TODO),
                 )
                 .put(
                     "app_window",
@@ -292,5 +295,19 @@ object FirebaseDefaults {
             databaseUrl = settings.databaseUrl.ifBlank { defaults.databaseUrl },
             projectId = settings.projectId.ifBlank { defaults.projectId },
         )
+    }
+}
+
+object AndroidScreenState {
+    const val TODO = "todo"
+    const val NOTES = "notes"
+    const val PAGES = "pages"
+    const val SYNC = "sync"
+    const val SETTINGS = "settings"
+
+    private val valid = setOf(TODO, NOTES, PAGES, SYNC, SETTINGS)
+
+    fun normalize(value: String): String {
+        return value.trim().lowercase().takeIf { it in valid } ?: TODO
     }
 }

@@ -55,16 +55,6 @@ const (
 	treeOpenNote
 	treeFolder
 	treeNote
-	treeManagedFolder
-	treeManagedAsset
-)
-
-type fileEntryKind int
-
-const (
-	fileEntryScope fileEntryKind = iota
-	fileEntryFolder
-	fileEntryAsset
 )
 
 type TreeEntry struct {
@@ -74,24 +64,6 @@ type TreeEntry struct {
 	Depth     int
 	Collapsed bool
 	Folder    string
-	Scope     string
-	AssetRel  string
-	Image     bool
-}
-
-type FileEntry struct {
-	Kind       fileEntryKind
-	Path       string
-	RelPath    string
-	Scope      string
-	ScopeLabel string
-	AssetRel   string
-	Label      string
-	Depth      int
-	Collapsed  bool
-	Folder     string
-	Size       int64
-	Image      bool
 }
 
 type editorSnapshot struct {
@@ -148,44 +120,34 @@ type replaceConfirmSession struct {
 }
 
 type Workspace struct {
-	Tree                  []TreeEntry
-	Selection             int
-	BrowserTree           []TreeEntry
-	BrowserSelection      int
-	FileTree              []FileEntry
-	FileSelection         int
-	FileCommand           string
-	FileCommandMode       bool
-	FileFilter            string
-	FileFilterMode        bool
-	FileStatus            string
-	FileScopeOnly         bool
-	FilesDirty            bool
-	PendingMigrationCount int
-	Tabs                  []*Editor
-	Register              vimRegister
-	CurrentTab            int
-	LastAccessedTab       int
-	FocusSidebar          bool
-	SidebarBrowsing       bool
-	BrowserCommandMode    bool
-	BrowserCommand        string
-	SidebarWidth          int
-	SidebarRenderHeight   int
-	PreviewWidth          int
-	EditorRenderWidth     int
-	LastHeight            int
-	EditorHeight          int
-	SelectedFolder        string
-	PreviewHidden         bool
-	pendingOpenLinks      []string
-	pendingRecordKeys     bool
-	pendingQuit           bool
-	pendingQuitForce      bool
-	pendingSaveAll        bool
-	pendingDeletePath     string
-	pendingDeleteLabel    string
-	pendingDeleteFolder   bool
+	Tree                []TreeEntry
+	Selection           int
+	BrowserTree         []TreeEntry
+	BrowserSelection    int
+	Tabs                []*Editor
+	Register            vimRegister
+	CurrentTab          int
+	LastAccessedTab     int
+	FocusSidebar        bool
+	SidebarBrowsing     bool
+	BrowserCommandMode  bool
+	BrowserCommand      string
+	SidebarWidth        int
+	SidebarRenderHeight int
+	PreviewWidth        int
+	EditorRenderWidth   int
+	LastHeight          int
+	EditorHeight        int
+	SelectedFolder      string
+	PreviewHidden       bool
+	pendingOpenLinks    []string
+	pendingRecordKeys   bool
+	pendingQuit         bool
+	pendingQuitForce    bool
+	pendingSaveAll      bool
+	pendingDeletePath   string
+	pendingDeleteLabel  string
+	pendingDeleteFolder bool
 }
 
 var currentNote *Workspace
@@ -204,7 +166,9 @@ func NewWorkspace() (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = discardManagedFilesDraft()
+	if err := CleanupManagedAssetDirs(notesDir()); err != nil {
+		return nil, err
+	}
 	ws := &Workspace{
 		FocusSidebar:    false,
 		CurrentTab:      -1,
@@ -212,16 +176,7 @@ func NewWorkspace() (*Workspace, error) {
 		PreviewHidden:   settings.Inst().NotesApp.PreviewHidden,
 	}
 	ws.SidebarWidth = normalizeSidebarWidth(settings.PersistedNotesEditorWidth())
-	if pending, err := countLooseManagedFiles(); err != nil {
-		return nil, err
-	} else {
-		ws.PendingMigrationCount = pending
-		if pending > 0 {
-			ws.FileStatus = fmt.Sprintf("%d loose file(s) outside assets/; press M to migrate", pending)
-		}
-	}
 	ws.refreshTree()
-	ws.refreshFiles()
 	if !ws.restoreOpenTabs(files) && len(files) > 0 {
 		if err := ws.Open(files[0].Path); err != nil {
 			return nil, err
@@ -276,7 +231,6 @@ func (w *Workspace) refreshTree() {
 func (w *Workspace) refreshBrowserTree() {
 	files, _ := listNoteFiles()
 	folders, _ := listNoteFolders()
-	managedEntries, _ := listManagedFiles()
 	selectedKind := treeSectionHeader
 	selectedPath := ""
 	selectedFolder := ""
@@ -288,13 +242,9 @@ func (w *Workspace) refreshBrowserTree() {
 		selectedLabel = entry.Label
 	}
 	collapsed := make(map[string]bool)
-	managedCollapsed := make(map[string]bool)
 	for _, entry := range w.BrowserTree {
 		if entry.Kind == treeFolder && entry.Collapsed {
 			collapsed[entry.Folder] = true
-		}
-		if entry.Kind == treeManagedFolder && entry.Collapsed {
-			managedCollapsed[entry.Path] = true
 		}
 	}
 	baseEntries := make([]TreeEntry, 0, len(files)+len(folders))
@@ -321,15 +271,7 @@ func (w *Workspace) refreshBrowserTree() {
 		right := treeSortKey(baseEntries[j])
 		return left < right
 	})
-	managedByScope := browserManagedEntriesByScope(managedEntries, managedCollapsed)
-	entries := make([]TreeEntry, 0, len(baseEntries)+len(managedEntries))
-	for _, entry := range baseEntries {
-		entries = append(entries, entry)
-		if entry.Kind != treeNote {
-			continue
-		}
-		entries = append(entries, managedByScope[noteRelPath(entry.Path)]...)
-	}
+	entries := append([]TreeEntry(nil), baseEntries...)
 	w.BrowserTree = entries
 	for i, entry := range w.BrowserTree {
 		if entry.Kind != selectedKind {
@@ -395,92 +337,7 @@ func clampBrowserSelectionByFolder(entries []TreeEntry, selection int, folder st
 	return selection
 }
 
-func browserManagedEntriesByScope(files []FileEntry, collapsed map[string]bool) map[string][]TreeEntry {
-	byScope := make(map[string][]TreeEntry)
-	for _, file := range files {
-		if file.Kind == fileEntryScope {
-			continue
-		}
-		if isManagedHiddenByCollapsed(file.Path, collapsed) {
-			continue
-		}
-		depth := folderDepth(file.Scope) + 1 + strings.Count(filepath.ToSlash(file.AssetRel), "/")
-		kind := treeManagedAsset
-		if file.Kind == fileEntryFolder {
-			kind = treeManagedFolder
-		}
-		byScope[file.Scope] = append(byScope[file.Scope], TreeEntry{
-			Kind:      kind,
-			Path:      file.Path,
-			Label:     file.Label,
-			Depth:     depth,
-			Collapsed: collapsed[file.Path],
-			Scope:     file.Scope,
-			AssetRel:  file.AssetRel,
-			Image:     file.Image,
-		})
-	}
-	return byScope
-}
-
-func isManagedHiddenByCollapsed(path string, collapsed map[string]bool) bool {
-	for parent, isCollapsed := range collapsed {
-		if !isCollapsed || parent == path {
-			continue
-		}
-		if strings.HasPrefix(path, parent+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
-}
-
 func (w *Workspace) refreshFiles() {
-	entries, _ := listManagedFiles()
-	entries = w.refreshFilesWithFilter(entries)
-	collapsed := make(map[string]bool)
-	for _, entry := range w.FileTree {
-		if (entry.Kind == fileEntryFolder || entry.Kind == fileEntryScope) && entry.Collapsed {
-			collapsed[entry.Path] = true
-		}
-	}
-	for i := range entries {
-		if entries[i].Kind == fileEntryFolder || entries[i].Kind == fileEntryScope {
-			entries[i].Collapsed = collapsed[entries[i].Path]
-		}
-	}
-	filtered := make([]FileEntry, 0, len(entries))
-	for _, entry := range entries {
-		hide := false
-		for parent, isCollapsed := range collapsed {
-			if !isCollapsed || parent == entry.Path {
-				continue
-			}
-			if strings.HasPrefix(entry.Path, parent+string(filepath.Separator)) {
-				hide = true
-				break
-			}
-		}
-		if hide {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	sort.SliceStable(filtered, func(i, j int) bool {
-		left := filepath.ToSlash(filtered[i].RelPath)
-		right := filepath.ToSlash(filtered[j].RelPath)
-		if left == right && filtered[i].Kind != filtered[j].Kind {
-			return filtered[i].Kind == fileEntryFolder
-		}
-		return left < right
-	})
-	w.FileTree = filtered
-	if w.FileSelection >= len(w.FileTree) {
-		w.FileSelection = len(w.FileTree) - 1
-	}
-	if w.FileSelection < 0 {
-		w.FileSelection = 0
-	}
 }
 
 func treeSortKey(entry TreeEntry) string {
@@ -793,42 +650,12 @@ func (w *Workspace) HasDirty() bool {
 	if w == nil {
 		return false
 	}
-	if w.FilesDirty {
-		return true
-	}
 	for _, ed := range w.Tabs {
 		if ed != nil && ed.Dirty {
 			return true
 		}
 	}
 	return false
-}
-
-func (w *Workspace) SavePendingFiles() (bool, error) {
-	if w == nil || !w.FilesDirty {
-		return false, nil
-	}
-	if err := commitManagedFilesDraft(); err != nil {
-		return false, err
-	}
-	w.FilesDirty = false
-	if pending, err := countLooseManagedFiles(); err == nil {
-		w.PendingMigrationCount = pending
-	}
-	w.refreshFiles()
-	return true, nil
-}
-
-func (w *Workspace) DiscardPendingFiles() error {
-	if err := discardManagedFilesDraft(); err != nil {
-		return err
-	}
-	w.FilesDirty = false
-	if pending, err := countLooseManagedFiles(); err == nil {
-		w.PendingMigrationCount = pending
-	}
-	w.refreshFiles()
-	return nil
 }
 
 func (w *Workspace) saveAllDirty(sync bool) (bool, error) {
@@ -1108,16 +935,8 @@ func (w *Workspace) RenameCurrentNote(name string) error {
 		ed.Title = noteTitleFromPath(target)
 		return nil
 	}
-	oldAssetPath := noteAssetsPath(ed.Path)
-	newAssetPath := noteAssetsPath(target)
 	if err := os.Rename(ed.Path, target); err != nil {
 		return err
-	}
-	if _, err := os.Stat(oldAssetPath); err == nil {
-		renamedAssetPath := uniquePathLike(newAssetPath, oldAssetPath, true)
-		if renameErr := os.Rename(oldAssetPath, renamedAssetPath); renameErr != nil {
-			return renameErr
-		}
 	}
 	ed.Path = target
 	ed.Title = noteTitleFromPath(target)
@@ -1172,16 +991,8 @@ func (w *Workspace) renameNoteByPath(path string, name string) error {
 	if target == path {
 		return nil
 	}
-	oldAssetPath := noteAssetsPath(path)
-	newAssetPath := noteAssetsPath(target)
 	if err := os.Rename(path, target); err != nil {
 		return err
-	}
-	if _, err := os.Stat(oldAssetPath); err == nil {
-		renamedAssetPath := uniquePathLike(newAssetPath, oldAssetPath, true)
-		if renameErr := os.Rename(oldAssetPath, renamedAssetPath); renameErr != nil {
-			return renameErr
-		}
 	}
 	for _, tab := range w.Tabs {
 		if tab == nil || tab.Path != path {
@@ -1213,16 +1024,8 @@ func (w *Workspace) moveNoteByPath(path string, rawTarget string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	oldAssetPath := noteAssetsPath(path)
-	newAssetPath := noteAssetsPath(target)
 	if err := os.Rename(path, target); err != nil {
 		return err
-	}
-	if _, err := os.Stat(oldAssetPath); err == nil {
-		renamedAssetPath := uniquePathLike(newAssetPath, oldAssetPath, true)
-		if renameErr := os.Rename(oldAssetPath, renamedAssetPath); renameErr != nil {
-			return renameErr
-		}
 	}
 	for _, tab := range w.Tabs {
 		if tab == nil || tab.Path != path {
@@ -1473,20 +1276,6 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 				}
 			}
 			w.refreshBrowserTree()
-			return true
-		}
-		if w.SidebarBrowsing && entry.Kind == treeManagedFolder {
-			for i := range w.BrowserTree {
-				if w.BrowserTree[i].Kind == treeManagedFolder && w.BrowserTree[i].Path == entry.Path {
-					w.BrowserTree[i].Collapsed = !w.BrowserTree[i].Collapsed
-					break
-				}
-			}
-			w.refreshBrowserTree()
-			return true
-		}
-		if w.SidebarBrowsing && entry.Kind == treeManagedAsset {
-			helpers.OpenURI(pathToFileURI(entry.Path))
 			return true
 		}
 		_ = w.Open(entry.Path)
@@ -2077,16 +1866,10 @@ func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
 			if autoCompleteActive(ed, autoCompleteSpell) {
 				return cycleSpellSuggestions(ed, -1)
 			}
-			if autoCompleteActive(ed, autoCompletePath) {
-				return completeEditorPathReferenceBackward(w, ed)
-			}
 			return outdentListItem(ed)
 		}
 		if autoCompleteActive(ed, autoCompleteSpell) {
 			return cycleSpellSuggestions(ed, 1)
-		}
-		if completeEditorPathReference(w, ed) {
-			return true
 		}
 		if indentListItem(ed) {
 			return true
@@ -2578,41 +2361,11 @@ func autoCompleteStatusLine(ed *Editor, width int) string {
 	if ed == nil {
 		return ""
 	}
-	if len(ed.AutoCompleteMatches) > 0 {
-		if ed.AutoCompleteKind == autoCompleteSpell {
-			return ""
-		}
-		current := ed.AutoCompleteMatches[ed.AutoCompleteIndex%len(ed.AutoCompleteMatches)]
-		extra := len(ed.AutoCompleteMatches) - 1
-		label := "path complete: "
-		line := label + current
-		if extra > 0 {
-			line += fmt.Sprintf(" (+%d more, tab cycles)", extra)
-		}
-		return helpers.TruncateANSI(line, width)
-	}
-	ctx, ok := markdownPathCompletionContext(ed.Text, ed.Cursor)
-	if !ok {
-		return ""
-	}
-	matches := managedReferenceCandidates(ed.Path, ctx.Prefix)
-	if len(matches) == 0 {
-		return ""
-	}
-	show := matches
-	if len(show) > 3 {
-		show = show[:3]
-	}
-	line := "path suggestions: " + strings.Join(show, " | ")
-	if len(matches) > 3 {
-		line += fmt.Sprintf(" (+%d more)", len(matches)-3)
-	}
-	line += " | tab complete"
-	return helpers.TruncateANSI(line, width)
+	_ = width
+	return ""
 }
 
 const (
-	autoCompletePath  = "path"
 	autoCompleteSpell = "spell"
 )
 
@@ -4470,17 +4223,11 @@ func (w *Workspace) renderBrowserTree(height int, width int) []string {
 		}
 		icon := "*"
 		switch entry.Kind {
-		case treeFolder, treeManagedFolder:
+		case treeFolder:
 			if entry.Collapsed {
 				icon = "+"
 			} else {
 				icon = "-"
-			}
-		case treeManagedAsset:
-			if entry.Image {
-				icon = "img"
-			} else {
-				icon = "file"
 			}
 		}
 		label := strings.Repeat("  ", entry.Depth) + icon + " " + entry.Label

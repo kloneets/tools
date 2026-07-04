@@ -69,7 +69,7 @@ func TestHelpTextForPagesEditMode(t *testing.T) {
 func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 	app := &terminalApp{view: viewSync}
 	got := app.renderTabBar()
-	if !strings.Contains(got, "6:Sync") {
+	if !strings.Contains(got, "5:Sync") {
 		t.Fatalf("renderTabBar() = %q, want sync tab label", got)
 	}
 	if !strings.Contains(got, themeMarkupFGStyleBG(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG, ":b")) {
@@ -80,7 +80,7 @@ func TestRenderTabBarHighlightsActiveView(t *testing.T) {
 func TestRenderTabBarShowsRecorderWhenVisible(t *testing.T) {
 	app := &terminalApp{view: viewRecorder, recorderVisible: true}
 	got := app.renderTabBar()
-	if !strings.Contains(got, "8:Recorder") {
+	if !strings.Contains(got, "7:Recorder") {
 		t.Fatalf("renderTabBar() = %q, want recorder tab label", got)
 	}
 }
@@ -88,12 +88,12 @@ func TestRenderTabBarShowsRecorderWhenVisible(t *testing.T) {
 func TestRenderTabBarUsesConfiguredTabOrder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	settings.Inst().UI.TabOrder = []string{"settings", "notes", "todo", "files", "pages", "password", "sync"}
+	settings.Inst().UI.TabOrder = []string{"settings", "notes", "todo", "pages", "password", "sync"}
 	app := &terminalApp{view: viewTodo}
 
 	got := app.renderTabBar()
 
-	for _, want := range []string{"1:Settings", "2:Notes", "3:Todo", "7:Sync"} {
+	for _, want := range []string{"1:Settings", "2:Notes", "3:Todo", "6:Sync"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("renderTabBar() = %q, want %q", got, want)
 		}
@@ -106,20 +106,20 @@ func TestRenderTabBarUsesConfiguredTabOrder(t *testing.T) {
 func TestVisibleAppTabsKeepsRecorderLastAfterConfiguredOrder(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	settings.Inst().UI.TabOrder = []string{"settings", "notes", "todo", "files", "pages", "password", "sync"}
+	settings.Inst().UI.TabOrder = []string{"settings", "notes", "todo", "pages", "password", "sync"}
 	app := &terminalApp{view: viewRecorder, recorderVisible: true}
 
 	tabs := app.visibleAppTabs()
 
-	if got := tabs[len(tabs)-1]; got.view != viewRecorder || got.key != "8" {
-		t.Fatalf("last tab = %#v, want recorder with key 8", got)
+	if got := tabs[len(tabs)-1]; got.view != viewRecorder || got.key != "7" {
+		t.Fatalf("last tab = %#v, want recorder with key 7", got)
 	}
 }
 
 func TestDefaultAppViewUsesFirstConfiguredTab(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
-	settings.Inst().UI.TabOrder = []string{"todo", "notes", "files", "pages", "password", "sync", "settings"}
+	settings.Inst().UI.TabOrder = []string{"todo", "notes", "pages", "password", "sync", "settings"}
 
 	if got := defaultAppView(); got != viewTodo {
 		t.Fatalf("defaultAppView() = %v, want %v", got, viewTodo)
@@ -638,7 +638,7 @@ func TestHandleGlobalKeyActivatesTabSelectOnCtrlT(t *testing.T) {
 
 func TestHandleGlobalKeySwitchesTabAfterTabSelect(t *testing.T) {
 	app := &terminalApp{view: viewNotes, tabSelect: true}
-	if !app.handleGlobalKey(notes.Key{Name: "4", Rune: '4'}) {
+	if !app.handleGlobalKey(notes.Key{Name: "3", Rune: '3'}) {
 		t.Fatal("handleGlobalKey() = false, want true for selected tab digit")
 	}
 	if app.view != viewPassword {
@@ -651,7 +651,7 @@ func TestHandleGlobalKeySwitchesTabAfterTabSelect(t *testing.T) {
 
 func TestHandleGlobalKeyCtrlNumberSwitchesTabDirectly(t *testing.T) {
 	app := &terminalApp{view: viewNotes, tabSelect: true}
-	if !app.handleGlobalKey(notes.Key{Name: "6", Rune: '6', Ctrl: true}) {
+	if !app.handleGlobalKey(notes.Key{Name: "5", Rune: '5', Ctrl: true}) {
 		t.Fatal("handleGlobalKey() = false, want true for ctrl+number")
 	}
 	if app.view != viewSync {
@@ -664,8 +664,8 @@ func TestHandleGlobalKeyCtrlNumberSwitchesTabDirectly(t *testing.T) {
 
 func TestHandleGlobalKeyCtrlNumberSwitchesRecorderTabWhenVisible(t *testing.T) {
 	app := &terminalApp{view: viewNotes, recorderVisible: true}
-	if !app.handleGlobalKey(notes.Key{Name: "8", Rune: '8', Ctrl: true}) {
-		t.Fatal("handleGlobalKey() = false, want true for ctrl+8")
+	if !app.handleGlobalKey(notes.Key{Name: "7", Rune: '7', Ctrl: true}) {
+		t.Fatal("handleGlobalKey() = false, want true for ctrl+7")
 	}
 	if app.view != viewRecorder {
 		t.Fatalf("view = %v, want %v", app.view, viewRecorder)
@@ -899,8 +899,8 @@ func TestHandleGlobalKeyCtrlTabCyclesAppTabs(t *testing.T) {
 	if !app.handleGlobalKey(notes.Key{Name: "tab", Ctrl: true}) {
 		t.Fatal("handleGlobalKey() second = false, want true for ctrl+tab")
 	}
-	if app.view != viewFiles {
-		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	if app.view != viewPages {
+		t.Fatalf("view = %v, want %v", app.view, viewPages)
 	}
 }
 
@@ -913,8 +913,8 @@ func TestHandleGlobalKeyPlainTabFallbackCyclesOutsideEditing(t *testing.T) {
 	if !app.handleGlobalKey(notes.Key{Name: "tab"}) {
 		t.Fatal("handleGlobalKey(tab) = false, want true for fallback app tab cycle")
 	}
-	if app.view != viewFiles {
-		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	if app.view != viewPages {
+		t.Fatalf("view = %v, want %v", app.view, viewPages)
 	}
 	if ws.FocusSidebar {
 		t.Fatal("FocusSidebar = true, want tab fallback to avoid sidebar focus")
@@ -990,8 +990,8 @@ func TestCaptureInputCtrlTabCSIuCyclesAppTabs(t *testing.T) {
 			t.Fatalf("captureInput(%v) returned event, want consumed", event)
 		}
 	}
-	if app.view != viewFiles {
-		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	if app.view != viewPages {
+		t.Fatalf("view = %v, want %v", app.view, viewPages)
 	}
 }
 
@@ -1082,8 +1082,8 @@ func TestAppTabAtColumnUsesRenderedTabTargets(t *testing.T) {
 		t.Fatalf("appTabAtColumn(separator) = %v, true; want no target", target)
 	}
 	target, ok = app.appTabAtColumn(len(" 1:Notes ") + 1)
-	if !ok || target != viewFiles {
-		t.Fatalf("appTabAtColumn(files start) = %v, %v; want files", target, ok)
+	if !ok || target != viewPages {
+		t.Fatalf("appTabAtColumn(pages start) = %v, %v; want pages", target, ok)
 	}
 }
 
@@ -1196,8 +1196,8 @@ func TestHandleGlobalKeyMovesTabSelectionWithArrows(t *testing.T) {
 	if !app.handleGlobalKey(notes.Key{Name: "right"}) {
 		t.Fatal("handleGlobalKey() = false, want true for right in tab select")
 	}
-	if app.view != viewFiles {
-		t.Fatalf("view = %v, want %v", app.view, viewFiles)
+	if app.view != viewPages {
+		t.Fatalf("view = %v, want %v", app.view, viewPages)
 	}
 	if !app.tabSelect {
 		t.Fatal("tabSelect = false, want true while moving through tab bar")
@@ -1419,8 +1419,8 @@ func TestHandleSettingsKeyEditsTabOrder(t *testing.T) {
 	if !app.handleSettingsKey(notes.Key{Name: "K", Rune: 'K', Shift: true}) {
 		t.Fatal("handleSettingsKey(K) = false, want true")
 	}
-	if got := settings.Inst().UI.TabOrder; len(got) < 2 || got[0] != "files" || got[1] != "notes" {
-		t.Fatalf("TabOrder = %v, want files moved before notes", got)
+	if got := settings.Inst().UI.TabOrder; len(got) < 2 || got[0] != "pages" || got[1] != "notes" {
+		t.Fatalf("TabOrder = %v, want pages moved before notes", got)
 	}
 	if !app.settingsDirty {
 		t.Fatal("settingsDirty = false, want true")
@@ -1435,7 +1435,7 @@ func TestHandleSettingsKeyEditsTabOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(settings.json) error = %v", err)
 	}
-	if !strings.Contains(string(data), `"tab_order":["files","notes"`) {
+	if !strings.Contains(string(data), `"tab_order":["pages","notes"`) {
 		t.Fatalf("settings file = %q, want persisted tab order", string(data))
 	}
 }
@@ -1682,9 +1682,6 @@ func TestRenderHelpOverlayIncludesBottomSections(t *testing.T) {
 	if !strings.Contains(got, "Notes command:") {
 		t.Fatalf("renderHelpOverlay() missing notes command section: %q", got)
 	}
-	if !strings.Contains(got, "Files:") {
-		t.Fatalf("renderHelpOverlay() missing files section: %q", got)
-	}
 	if !strings.Contains(got, "Settings:") {
 		t.Fatalf("renderHelpOverlay() missing settings section: %q", got)
 	}
@@ -1763,27 +1760,6 @@ func TestWantsQuitOnQ(t *testing.T) {
 	if !app.wantsQuitOnQ() {
 		t.Fatal("wantsQuitOnQ() = false, want true when pages are not editing")
 	}
-	app.view = viewFiles
-	ws.FileCommandMode = true
-	if app.wantsQuitOnQ() {
-		t.Fatal("wantsQuitOnQ() = true, want false while editing files command")
-	}
-}
-
-func TestHandleGlobalKeyRoutesToFilesView(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := notes.NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &terminalApp{view: viewFiles, notes: ws}
-	if !app.handleGlobalKey(notes.Key{Name: "a", Rune: 'a'}) {
-		t.Fatal("handleGlobalKey() = false, want file command activation")
-	}
-	if !ws.FileCommandMode || ws.FileCommand != "import " {
-		t.Fatalf("files command = %q mode=%t, want import prompt", ws.FileCommand, ws.FileCommandMode)
-	}
 }
 
 func TestHandleGlobalKeyEnterOnOpenLinksCommandShowsModal(t *testing.T) {
@@ -1852,23 +1828,6 @@ func TestOpenLinksModalOpenAllUsesURIOpener(t *testing.T) {
 	}
 }
 
-func TestHelpTextForFilesIncludesScopeFolderShortcut(t *testing.T) {
-	app := &terminalApp{view: viewFiles}
-	got := app.helpText()
-	if !strings.Contains(got, "F scope folder") {
-		t.Fatalf("helpText() = %q, want scope folder shortcut", got)
-	}
-	if !strings.Contains(got, "o open") {
-		t.Fatalf("helpText() = %q, want open shortcut", got)
-	}
-	if !strings.Contains(got, "I link") || !strings.Contains(got, "p image") {
-		t.Fatalf("helpText() = %q, want insert override shortcuts", got)
-	}
-	if !strings.Contains(got, "D discard staged") {
-		t.Fatalf("helpText() = %q, want staged discard shortcut", got)
-	}
-}
-
 func TestShutdownAndStopDoesNotSyncOnClose(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1927,12 +1886,6 @@ func TestRenderTabBarShowsDirtyMarkers(t *testing.T) {
 	if !strings.Contains(got, "1:Notes*") {
 		t.Fatalf("renderTabBar() = %q, want notes dirty marker", got)
 	}
-	ws.ActiveEditor().Dirty = false
-	ws.FilesDirty = true
-	got = app.renderTabBar()
-	if !strings.Contains(got, "2:Files*") {
-		t.Fatalf("renderTabBar() = %q, want files dirty marker", got)
-	}
 }
 
 func TestFormatTimestampOrNever(t *testing.T) {
@@ -1942,28 +1895,6 @@ func TestFormatTimestampOrNever(t *testing.T) {
 	}
 	if got := formatTimestampOrNever(""); got != "never" {
 		t.Fatalf("formatTimestampOrNever(\"\") = %q, want never", got)
-	}
-}
-
-func TestHandleGlobalKeyFilesDiscardShowsConfirmation(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := notes.NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws.FilesDirty = true
-	app := &terminalApp{view: viewFiles, notes: ws}
-	app.initWidgets()
-	if !app.handleGlobalKey(notes.Key{Name: "D", Rune: 'D', Shift: true}) {
-		t.Fatal("handleGlobalKey(D) = false, want true")
-	}
-	front, _ := app.pagesRoot.GetFrontPage()
-	if front != "discard-files" {
-		t.Fatalf("front page = %q, want discard-files", front)
-	}
-	if !ws.FilesDirty {
-		t.Fatal("FilesDirty = false before confirmation, want staged changes preserved")
 	}
 }
 

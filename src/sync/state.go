@@ -21,7 +21,6 @@ type State struct {
 	Notes          map[string]int64     `json:"notes"`
 	NoteHashes     map[string]string    `json:"note_hashes,omitempty"`
 	Todos          map[string]int64     `json:"todos"`
-	Assets         map[string]int64     `json:"assets,omitempty"`
 	SettingsRev    int64                `json:"settings_rev,omitempty"`
 	SettingsHash   string               `json:"settings_hash,omitempty"`
 	SyncHashes     map[string]HashState `json:"sync_hashes,omitempty"`
@@ -122,7 +121,6 @@ func defaultState() State {
 		Notes:      map[string]int64{},
 		NoteHashes: map[string]string{},
 		Todos:      map[string]int64{},
-		Assets:     map[string]int64{},
 		SyncHashes: map[string]HashState{},
 	}
 }
@@ -142,9 +140,6 @@ func normalizeState(state *State) {
 	}
 	if state.Todos == nil {
 		state.Todos = map[string]int64{}
-	}
-	if state.Assets == nil {
-		state.Assets = map[string]int64{}
 	}
 	if state.SyncHashes == nil {
 		state.SyncHashes = map[string]HashState{}

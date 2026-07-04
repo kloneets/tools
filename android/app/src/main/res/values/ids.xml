@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <item name="tab_notes" type="id" />
-    <item name="tab_assets" type="id" />
     <item name="tab_pages" type="id" />
     <item name="tab_todo" type="id" />
     <item name="tab_sync" type="id" />
@@ -22,9 +21,6 @@
     <item name="note_save" type="id" />
     <item name="note_delete" type="id" />
     <item name="note_sync" type="id" />
-    <item name="asset_list" type="id" />
-    <item name="asset_import" type="id" />
-    <item name="asset_refresh" type="id" />
     <item name="pages_first" type="id" />
     <item name="pages_read" type="id" />
     <item name="pages_second" type="id" />

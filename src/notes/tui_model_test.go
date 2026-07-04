@@ -385,7 +385,7 @@ func TestDeleteFolderByRelRemovesFolderAndOpenTabs(t *testing.T) {
 	}
 }
 
-func TestBrowserRenameNoteRenamesFileAssetsAndOpenTab(t *testing.T) {
+func TestBrowserRenameNoteUpdatesOpenTab(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	w, err := NewWorkspace()
@@ -393,10 +393,6 @@ func TestBrowserRenameNoteRenamesFileAssetsAndOpenTab(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldPath := w.ActiveEditor().Path
-	oldAssets := noteAssetsPath(oldPath)
-	if err := os.MkdirAll(oldAssets, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	w.FocusSidebar = true
 	w.SidebarBrowsing = true
 	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeNote, oldPath, "")
@@ -424,9 +420,6 @@ func TestBrowserRenameNoteRenamesFileAssetsAndOpenTab(t *testing.T) {
 	}
 	if got := w.ActiveEditor(); got == nil || got.Path != newPath || got.Title != "Renamed" {
 		t.Fatalf("active editor = %#v, want renamed note", got)
-	}
-	if _, err := os.Stat(noteAssetsPath(newPath)); err != nil {
-		t.Fatalf("renamed assets missing: %v", err)
 	}
 }
 
@@ -497,19 +490,9 @@ func TestBrowserMoveStartsCommandForNotesAndFoldersOnly(t *testing.T) {
 		t.Fatal("HandleKey(m folder) = false, want move command")
 	}
 
-	w.BrowserCommandMode = false
-	w.BrowserCommand = ""
-	w.BrowserTree = []TreeEntry{{Kind: treeManagedAsset, Path: "/tmp/image.png", Label: "image.png"}}
-	w.BrowserSelection = 0
-	if w.HandleKey(Key{Name: "m", Rune: 'm'}) {
-		t.Fatal("HandleKey(m managed asset) = true, want false")
-	}
-	if w.BrowserCommandMode || w.BrowserCommand != "" {
-		t.Fatalf("BrowserCommand = mode:%t command:%q, want unchanged", w.BrowserCommandMode, w.BrowserCommand)
-	}
 }
 
-func TestBrowserMoveNoteMovesAssetsOpenTabAndRenames(t *testing.T) {
+func TestBrowserMoveNoteUpdatesOpenTabAndRenames(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	w, err := NewWorkspace()
@@ -517,13 +500,6 @@ func TestBrowserMoveNoteMovesAssetsOpenTabAndRenames(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldPath := w.ActiveEditor().Path
-	oldAssets := noteAssetsPath(oldPath)
-	if err := os.MkdirAll(oldAssets, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(oldAssets, "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	w.FocusSidebar = true
 	w.SidebarBrowsing = true
@@ -538,9 +514,6 @@ func TestBrowserMoveNoteMovesAssetsOpenTabAndRenames(t *testing.T) {
 	}
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Fatalf("old note stat err = %v, want missing", err)
-	}
-	if _, err := os.Stat(filepath.Join(noteAssetsPath(newPath), "diagram.png")); err != nil {
-		t.Fatalf("moved asset missing: %v", err)
 	}
 	if got := w.ActiveEditor(); got == nil || got.Path != newPath || got.Title != "TODO" {
 		t.Fatalf("active editor = %#v, want moved TODO note", got)
@@ -634,57 +607,6 @@ func TestBrowserMoveFolderRejectsDescendantTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(noteFolderPath("Projects")); err != nil {
 		t.Fatalf("Projects folder missing after rejected move: %v", err)
-	}
-}
-
-func TestBrowserRowsShowManagedFilesUnderNote(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	w, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	notePath := w.ActiveEditor().Path
-	assetDir := noteAssetsPath(notePath)
-	if err := os.MkdirAll(filepath.Join(assetDir, "Images"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(assetDir, "Images", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	w.refreshTree()
-	w.FocusSidebar = true
-	w.SidebarBrowsing = true
-	rows := strings.Join(w.BrowserRows(120, 20), "\n")
-	if !strings.Contains(rows, "Images") || !strings.Contains(rows, "diagram.png") {
-		t.Fatalf("BrowserRows() = %q, want managed folder and asset", rows)
-	}
-}
-
-func TestBrowserEnterTogglesManagedFolder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	w, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	assetDir := noteAssetsPath(w.ActiveEditor().Path)
-	if err := os.MkdirAll(filepath.Join(assetDir, "Images"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(assetDir, "Images", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	w.refreshTree()
-	w.FocusSidebar = true
-	w.SidebarBrowsing = true
-	w.BrowserSelection = findTreeEntryIndex(t, w.BrowserTree, treeManagedFolder, filepath.Join(assetDir, "Images"), "")
-	if !w.HandleKey(Key{Name: "enter"}) {
-		t.Fatal("HandleKey(enter) = false, want toggle managed folder")
-	}
-	rows := strings.Join(w.BrowserRows(120, 20), "\n")
-	if strings.Contains(rows, "diagram.png") {
-		t.Fatalf("BrowserRows() = %q, want collapsed managed asset hidden", rows)
 	}
 }
 
@@ -1302,427 +1224,6 @@ func TestRenderEditorPaneHighlightsPartialLiveSubstituteCommand(t *testing.T) {
 	}
 }
 
-func TestListManagedFilesSkipsNotesAndIncludesAssets(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := listManagedFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundFolder := false
-	foundAsset := false
-	for _, entry := range entries {
-		if entry.Kind == fileEntryScope && entry.Scope == filepath.Join("Work", "Plan.md") {
-			foundFolder = true
-		}
-		if entry.Kind == fileEntryAsset && filepath.ToSlash(entry.RelPath) == "Work/Plan.assets/diagram.png" {
-			foundAsset = true
-		}
-		if entry.Kind == fileEntryAsset && strings.HasSuffix(entry.RelPath, "Plan.md") {
-			t.Fatalf("listManagedFiles() should skip notes, got %#v", entry)
-		}
-	}
-	if !foundFolder || !foundAsset {
-		t.Fatalf("listManagedFiles() missing folder or asset: %#v", entries)
-	}
-}
-
-func TestInsertSelectedFileReferenceUsesSmartMarkdown(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	noteTitle := ws.ActiveEditor().Title
-	if err := os.MkdirAll(filepath.Join(notesDir(), noteTitle+"."+managedAssetsDir), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), noteTitle+"."+managedAssetsDir, "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws.refreshFiles()
-	for i, entry := range ws.FileTree {
-		if entry.Kind == fileEntryAsset && entry.Label == "diagram.png" {
-			ws.FileSelection = i
-			break
-		}
-	}
-	if err := ws.InsertSelectedFileReference(); err != nil {
-		t.Fatal(err)
-	}
-	wantRef := fmt.Sprintf("![diagram](%s.assets/diagram.png)", noteTitle)
-	if got := ws.ActiveEditor().Text; !strings.Contains(got, wantRef) {
-		t.Fatalf("InsertSelectedFileReference() text = %q", got)
-	}
-}
-
-func TestMoveSelectedAssetFolder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "Images"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	imagePath := filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "Images", "diagram.png")
-	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws.refreshFiles()
-	for i, entry := range ws.FileTree {
-		if entry.Kind == fileEntryFolder && filepath.ToSlash(entry.RelPath) == "Work/Plan.assets/Images" {
-			ws.FileSelection = i
-			break
-		}
-	}
-	if err := ws.MoveSelectedFileEntry("Archive"); err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "Archive", "Images")
-	if _, err := os.Stat(want); !os.IsNotExist(err) {
-		t.Fatalf("real moved folder should not exist before save, stat err = %v", err)
-	}
-	if !ws.FilesDirty {
-		t.Fatal("FilesDirty = false, want true after staged move")
-	}
-	if _, err := ws.SavePendingFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(want); err != nil {
-		t.Fatalf("moved folder missing at %q after save: %v", want, err)
-	}
-}
-
-func TestFileCommandLineTextShowsImportScopePrompt(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws.FileCommandMode = true
-	ws.FileCommand = "import "
-	got := ws.FileCommandLineText(120)
-	if !strings.Contains(got, "Import into scope Note 1") {
-		t.Fatalf("FileCommandLineText() = %q, want import scope prompt", got)
-	}
-}
-
-func TestFileRowsShowStagedMarker(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws.FilesDirty = true
-	rows := ws.FileRows(3)
-	if !strings.Contains(rows[0], "[STAGED]") {
-		t.Fatalf("FileRows()[0] = %q, want staged marker", rows[0])
-	}
-	if got := ws.FileCommandLineText(120); !strings.Contains(got, "D discard staged changes") {
-		t.Fatalf("FileCommandLineText() = %q, want staged discard hint", got)
-	}
-}
-
-func TestHandleFilesKeyScopeFolderShortcut(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ws.HandleFilesKey(Key{Name: "F", Rune: 'F'}) {
-		t.Fatal("HandleFilesKey(F) = false, want true")
-	}
-	if !ws.FileCommandMode || !ws.FileScopeOnly || ws.FileCommand != "mkdir " {
-		t.Fatalf("scope folder prompt state = mode:%t scopeOnly:%t cmd:%q", ws.FileCommandMode, ws.FileScopeOnly, ws.FileCommand)
-	}
-}
-
-func TestMigrateLooseManagedFilesMovesOldFilesIntoAssets(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	oldPath := filepath.Join(notesDir(), "Work", "diagram.png")
-	if err := os.WriteFile(oldPath, []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	moved, err := migrateLooseManagedFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if moved != 1 {
-		t.Fatalf("migrateLooseManagedFiles() moved = %d, want 1", moved)
-	}
-	if _, err := os.Stat(oldPath); err != nil {
-		t.Fatalf("old loose file should remain until save, err = %v", err)
-	}
-	newPath := filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "diagram.png")
-	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
-		t.Fatalf("migrated file should not exist before save, stat err = %v", err)
-	}
-	ws.FilesDirty = true
-	if _, err := ws.SavePendingFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Fatalf("old loose file still exists after save, err = %v", err)
-	}
-	if _, err := os.Stat(newPath); err != nil {
-		t.Fatalf("migrated file missing at %q after save: %v", newPath, err)
-	}
-}
-
-func TestCountLooseManagedFiles(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := countLooseManagedFiles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != 1 {
-		t.Fatalf("countLooseManagedFiles() = %d, want 1", got)
-	}
-}
-
-func TestHandleFilesKeyStartsFilterMode(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ws.HandleFilesKey(Key{Name: "/"}) {
-		t.Fatal("HandleFilesKey(/) = false, want true")
-	}
-	if !ws.FileFilterMode {
-		t.Fatal("FileFilterMode = false, want true")
-	}
-}
-
-func TestRefreshFilesWithFilter(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan.md"), []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "notes.pdf"), []byte("pdf"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ws.FileFilter = "diagram"
-	ws.refreshFiles()
-	foundDiagram := false
-	foundPDF := false
-	for _, entry := range ws.FileTree {
-		if entry.Kind == fileEntryAsset && entry.Label == "diagram.png" {
-			foundDiagram = true
-		}
-		if entry.Kind == fileEntryAsset && entry.Label == "notes.pdf" {
-			foundPDF = true
-		}
-	}
-	if !foundDiagram || foundPDF {
-		t.Fatalf("filtered tree unexpected: %#v", ws.FileTree)
-	}
-}
-
-func TestManagedReferenceCandidates(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
-	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got := managedReferenceCandidates(notePath, "Plan.assets/i")
-	if len(got) == 0 || got[0] != "Plan.assets/img/" {
-		t.Fatalf("managedReferenceCandidates() = %#v, want Plan.assets/img/ candidate", got)
-	}
-}
-
-func TestCompleteEditorPathReference(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
-	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ws.Open(notePath); err != nil {
-		t.Fatal(err)
-	}
-	ed := ws.ActiveEditor()
-	ed.Mode = ModeInsert
-	ed.Text = "![alt](Plan.assets/i)"
-	ed.Cursor = len([]rune(ed.Text)) - 1
-	if !completeEditorPathReference(ws, ed) {
-		t.Fatal("completeEditorPathReference() = false, want true")
-	}
-	if !strings.Contains(ed.Text, "Plan.assets/img/") {
-		t.Fatalf("editor text = %q, want completed assets path", ed.Text)
-	}
-}
-
-func TestAutoCompleteStatusLineShowsSuggestions(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
-	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ed := &Editor{
-		Path:   notePath,
-		Mode:   ModeInsert,
-		Text:   "![alt](Plan.assets/i)",
-		Cursor: len([]rune("![alt](Plan.assets/i")),
-	}
-	got := autoCompleteStatusLine(ed, 120)
-	if !strings.Contains(got, "path suggestions:") || !strings.Contains(got, "Plan.assets/img/") {
-		t.Fatalf("autoCompleteStatusLine() = %q, want suggestion list", got)
-	}
-}
-
-func TestSplitImportPaths(t *testing.T) {
-	got := splitImportPaths(" /tmp/a.png | /tmp/b.pdf |  /tmp/c ")
-	want := []string{"/tmp/a.png", "/tmp/b.pdf", "/tmp/c"}
-	if len(got) != len(want) {
-		t.Fatalf("splitImportPaths() = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("splitImportPaths() = %#v, want %#v", got, want)
-		}
-	}
-}
-
-func TestPathToFileURI(t *testing.T) {
-	got := pathToFileURI("/tmp/example file.txt")
-	if got != "file:///tmp/example%20file.txt" {
-		t.Fatalf("pathToFileURI() = %q", got)
-	}
-}
-
-func TestManagedScopesUseNoteFoldersOnly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "LooseOnlyFolder"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", managedAssetsDir), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
-	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	scopes, err := managedScopes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(scopes) != 1 || scopes[0].RelPath != filepath.Join("Work", "Plan.md") || scopes[0].Title != "Plan" {
-		t.Fatalf("managedScopes() = %#v, want only Work/Plan.md scope", scopes)
-	}
-}
-
-func TestShiftTabCompletesBackward(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
-	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "aaa.txt"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ws.Open(notePath); err != nil {
-		t.Fatal(err)
-	}
-	ed := ws.ActiveEditor()
-	ed.Mode = ModeInsert
-	ed.Text = "![alt](Plan.assets/)"
-	ed.Cursor = len([]rune(ed.Text)) - 1
-	if !completeEditorPathReferenceBackward(ws, ed) {
-		t.Fatal("completeEditorPathReferenceBackward() = false, want true")
-	}
-	if !strings.Contains(ed.Text, "Plan.assets/img/") {
-		t.Fatalf("editor text = %q, want backward completion candidate", ed.Text)
-	}
-}
-
 func TestInsertModeShiftTabOutdentsListItems(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
@@ -1761,44 +1262,6 @@ func TestInsertModeShiftTabDoesNotOutdentBelowZero(t *testing.T) {
 	}
 	if ed.Dirty {
 		t.Fatal("Dirty = true, want no-op outdent to leave note clean")
-	}
-}
-
-func TestInsertModeShiftTabCyclesActiveAutocompleteBackward(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	settings.Init()
-	if err := os.MkdirAll(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	notePath := filepath.Join(notesDir(), "Work", "Plan.md")
-	if err := os.WriteFile(notePath, []byte("plan"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "aaa.txt"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(notesDir(), "Work", "Plan."+managedAssetsDir, "img", "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ws, err := NewWorkspace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ws.Open(notePath); err != nil {
-		t.Fatal(err)
-	}
-	ed := ws.ActiveEditor()
-	ed.Mode = ModeInsert
-	ed.Text = "![alt](Plan.assets/)"
-	ed.Cursor = len([]rune(ed.Text)) - 1
-	if !handleInsertMode(ws, ed, Key{Name: "tab"}) {
-		t.Fatal("handleInsertMode(tab) = false, want autocomplete")
-	}
-	if !handleInsertMode(ws, ed, Key{Name: "tab", Shift: true}) {
-		t.Fatal("handleInsertMode(shift+tab) = false, want autocomplete cycle")
-	}
-	if !strings.Contains(ed.Text, "Plan.assets/img/") {
-		t.Fatalf("editor text = %q, want backward completion candidate", ed.Text)
 	}
 }
 
@@ -2115,21 +1578,6 @@ func TestRenderEditorPaneShowsSpellSuggestionPopupUnderWord(t *testing.T) {
 	}
 	if !strings.Contains(got, "  collar") {
 		t.Fatalf("renderEditorPane() = %q, want secondary spell suggestion popup row", got)
-	}
-}
-
-func TestReferenceForFileOverrides(t *testing.T) {
-	entry := &FileEntry{
-		Path:  "/tmp/diagram.png",
-		Label: "diagram.png",
-		Image: true,
-	}
-	ws := &Workspace{}
-	if got := ws.referenceForFile(entry, markdownInsertLink); got != "[diagram.png](diagram.png)" {
-		t.Fatalf("referenceForFile(link) = %q", got)
-	}
-	if got := ws.referenceForFile(entry, markdownInsertImage); got != "![diagram](diagram.png)" {
-		t.Fatalf("referenceForFile(image) = %q", got)
 	}
 }
 
@@ -2676,13 +2124,6 @@ func TestRenameCurrentNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldPath := w.ActiveEditor().Path
-	oldAssets := noteAssetsPath(oldPath)
-	if err := os.MkdirAll(oldAssets, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(oldAssets, "diagram.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	if err := w.RenameCurrentNote("Renamed Note"); err != nil {
 		t.Fatalf("RenameCurrentNote() error = %v", err)
 	}
@@ -2694,13 +2135,6 @@ func TestRenameCurrentNote(t *testing.T) {
 	}
 	if _, err := os.Stat(w.ActiveEditor().Path); err != nil {
 		t.Fatalf("renamed file missing: %v", err)
-	}
-	newAssets := noteAssetsPath(w.ActiveEditor().Path)
-	if _, err := os.Stat(filepath.Join(newAssets, "diagram.png")); err != nil {
-		t.Fatalf("renamed assets missing: %v", err)
-	}
-	if _, err := os.Stat(oldAssets); !os.IsNotExist(err) {
-		t.Fatalf("old assets dir still exists, err = %v", err)
 	}
 }
 

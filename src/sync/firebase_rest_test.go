@@ -142,8 +142,6 @@ func TestFirebaseRESTProviderPullsWorkspaceChildrenIndividually(t *testing.T) {
 			_, _ = w.Write([]byte(`{"note-1":{"id":"note-1","path":"a.md","text":"note","rev":1}}`))
 		case "/workspaces/ws/settings.json":
 			_, _ = w.Write([]byte(`{"shared":{"values":{"pages_app":{"first_book":1}},"rev":1}}`))
-		case "/workspaces/ws/assets.json":
-			_, _ = w.Write([]byte(`{"asset-1":{"id":"asset-1","path":"a.assets/image.png","rev":1,"deleted":true}}`))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -166,9 +164,6 @@ func TestFirebaseRESTProviderPullsWorkspaceChildrenIndividually(t *testing.T) {
 	if _, err := provider.PullSettings(context.Background(), "ws"); err != nil {
 		t.Fatalf("PullSettings() error = %v", err)
 	}
-	if _, err := provider.PullAssets(context.Background(), "ws"); err != nil {
-		t.Fatalf("PullAssets() error = %v", err)
-	}
 
 	want := []string{
 		"/workspaces/ws/todos.json",
@@ -176,7 +171,6 @@ func TestFirebaseRESTProviderPullsWorkspaceChildrenIndividually(t *testing.T) {
 		"/workspaces/ws/todo_archive_months.json",
 		"/workspaces/ws/notes.json",
 		"/workspaces/ws/settings.json",
-		"/workspaces/ws/assets.json",
 	}
 	if strings.Join(paths, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("paths = %#v, want %#v", paths, want)

@@ -14,7 +14,6 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
-import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -47,14 +46,6 @@ data class FirebasePullResult(
     val remoteNotes: List<FirebaseRemoteNote>,
     val remoteTodoCount: Int,
     val remoteNoteCount: Int,
-)
-
-data class FirebaseRemoteAsset(
-    val id: String,
-    val path: String,
-    val bytes: ByteArray,
-    val rev: Long,
-    val deleted: Boolean,
 )
 
 data class FirebaseSharedSettings(
@@ -417,79 +408,13 @@ class FirebaseSyncRepository(private val context: Context) {
         return syncState.getString(sharedSettingsHashKey(settings), null)
     }
 
-    fun pushAssets(settings: FirebaseSettings, assets: List<LocalAssetFile>, session: FirebaseSession): Int {
-        var pushed = 0
-        assets.forEach { asset ->
-            if (asset.bytes.size > MAX_ASSET_BYTES) return@forEach
-            val path = NotesRepository.normalizeAssetPath(asset.relativePath)
-            if (path.isBlank()) return@forEach
-            val id = assetId(path)
-            val rev = maxOf(asset.lastModified, System.currentTimeMillis())
-            val record = JSONObject()
-                .put("id", id)
-                .put("path", path)
-                .put("bytes_base64", Base64.encodeToString(asset.bytes, Base64.NO_WRAP))
-                .put("sha256", sha256(asset.bytes))
-                .put("mime", mimeType(path))
-                .put("rev", rev)
-                .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
-                .put("updated_by", session.uid)
-                .put("deleted", false)
-            putDatabase(settings, "workspaces/${settings.workspaceId}/assets/$id", record, session.idToken)
-            pushed++
+    fun deleteLegacyAssetsBestEffort(settings: FirebaseSettings, session: FirebaseSession) {
+        runCatching {
+            request("DELETE", databaseUrl(settings, "workspaces/${settings.workspaceId}/assets", session.idToken), null, null)
         }
-        val hash = localAssetMetadataHash(assets)
-        markFeaturePulled(settings, SYNC_FEATURE_ASSETS, hash)
-        writeSyncHashBestEffort(settings, SYNC_FEATURE_ASSETS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
-        return pushed
-    }
-
-    fun pushAssetDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
-        val normalized = NotesRepository.normalizeAssetPath(path)
-        if (normalized.isBlank()) return
-        val id = assetId(normalized)
-        val rev = System.currentTimeMillis()
-        val record = JSONObject()
-            .put("id", id)
-            .put("path", normalized)
-            .put("rev", rev)
-            .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
-            .put("updated_by", session.uid)
-            .put("deleted", true)
-        putDatabase(settings, "workspaces/${settings.workspaceId}/assets/$id", record, session.idToken)
-        clearLocalSyncHash(settings, SYNC_FEATURE_ASSETS)
-    }
-
-
-    fun pullAssets(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteAsset> {
-        syncHashes(settings, session)[SYNC_FEATURE_ASSETS]?.let { remote ->
-            if (shouldSkipFeature(settings, SYNC_FEATURE_ASSETS, remote)) return emptyList()
+        runCatching {
+            request("DELETE", databaseUrl(settings, "workspaces/${settings.workspaceId}/sync_hashes/assets", session.idToken), null, null)
         }
-        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/assets", session.idToken) ?: return emptyList()
-        val assets = mutableListOf<FirebaseRemoteAsset>()
-        remote.keys().forEach { id ->
-            val record = remote.optJSONObject(id) ?: return@forEach
-            val path = NotesRepository.normalizeAssetPath(record.optString("path", ""))
-            if (path.isBlank()) return@forEach
-            val deleted = record.optBoolean("deleted", false)
-            val bytes = if (deleted) ByteArray(0) else runCatching {
-                Base64.decode(record.optString("bytes_base64", ""), Base64.NO_WRAP)
-            }.getOrDefault(ByteArray(0))
-            if (!deleted && (bytes.isEmpty() || bytes.size > MAX_ASSET_BYTES)) return@forEach
-            if (!deleted && record.optString("sha256", "").isNotBlank() && record.optString("sha256") != sha256(bytes)) return@forEach
-            assets += FirebaseRemoteAsset(
-                id = record.optString("id", id),
-                path = path,
-                bytes = bytes,
-                rev = record.optLong("rev", 0L),
-                deleted = deleted,
-            )
-        }
-        val sorted = assets.sortedBy { it.path.lowercase() }
-        val hash = assetMetadataHash(sorted)
-        markFeaturePulled(settings, SYNC_FEATURE_ASSETS, hash)
-        writeSyncHashBestEffort(settings, SYNC_FEATURE_ASSETS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
-        return sorted
     }
 
     private fun pullRemoteTodos(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteTodo> {
@@ -648,36 +573,14 @@ class FirebaseSyncRepository(private val context: Context) {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    private fun assetId(path: String): String = noteId(NotesRepository.normalizeAssetPath(path))
-
-    private fun sha256(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
-    }
-
-    private fun mimeType(path: String): String {
-        return when (path.substringAfterLast('.', "").lowercase(Locale.US)) {
-            "png" -> "image/png"
-            "jpg", "jpeg" -> "image/jpeg"
-            "gif" -> "image/gif"
-            "webp" -> "image/webp"
-            "svg" -> "image/svg+xml"
-            "pdf" -> "application/pdf"
-            "txt" -> "text/plain"
-            else -> "application/octet-stream"
-        }
-    }
-
     companion object {
         const val TOKEN_FILE = "firebase_token.json"
-        const val MAX_ASSET_BYTES = 1 * 1024 * 1024
         private const val SYNC_STATE_PREFERENCES = "firebase_sync_state"
         private const val SYNC_FEATURE_TODOS = "todos"
         private const val SYNC_FEATURE_TODO_ARCHIVE_MONTHS = "todo_archive_months"
         private const val SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX = "todo_archive_month:"
         private const val SYNC_FEATURE_NOTES = "notes"
         private const val SYNC_FEATURE_SETTINGS = "settings"
-        private const val SYNC_FEATURE_ASSETS = "assets"
         private const val SYNC_HASH_FULL_VALIDATION_MS = 24L * 60L * 60L * 1000L
 
         fun personalWorkspaceId(uid: String): String = "user_$uid"
@@ -740,37 +643,6 @@ class FirebaseSyncRepository(private val context: Context) {
             return sha256String(values.toString())
         }
 
-        fun assetMetadataHash(assets: List<FirebaseRemoteAsset>): String {
-            val values = org.json.JSONArray()
-            assets.sortedBy { it.id }.forEach { asset ->
-                values.put(JSONObject()
-                    .put("id", asset.id)
-                    .put("path", NotesRepository.normalizeAssetPath(asset.path))
-                    .put("rev", asset.rev)
-                    .put("deleted", asset.deleted)
-                    .put("sha256", if (asset.deleted) "" else sha256Bytes(asset.bytes)))
-            }
-            return sha256String(values.toString())
-        }
-
-        fun localAssetMetadataHash(assets: List<LocalAssetFile>): String {
-            val values = org.json.JSONArray()
-            assets
-                .filter { it.bytes.size <= MAX_ASSET_BYTES }
-                .mapNotNull { asset ->
-                    val path = NotesRepository.normalizeAssetPath(asset.relativePath)
-                    if (path.isBlank()) null else JSONObject()
-                        .put("id", sha256String(path))
-                        .put("path", path)
-                        .put("rev", asset.lastModified)
-                        .put("deleted", false)
-                        .put("sha256", sha256Bytes(asset.bytes))
-                }
-                .sortedBy { it.optString("id") }
-                .forEach { values.put(it) }
-            return sha256String(values.toString())
-        }
-
         private fun canonicalJson(value: Any?): String {
             return when (value) {
                 null, JSONObject.NULL -> "null"
@@ -800,10 +672,6 @@ class FirebaseSyncRepository(private val context: Context) {
             return digest.joinToString("") { "%02x".format(it) }
         }
 
-        private fun sha256Bytes(value: ByteArray): String {
-            val digest = MessageDigest.getInstance("SHA-256").digest(value)
-            return digest.joinToString("") { "%02x".format(it) }
-        }
     }
 
     private fun sharedSettingsHashKey(settings: FirebaseSettings): String {
