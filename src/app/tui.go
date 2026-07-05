@@ -1549,6 +1549,8 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		return a.moveSelectedTodo(1)
 	case "K":
 		return a.moveSelectedTodo(-1)
+	case "m":
+		return a.moveSelectedTodoTerm()
 	}
 	return false
 }
@@ -1603,6 +1605,22 @@ func (a *terminalApp) moveSelectedTodo(delta int) bool {
 	return true
 }
 
+func (a *terminalApp) moveSelectedTodoTerm() bool {
+	item, ok := a.selectedTodoItem()
+	if !ok || item.Status != todo.StatusTodo || item.CheckedAt != nil || a.todos == nil {
+		return true
+	}
+	store, err := a.todos.MoveTerm(item.ID)
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo section move failed: " + err.Error())
+		return true
+	}
+	a.todoStore = store
+	a.markTodoChanged()
+	a.selectTodoByID(item.ID)
+	return true
+}
+
 func (a *terminalApp) reloadTodosForRender() {
 	if a == nil || a.todos == nil {
 		return
@@ -1648,7 +1666,11 @@ func (a *terminalApp) todoSelectableItems() []todo.Item {
 
 func (a *terminalApp) todoSelectableRows() []todoSelectableRow {
 	rows := make([]todoSelectableRow, 0)
-	for _, item := range todo.ActiveItems(a.todoStore) {
+	for _, item := range todo.ShortItems(a.todoStore) {
+		item := item
+		rows = append(rows, todoSelectableRow{item: &item})
+	}
+	for _, item := range todo.LongItems(a.todoStore) {
 		item := item
 		rows = append(rows, todoSelectableRow{item: &item})
 	}
@@ -2814,7 +2836,7 @@ func (a *terminalApp) renderPassword(height int) string {
 
 func (a *terminalApp) renderTodo(height int) string {
 	a.reloadTodosForRender()
-	lines := []string{"Todo", "j/k move | n new | enter/space check | e edit | J/K reorder active"}
+	lines := []string{"Todo", "j/k move | n new | enter/space check | e edit | m section | J/K reorder active"}
 	if a.todoInputMode != "" {
 		label := "new"
 		if a.todoInputMode == "edit" {
@@ -2855,7 +2877,9 @@ func (a *terminalApp) renderTodo(height int) string {
 			lines = append(lines, prefix+box+" "+text)
 		}
 	}
-	addSection("Todo", todo.ActiveItems(a.todoStore), false)
+	addSection("Short term", todo.ShortItems(a.todoStore), false)
+	lines = append(lines, "")
+	addSection("Long term", todo.LongItems(a.todoStore), false)
 	lines = append(lines, "")
 	addSection("Done", todo.DoneItems(a.todoStore), false)
 	lines = append(lines, "")
@@ -3853,7 +3877,7 @@ func (a *terminalApp) helpText() string {
 		if a.todoInputMode != "" {
 			return "todo/edit: text input | enter save | esc cancel"
 		}
-		return "todo: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | n new | enter/space check | e edit | J/K reorder"
+		return "todo: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | n new | enter/space check | e edit | m section | J/K reorder"
 	case viewSync:
 		if a.tabSelect {
 			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
@@ -4019,6 +4043,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "n", desc: "create a todo"},
 		{keys: "enter, space", desc: "check or uncheck selected todo"},
 		{keys: "e", desc: "edit selected active todo"},
+		{keys: "m", desc: "move selected active todo between short and long term"},
 		{keys: "J/K", desc: "reorder selected active unchecked todo"},
 	})...)
 	lines = append(lines, renderSection("Sync:", []helpEntry{

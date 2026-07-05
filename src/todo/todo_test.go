@@ -231,6 +231,83 @@ func TestMoveActiveOnlyAffectsUncheckedActiveTodos(t *testing.T) {
 	}
 }
 
+func TestNormalizeDefaultsInvalidTermToShort(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := Store{Items: []Item{
+		{ID: "blank", Text: "blank", Status: StatusTodo, CreatedAt: now, UpdatedAt: now},
+		{ID: "bad", Text: "bad", Status: StatusTodo, Term: "later", CreatedAt: now, UpdatedAt: now},
+		{ID: "long", Text: "long", Status: StatusTodo, Term: TermLong, CreatedAt: now, UpdatedAt: now},
+	}}
+
+	Normalize(&store)
+
+	if store.Items[0].Term != TermShort || store.Items[1].Term != TermShort || store.Items[2].Term != TermLong {
+		t.Fatalf("terms = %#v, want short, short, long", []string{store.Items[0].Term, store.Items[1].Term, store.Items[2].Term})
+	}
+}
+
+func TestShortAndLongItemsSplitActiveTodos(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	short := newItem("short", "short", now)
+	long := newItem("long", "long", now)
+	long.Term = TermLong
+	done := newItem("done", "done", now)
+	done.Status = StatusDone
+	store := Store{Items: []Item{long, done, short}}
+
+	if got := ShortItems(store); len(got) != 1 || got[0].ID != "short" {
+		t.Fatalf("ShortItems() = %#v, want short", got)
+	}
+	if got := LongItems(store); len(got) != 1 || got[0].ID != "long" {
+		t.Fatalf("LongItems() = %#v, want long", got)
+	}
+	if got := ActiveItems(store); len(got) != 2 || got[0].ID != "short" || got[1].ID != "long" {
+		t.Fatalf("ActiveItems() = %#v, want short before long", got)
+	}
+}
+
+func TestMoveActiveStaysWithinTerm(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	shortA := newItem("short-a", "short a", now)
+	shortB := newItem("short-b", "short b", now)
+	longA := newItem("long-a", "long a", now)
+	longB := newItem("long-b", "long b", now)
+	longA.Term = TermLong
+	longB.Term = TermLong
+	shortA.Order = 0
+	shortB.Order = 1
+	longA.Order = 0
+	longB.Order = 1
+	store := Store{Items: []Item{shortA, longA, shortB, longB}}
+
+	if !MoveActive(&store, "long-b", -1, now.Add(time.Hour)) {
+		t.Fatal("MoveActive() = false, want true")
+	}
+
+	if got := ActiveItems(store); strings.Join(itemIDs(got), ",") != "short-a,short-b,long-b,long-a" {
+		t.Fatalf("ActiveItems() = %#v, want short section unchanged and long reordered", itemIDs(got))
+	}
+}
+
+func TestMoveActiveToOtherTermMovesUncheckedTodo(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := Store{Items: []Item{newItem("a", "a", now)}}
+
+	if !MoveActiveToOtherTerm(&store, "a", now.Add(time.Hour)) {
+		t.Fatal("MoveActiveToOtherTerm() = false, want true")
+	}
+
+	if store.Items[0].Term != TermLong {
+		t.Fatalf("term = %q, want long", store.Items[0].Term)
+	}
+	if !MoveActiveToOtherTerm(&store, "a", now.Add(2*time.Hour)) {
+		t.Fatal("MoveActiveToOtherTerm() back = false, want true")
+	}
+	if store.Items[0].Term != TermShort {
+		t.Fatalf("term = %q, want short", store.Items[0].Term)
+	}
+}
+
 func TestMoveActiveReordersDuplicateOrderItemsPastTen(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	store := Store{}
@@ -264,6 +341,14 @@ func TestMoveActiveReordersDuplicateOrderItemsPastTen(t *testing.T) {
 
 func newItem(id string, text string, now time.Time) Item {
 	return Item{ID: id, Text: text, Status: StatusTodo, CreatedAt: now, UpdatedAt: now}
+}
+
+func itemIDs(items []Item) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
 }
 
 func archivedItem(id string, text string, archivedAt time.Time) Item {

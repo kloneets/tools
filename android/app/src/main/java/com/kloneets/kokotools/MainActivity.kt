@@ -965,7 +965,8 @@ class MainActivity : Activity() {
         scroll.addView(list)
         content.addView(scroll)
 
-        addTodoSection(list, "Todo", TodoRepository.activeItems(todoStore), archived = false)
+        addTodoSection(list, "Short term", TodoRepository.shortItems(todoStore), archived = false)
+        addTodoSection(list, "Long term", TodoRepository.longItems(todoStore), archived = false)
         list.addView(sectionTitle("Archive"))
         val groups = TodoRepository.archiveGroups(todoStore)
         val archiveMonths = TodoRepository.archiveMonths(todoStore)
@@ -1117,9 +1118,17 @@ class MainActivity : Activity() {
                 addView(todoDragHandle(item))
             }
             if (item.status == TodoRepository.STATUS_TODO && item.checkedAt == null && !archived && !todoMoveMode) {
+                val target = if (TodoRepository.normalizeTerm(item.term) == TodoRepository.TERM_LONG) "short term" else "long term"
+                addView(todoIconButton(R.drawable.ic_swap_vert_24, "Move to $target") { moveTodoTerm(item) })
                 addView(todoIconButton(R.drawable.ic_edit_24, "Edit todo") { promptEditTodo(item) })
             }
         }
+    }
+
+    private fun moveTodoTerm(item: TodoItem) {
+        todoStore = todoRepository.moveTerm(item.id)
+        pushTodosToFirebase()
+        showTodo()
     }
 
     private fun canReorderTodo(item: TodoItem, archived: Boolean): Boolean {

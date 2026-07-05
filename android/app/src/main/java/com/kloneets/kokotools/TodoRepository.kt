@@ -24,6 +24,7 @@ data class TodoItem(
     val checkedAt: OffsetDateTime? = null,
     val doneAt: OffsetDateTime? = null,
     val archivedAt: OffsetDateTime? = null,
+    val term: String = TodoRepository.TERM_SHORT,
 )
 
 class TodoRepository(private val context: Context) {
@@ -73,6 +74,7 @@ class TodoRepository(private val context: Context) {
             id = now.toInstant().toEpochMilli().toString() + "-" + store.items.size,
             text = trimmed,
             status = STATUS_TODO,
+            term = TERM_SHORT,
             order = nextActiveOrder(store.items),
             createdAt = now,
             updatedAt = now,
@@ -83,15 +85,16 @@ class TodoRepository(private val context: Context) {
     fun toggle(id: String): TodoStore {
         val now = OffsetDateTime.now(ZoneOffset.UTC)
         val store = load(now)
-        val nextOrder = nextActiveOrder(store.items)
         val updated = store.items.map { item ->
             if (item.id != id) return@map item
             if (item.status == STATUS_TODO && item.checkedAt == null) {
                 item.copy(checkedAt = now, updatedAt = now)
             } else {
+                val term = normalizeTerm(item.term)
                 item.copy(
                     status = STATUS_TODO,
-                    order = nextOrder,
+                    term = term,
+                    order = nextActiveOrderForTerm(store.items, term),
                     checkedAt = null,
                     doneAt = null,
                     archivedAt = null,
@@ -120,7 +123,8 @@ class TodoRepository(private val context: Context) {
     fun move(id: String, delta: Int): TodoStore {
         val now = OffsetDateTime.now(ZoneOffset.UTC)
         val store = load(now)
-        val active = activeItems(store).filter { it.checkedAt == null }
+        val term = store.items.firstOrNull { it.id == id }?.term?.let { normalizeTerm(it) } ?: return store
+        val active = activeItems(store).filter { it.checkedAt == null && normalizeTerm(it.term) == term }
         val index = active.indexOfFirst { it.id == id }
         val target = index + delta
         if (index < 0 || target < 0 || target >= active.size) return store
@@ -145,19 +149,42 @@ class TodoRepository(private val context: Context) {
         return updated
     }
 
+    fun moveTerm(id: String): TodoStore {
+        val now = OffsetDateTime.now(ZoneOffset.UTC)
+        val store = load(now)
+        val updated = moveActiveToOtherTerm(store, id, now)
+        if (updated == store) return store
+        save(updated)
+        return updated
+    }
+
     companion object {
         const val TODOS_FILE = "todos.json"
         const val SCHEMA_VERSION = 1
         const val STATUS_TODO = "todo"
         const val STATUS_DONE = "done"
         const val STATUS_ARCHIVED = "archived"
+        const val TERM_SHORT = "short"
+        const val TERM_LONG = "long"
         const val CHECKED_DELAY_SECONDS = 10L
         const val ARCHIVE_AFTER_DAYS = 7L
 
         fun activeItems(store: TodoStore): List<TodoItem> {
             return store.items
                 .filter { it.status == STATUS_TODO }
-                .sortedWith(compareBy<TodoItem> { it.checkedAt != null }.thenBy { it.order }.thenBy { it.createdAt })
+                .sortedWith(activeComparator())
+        }
+
+        fun shortItems(store: TodoStore): List<TodoItem> {
+            return store.items
+                .filter { it.status == STATUS_TODO && normalizeTerm(it.term) == TERM_SHORT }
+                .sortedWith(activeComparator())
+        }
+
+        fun longItems(store: TodoStore): List<TodoItem> {
+            return store.items
+                .filter { it.status == STATUS_TODO && normalizeTerm(it.term) == TERM_LONG }
+                .sortedWith(activeComparator())
         }
 
         fun doneItems(store: TodoStore): List<TodoItem> {
@@ -215,7 +242,10 @@ class TodoRepository(private val context: Context) {
         }
 
         fun normalize(store: TodoStore): TodoStore {
-            return store.copy(archiveMonths = normalizeArchiveMonths(store.archiveMonths + archiveGroups(store).keys))
+            return store.copy(
+                items = store.items.map { it.copy(term = normalizeTerm(it.term)) },
+                archiveMonths = normalizeArchiveMonths(store.archiveMonths + archiveGroups(store).keys),
+            )
         }
 
         private fun normalizeArchiveMonths(months: Iterable<String>): List<String> {
@@ -254,7 +284,10 @@ class TodoRepository(private val context: Context) {
             now: OffsetDateTime,
         ): TodoStore {
             if (draggedId == targetId) return store
-            val active = activeItems(store).filter { it.checkedAt == null }
+            val draggedItem = store.items.firstOrNull { it.id == draggedId } ?: return store
+            val targetItem = store.items.firstOrNull { it.id == targetId } ?: return store
+            if (normalizeTerm(draggedItem.term) != normalizeTerm(targetItem.term)) return store
+            val active = activeItems(store).filter { it.checkedAt == null && normalizeTerm(it.term) == normalizeTerm(draggedItem.term) }
             val from = active.indexOfFirst { it.id == draggedId }
             val to = active.indexOfFirst { it.id == targetId }
             if (from < 0 || to < 0) return store
@@ -271,8 +304,40 @@ class TodoRepository(private val context: Context) {
         }
 
         private fun nextActiveOrder(items: List<TodoItem>): Int {
-            return items.filter { it.status == STATUS_TODO && it.checkedAt == null }
+            return nextActiveOrderForTerm(items, TERM_SHORT)
+        }
+
+        private fun nextActiveOrderForTerm(items: List<TodoItem>, term: String): Int {
+            val normalized = normalizeTerm(term)
+            return items.filter { it.status == STATUS_TODO && it.checkedAt == null && normalizeTerm(it.term) == normalized }
                 .maxOfOrNull { it.order + 1 } ?: 0
+        }
+
+        private fun moveActiveToOtherTerm(store: TodoStore, id: String, now: OffsetDateTime): TodoStore {
+            val updated = store.items.map { item ->
+                if (item.id != id || item.status != STATUS_TODO || item.checkedAt != null) return@map item
+                val nextTerm = if (normalizeTerm(item.term) == TERM_LONG) TERM_SHORT else TERM_LONG
+                item.copy(
+                    term = nextTerm,
+                    order = nextActiveOrderForTerm(store.items, nextTerm),
+                    updatedAt = now,
+                )
+            }
+            return store.copy(items = updated)
+        }
+
+        private fun activeComparator(): Comparator<TodoItem> {
+            return compareBy<TodoItem> { if (normalizeTerm(it.term) == TERM_LONG) 1 else 0 }
+                .thenBy { it.checkedAt != null }
+                .thenBy { it.order }
+                .thenBy { it.createdAt }
+        }
+
+        fun normalizeTerm(term: String): String {
+            return when (term.trim().lowercase()) {
+                TERM_LONG -> TERM_LONG
+                else -> TERM_SHORT
+            }
         }
 
         fun parseItem(json: JSONObject): TodoItem {
@@ -281,6 +346,7 @@ class TodoRepository(private val context: Context) {
                 id = json.optString("id"),
                 text = json.optString("text"),
                 status = json.optString("status", STATUS_TODO),
+                term = normalizeTerm(json.optString("term", TERM_SHORT)),
                 order = json.optInt("order"),
                 createdAt = created,
                 updatedAt = parseTime(json.optString("updated_at")) ?: created,
@@ -295,6 +361,7 @@ class TodoRepository(private val context: Context) {
                 .put("id", item.id)
                 .put("text", item.text)
                 .put("status", item.status)
+                .put("term", normalizeTerm(item.term))
                 .put("order", item.order)
                 .put("created_at", formatTime(item.createdAt))
                 .put("updated_at", formatTime(item.updatedAt))

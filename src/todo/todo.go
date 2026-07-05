@@ -18,6 +18,8 @@ const (
 	StatusTodo       = "todo"
 	StatusDone       = "done"
 	StatusArchived   = "archived"
+	TermShort        = "short"
+	TermLong         = "long"
 	CheckedDelay     = 10 * time.Second
 	DoneArchiveAfter = 7 * 24 * time.Hour
 )
@@ -32,6 +34,7 @@ type Item struct {
 	ID         string     `json:"id"`
 	Text       string     `json:"text"`
 	Status     string     `json:"status"`
+	Term       string     `json:"term"`
 	Order      int        `json:"order"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
@@ -113,6 +116,7 @@ func (r *Repository) Add(text string) (Store, Item, error) {
 		ID:        fmt.Sprintf("%d", now.UnixNano()),
 		Text:      strings.TrimSpace(text),
 		Status:    StatusTodo,
+		Term:      TermShort,
 		Order:     nextActiveOrder(store.Items),
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -139,10 +143,11 @@ func (r *Repository) Toggle(id string) (Store, error) {
 			store.Items[i].UpdatedAt = now
 		} else {
 			store.Items[i].Status = StatusTodo
+			store.Items[i].Term = normalizeTerm(store.Items[i].Term)
 			store.Items[i].CheckedAt = nil
 			store.Items[i].DoneAt = nil
 			store.Items[i].ArchivedAt = nil
-			store.Items[i].Order = nextActiveOrder(store.Items)
+			store.Items[i].Order = nextActiveOrderForTerm(store.Items, store.Items[i].Term)
 			store.Items[i].UpdatedAt = now
 		}
 		return store, r.Save(store)
@@ -176,6 +181,17 @@ func (r *Repository) Move(id string, delta int) (Store, error) {
 		return Store{}, err
 	}
 	if MoveActive(&store, id, delta, r.currentTime()) {
+		return store, r.Save(store)
+	}
+	return store, nil
+}
+
+func (r *Repository) MoveTerm(id string) (Store, error) {
+	store, err := r.Load()
+	if err != nil {
+		return Store{}, err
+	}
+	if MoveActiveToOtherTerm(&store, id, r.currentTime()) {
 		return store, r.Save(store)
 	}
 	return store, nil
@@ -216,6 +232,7 @@ func Normalize(store *Store) {
 		if store.Items[i].Status == "" {
 			store.Items[i].Status = StatusTodo
 		}
+		store.Items[i].Term = normalizeTerm(store.Items[i].Term)
 		if store.Items[i].CreatedAt.IsZero() {
 			store.Items[i].CreatedAt = store.Items[i].UpdatedAt
 		}
@@ -258,7 +275,31 @@ func ActiveItems(store Store) []Item {
 	items := filterItems(store.Items, func(item Item) bool {
 		return item.Status == StatusTodo
 	})
+	sortActiveItems(items)
+	return items
+}
+
+func ShortItems(store Store) []Item {
+	return activeItemsByTerm(store, TermShort)
+}
+
+func LongItems(store Store) []Item {
+	return activeItemsByTerm(store, TermLong)
+}
+
+func activeItemsByTerm(store Store, term string) []Item {
+	items := filterItems(store.Items, func(item Item) bool {
+		return item.Status == StatusTodo && normalizeTerm(item.Term) == term
+	})
+	sortActiveItems(items)
+	return items
+}
+
+func sortActiveItems(items []Item) {
 	sort.SliceStable(items, func(i, j int) bool {
+		if termRank(items[i].Term) != termRank(items[j].Term) {
+			return termRank(items[i].Term) < termRank(items[j].Term)
+		}
 		if items[i].CheckedAt == nil && items[j].CheckedAt != nil {
 			return true
 		}
@@ -270,7 +311,13 @@ func ActiveItems(store Store) []Item {
 		}
 		return items[i].CreatedAt.Before(items[j].CreatedAt)
 	})
-	return items
+}
+
+func termRank(term string) int {
+	if normalizeTerm(term) == TermLong {
+		return 1
+	}
+	return 0
 }
 
 func DoneItems(store Store) []Item {
@@ -394,10 +441,20 @@ func MoveActive(store *Store, id string, delta int, now time.Time) bool {
 	if store == nil || delta == 0 {
 		return false
 	}
+	term := ""
+	for i := range store.Items {
+		if store.Items[i].ID == id {
+			term = normalizeTerm(store.Items[i].Term)
+			break
+		}
+	}
+	if term == "" {
+		return false
+	}
 	active := make([]int, 0)
 	for i := range store.Items {
 		item := store.Items[i]
-		if item.Status == StatusTodo && item.CheckedAt == nil {
+		if item.Status == StatusTodo && item.CheckedAt == nil && normalizeTerm(item.Term) == term {
 			active = append(active, i)
 		}
 	}
@@ -440,14 +497,51 @@ func MoveActive(store *Store, id string, delta int, now time.Time) bool {
 	return true
 }
 
+func MoveActiveToOtherTerm(store *Store, id string, now time.Time) bool {
+	if store == nil {
+		return false
+	}
+	now = now.UTC()
+	for i := range store.Items {
+		item := &store.Items[i]
+		if item.ID != id || item.Status != StatusTodo || item.CheckedAt != nil {
+			continue
+		}
+		current := normalizeTerm(item.Term)
+		next := TermLong
+		if current == TermLong {
+			next = TermShort
+		}
+		item.Term = next
+		item.Order = nextActiveOrderForTerm(store.Items, next)
+		item.UpdatedAt = now
+		return true
+	}
+	return false
+}
+
 func nextActiveOrder(items []Item) int {
+	return nextActiveOrderForTerm(items, TermShort)
+}
+
+func nextActiveOrderForTerm(items []Item, term string) int {
+	term = normalizeTerm(term)
 	maxOrder := -1
 	for _, item := range items {
-		if item.Status == StatusTodo && item.CheckedAt == nil && item.Order > maxOrder {
+		if item.Status == StatusTodo && item.CheckedAt == nil && normalizeTerm(item.Term) == term && item.Order > maxOrder {
 			maxOrder = item.Order
 		}
 	}
 	return maxOrder + 1
+}
+
+func normalizeTerm(term string) string {
+	switch strings.ToLower(strings.TrimSpace(term)) {
+	case TermLong:
+		return TermLong
+	default:
+		return TermShort
+	}
 }
 
 func filterItems(items []Item, keep func(Item) bool) []Item {

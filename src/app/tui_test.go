@@ -724,16 +724,18 @@ func TestHandleGlobalKeyTodoSpaceRuneToggles(t *testing.T) {
 func TestRenderTodoShowsSections(t *testing.T) {
 	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
 	archivedAt := now
+	long := todo.Item{ID: "4", Text: "later", Status: todo.StatusTodo, Term: todo.TermLong, CreatedAt: now, UpdatedAt: now}
 	app := &terminalApp{
 		view: viewTodo,
 		todoStore: todo.Store{Items: []todo.Item{
 			{ID: "1", Text: "active", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now},
 			{ID: "2", Text: "done", Status: todo.StatusDone, CreatedAt: now, UpdatedAt: now, DoneAt: &now},
 			{ID: "3", Text: "old", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt},
+			long,
 		}},
 	}
 	got := app.renderTodo(20)
-	for _, want := range []string{"Todo", "Done", "Archive", "[+] 2026-05", "active", "~done~"} {
+	for _, want := range []string{"Short term", "Long term", "Done", "Archive", "[+] 2026-05", "active", "later", "~done~"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("renderTodo() = %q, want %q", got, want)
 		}
@@ -813,6 +815,62 @@ func TestMoveSelectedTodoKeepsSelectionOnMovedItem(t *testing.T) {
 	}
 	if got := app.todoIndex; got != 2 {
 		t.Fatalf("todoIndex = %d, want moved item index 2", got)
+	}
+}
+
+func TestMoveSelectedTodoStaysWithinCurrentTerm(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	store := todo.Store{Items: []todo.Item{
+		{ID: "short-a", Text: "short a", Status: todo.StatusTodo, Order: 0, CreatedAt: now, UpdatedAt: now},
+		{ID: "long-a", Text: "long a", Status: todo.StatusTodo, Term: todo.TermLong, Order: 0, CreatedAt: now, UpdatedAt: now},
+		{ID: "short-b", Text: "short b", Status: todo.StatusTodo, Order: 1, CreatedAt: now, UpdatedAt: now},
+		{ID: "long-b", Text: "long b", Status: todo.StatusTodo, Term: todo.TermLong, Order: 1, CreatedAt: now, UpdatedAt: now},
+	}}
+	if err := repo.Save(store); err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo, todoStore: store, todoIndex: 3}
+
+	if !app.moveSelectedTodo(-1) {
+		t.Fatal("moveSelectedTodo() = false, want true")
+	}
+
+	if got := todoItemIDs(todo.ActiveItems(app.todoStore)); strings.Join(got, ",") != "short-a,short-b,long-b,long-a" {
+		t.Fatalf("active todos = %#v, want section-local reorder", got)
+	}
+	if item, ok := app.selectedTodoItem(); !ok || item.ID != "long-b" {
+		t.Fatalf("selectedTodoItem() = %#v, %t; want long-b", item, ok)
+	}
+}
+
+func todoItemIDs(items []todo.Item) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+func TestHandleGlobalKeyTodoMoveSection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	store, item, err := repo.Add("alpha")
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo, todoStore: store}
+
+	if !app.handleGlobalKey(notes.Key{Name: "m", Rune: 'm'}) {
+		t.Fatal("handleGlobalKey(m) = false, want true")
+	}
+
+	moved, ok := app.selectedTodoItem()
+	if !ok || moved.ID != item.ID || moved.Term != todo.TermLong {
+		t.Fatalf("selectedTodoItem() = %#v, %t; want moved long item", moved, ok)
 	}
 }
 

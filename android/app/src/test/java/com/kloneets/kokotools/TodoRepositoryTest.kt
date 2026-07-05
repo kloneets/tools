@@ -3,6 +3,7 @@ package com.kloneets.kokotools
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
+import org.json.JSONObject
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
@@ -102,17 +103,85 @@ class TodoRepositoryTest {
         assertEquals(listOf(TodoRepository.STATUS_TODO), got.items.map { it.status })
     }
 
+    @Test
+    fun parseItemDefaultsInvalidTermToShort() {
+        val item = TodoRepository.parseItem(JSONObject("""{"id":"a","text":"a","status":"todo","term":"later"}"""))
+
+        assertEquals(TodoRepository.TERM_SHORT, item.term)
+    }
+
+    @Test
+    fun itemJsonWritesTerm() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val item = todoItem("a", TodoRepository.STATUS_TODO, now, term = TodoRepository.TERM_LONG)
+
+        val json = TodoRepository.itemJson(item)
+
+        assertEquals(TodoRepository.TERM_LONG, json.getString("term"))
+    }
+
+    @Test
+    fun shortAndLongItemsSplitActiveTodos() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val store = TodoStore(
+            items = listOf(
+                todoItem("long", TodoRepository.STATUS_TODO, now, term = TodoRepository.TERM_LONG),
+                todoItem("done", TodoRepository.STATUS_DONE, now),
+                todoItem("short", TodoRepository.STATUS_TODO, now),
+            ),
+        )
+
+        assertEquals(listOf("short"), TodoRepository.shortItems(store).map { it.id })
+        assertEquals(listOf("long"), TodoRepository.longItems(store).map { it.id })
+        assertEquals(listOf("short", "long"), TodoRepository.activeItems(store).map { it.id })
+    }
+
+    @Test
+    fun reorderActiveUncheckedStaysWithinTerm() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val store = TodoStore(
+            items = listOf(
+                todoItem("short-a", TodoRepository.STATUS_TODO, now, order = 0),
+                todoItem("long-a", TodoRepository.STATUS_TODO, now, term = TodoRepository.TERM_LONG, order = 0),
+                todoItem("short-b", TodoRepository.STATUS_TODO, now, order = 1),
+                todoItem("long-b", TodoRepository.STATUS_TODO, now, term = TodoRepository.TERM_LONG, order = 1),
+            ),
+        )
+
+        val got = TodoRepository.reorderActiveUnchecked(store, "long-b", "long-a", now.plusMinutes(1))
+
+        assertEquals(listOf("short-a", "short-b", "long-b", "long-a"), TodoRepository.activeItems(got).map { it.id })
+    }
+
+    @Test
+    fun reorderActiveUncheckedDoesNotCrossTerms() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val store = TodoStore(
+            items = listOf(
+                todoItem("short", TodoRepository.STATUS_TODO, now),
+                todoItem("long", TodoRepository.STATUS_TODO, now, term = TodoRepository.TERM_LONG),
+            ),
+        )
+
+        val got = TodoRepository.reorderActiveUnchecked(store, "long", "short", now.plusMinutes(1))
+
+        assertEquals(store, got)
+    }
+
     private fun todoItem(
         id: String,
         status: String,
         now: OffsetDateTime,
+        term: String = TodoRepository.TERM_SHORT,
+        order: Int = 0,
         archivedAt: OffsetDateTime? = null,
     ): TodoItem {
         return TodoItem(
             id = id,
             text = id,
             status = status,
-            order = 0,
+            term = term,
+            order = order,
             createdAt = now,
             updatedAt = now,
             archivedAt = archivedAt,
