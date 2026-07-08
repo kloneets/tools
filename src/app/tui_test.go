@@ -672,6 +672,77 @@ func TestHandleGlobalKeyCtrlNumberSwitchesRecorderTabWhenVisible(t *testing.T) {
 	}
 }
 
+func TestSwitchAppTabStartsCurrentViewSync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true, Realtime: true}
+	called := make(chan view, 1)
+	app := &terminalApp{
+		view: viewNotes,
+		viewFirebaseSync: func(_ context.Context, target view) error {
+			called <- target
+			return nil
+		},
+	}
+
+	app.switchAppTab(viewTodo)
+
+	select {
+	case got := <-called:
+		if got != viewTodo {
+			t.Fatalf("synced view = %v, want %v", got, viewTodo)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for view sync")
+	}
+}
+
+func TestSwitchAppTabSameViewDoesNotSync(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true, Realtime: true}
+	called := make(chan view, 1)
+	app := &terminalApp{
+		view: viewTodo,
+		viewFirebaseSync: func(_ context.Context, target view) error {
+			called <- target
+			return nil
+		},
+	}
+
+	app.switchAppTab(viewTodo)
+
+	select {
+	case got := <-called:
+		t.Fatalf("unexpected sync for unchanged view: %v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSyncViewToFirebaseUsesExpectedScopes(t *testing.T) {
+	tests := []struct {
+		name   string
+		target view
+		want   string
+	}{
+		{name: "todo", target: viewTodo, want: "pullTodos,pushTodos"},
+		{name: "notes", target: viewNotes, want: "pullNotes,pushNotes"},
+		{name: "pages", target: viewPages, want: "pullSettings,pushSettings"},
+		{name: "password", target: viewPassword, want: "pullSettings,pushSettings"},
+		{name: "settings", target: viewSettings, want: "pullSettings,pushSettings"},
+		{name: "sync", target: viewSync, want: "full"},
+		{name: "recorder", target: viewRecorder, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := viewFirebaseSyncKind(tc.target)
+			if got != tc.want {
+				t.Fatalf("viewFirebaseSyncKind(%v) = %q, want %q", tc.target, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHandleGlobalKeyTodoNewAndToggle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()

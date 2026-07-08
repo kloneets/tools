@@ -103,9 +103,12 @@ type terminalApp struct {
 	syncSpinnerTick        atomic.Int64
 	syncTimeout            time.Duration
 	manualFirebaseSync     func(context.Context) error
+	viewFirebaseSync       func(context.Context, view) error
 	firebaseTodoSyncer     *kokosync.TodoSyncer
 	firebaseNoteSyncer     *kokosync.NoteSyncer
 	firebaseSettingsSyncer *kokosync.SettingsSyncer
+	viewSyncMu             sync.Mutex
+	viewSyncInFlight       map[view]bool
 	openLinks              []string
 	deleteNotePath         string
 	deleteNoteLabel        string
@@ -350,6 +353,7 @@ func (a *terminalApp) Run(ctx context.Context) error {
 	})
 	go a.watchStatus(ctx)
 	a.startFirebaseTodoPolling(ctx)
+	a.startViewFirebaseSync(a.view, true)
 	a.refresh()
 	return app.Run()
 }
@@ -456,17 +460,17 @@ func (a *terminalApp) runLineMode(ctx context.Context) error {
 			fmt.Println("views: notes, pages, password, todo, sync, settings")
 			fmt.Println("save: :w, quit: :q, save and quit: :wq")
 		case "notes":
-			a.view = viewNotes
+			a.switchAppTab(viewNotes)
 		case "pages":
-			a.view = viewPages
+			a.switchAppTab(viewPages)
 		case "password":
-			a.view = viewPassword
+			a.switchAppTab(viewPassword)
 		case "todo":
-			a.view = viewTodo
+			a.switchAppTab(viewTodo)
 		case "sync":
-			a.view = viewSync
+			a.switchAppTab(viewSync)
 		case "settings":
-			a.view = viewSettings
+			a.switchAppTab(viewSettings)
 		case ":w":
 			_ = a.saveLocalState()
 		case ":wq":
@@ -894,8 +898,18 @@ func (a *terminalApp) appTabKeyHint() string {
 }
 
 func (a *terminalApp) switchAppTab(target view) {
+	a.switchAppTabWithMode(target, true)
+}
+
+func (a *terminalApp) switchAppTabWithMode(target view, closeTabSelect bool) {
+	changed := a.view != target
 	a.view = target
-	a.tabSelect = false
+	if closeTabSelect {
+		a.tabSelect = false
+	}
+	if changed {
+		a.startViewFirebaseSync(target, false)
+	}
 }
 
 func (a *terminalApp) appTabAtColumn(col int) (view, bool) {
@@ -1118,10 +1132,10 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		}
 		switch key.Name {
 		case "left":
-			a.view = a.prevView()
+			a.switchAppTabWithMode(a.prevView(), false)
 			return true
 		case "right":
-			a.view = a.nextView()
+			a.switchAppTabWithMode(a.nextView(), false)
 			return true
 		case "enter":
 			a.tabSelect = false
@@ -2066,6 +2080,114 @@ func (a *terminalApp) startManualFirebaseSync() {
 	}, func(err error) {
 		helpers.StatusBarInst().UpdateStatusBar("Firebase sync failed: " + err.Error())
 	})
+}
+
+func (a *terminalApp) startViewFirebaseSync(target view, force bool) {
+	if a == nil || target == viewRecorder {
+		return
+	}
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
+		return
+	}
+	a.viewSyncMu.Lock()
+	if a.viewSyncInFlight == nil {
+		a.viewSyncInFlight = map[view]bool{}
+	}
+	if a.viewSyncInFlight[target] && !force {
+		a.viewSyncMu.Unlock()
+		return
+	}
+	if a.viewSyncInFlight[target] {
+		a.viewSyncMu.Unlock()
+		return
+	}
+	a.viewSyncInFlight[target] = true
+	a.viewSyncMu.Unlock()
+
+	label := viewFirebaseSyncLabel(target)
+	helpers.StatusBarInst().UpdateStatusBar("Firebase " + label + " sync started")
+	timeout := a.syncTimeout
+	if timeout <= 0 {
+		timeout = manualSyncTimeout
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		syncFunc := a.syncViewToFirebase
+		if a.viewFirebaseSync != nil {
+			syncFunc = a.viewFirebaseSync
+		}
+		err := syncFunc(ctx, target)
+		a.viewSyncMu.Lock()
+		delete(a.viewSyncInFlight, target)
+		a.viewSyncMu.Unlock()
+		if err != nil {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase " + label + " sync failed: " + err.Error())
+			a.queueUIDraw(func() { a.refresh() })
+			return
+		}
+		helpers.StatusBarInst().UpdateStatusBar("Firebase " + label + " synced")
+		a.queueUIDraw(func() { a.refresh() })
+	}()
+}
+
+func (a *terminalApp) syncViewToFirebase(ctx context.Context, target view) error {
+	switch viewFirebaseSyncKind(target) {
+	case "pullTodos,pushTodos":
+		if err := a.pullTodosFromFirebase(ctx); err != nil {
+			return err
+		}
+		return a.pushTodosToFirebase(ctx)
+	case "pullNotes,pushNotes":
+		if err := a.pullNotesFromFirebase(ctx); err != nil {
+			return err
+		}
+		return a.pushNotesToFirebase(ctx)
+	case "pullSettings,pushSettings":
+		if err := a.pullSettingsFromFirebase(ctx); err != nil {
+			return err
+		}
+		return a.pushSettingsToFirebase(ctx)
+	case "full":
+		return a.syncToFirebase(ctx)
+	default:
+		return nil
+	}
+}
+
+func viewFirebaseSyncKind(target view) string {
+	switch target {
+	case viewTodo:
+		return "pullTodos,pushTodos"
+	case viewNotes:
+		return "pullNotes,pushNotes"
+	case viewPages, viewPassword, viewSettings:
+		return "pullSettings,pushSettings"
+	case viewSync:
+		return "full"
+	default:
+		return ""
+	}
+}
+
+func viewFirebaseSyncLabel(target view) string {
+	switch target {
+	case viewTodo:
+		return "todo"
+	case viewNotes:
+		return "notes"
+	case viewPages:
+		return "pages settings"
+	case viewPassword:
+		return "password settings"
+	case viewSettings:
+		return "settings"
+	case viewSync:
+		return "full"
+	default:
+		return "view"
+	}
 }
 
 func firebaseWorkspaceLabel(cfg *settings.FirebaseSettings) string {
@@ -3121,12 +3243,7 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 		return
 	}
 	go func() {
-		// Run initial sync on startup if enabled
 		fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
-		if firebaseEnabled(settings.Inst().Firebase, fileCfg) {
-			a.runFirebaseSyncTick(ctx)
-		}
-
 		ticker := time.NewTicker(firebasePollingInterval)
 		defer ticker.Stop()
 		for {

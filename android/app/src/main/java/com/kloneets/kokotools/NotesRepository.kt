@@ -17,6 +17,16 @@ class NotesRepository(private val context: Context) {
             .toList()
     }
 
+    fun listFolders(): List<String> {
+        notesRoot.mkdirs()
+        val directoryPaths = notesRoot
+            .walkTopDown()
+            .filter { it.isDirectory && it != notesRoot }
+            .map { it.relativeTo(notesRoot).invariantSeparatorsPath }
+            .toList()
+        return collectFolders(listNotes().map { it.relativePath }, directoryPaths)
+    }
+
     fun read(relativePath: String): String {
         val file = resolveNote(relativePath)
         return file.takeIf { it.isFile }?.readText() ?: ""
@@ -88,6 +98,45 @@ class NotesRepository(private val context: Context) {
                 .joinToString("/")
             val withName = clean.ifBlank { "untitled.md" }
             return if (withName.endsWith(".md", ignoreCase = true)) withName else "$withName.md"
+        }
+
+        fun buildNewNotePath(folder: String, input: String): String {
+            val normalizedFolder = folder
+                .trim()
+                .replace('\\', '/')
+                .split('/')
+                .filter { it.isNotBlank() && it != "." && it != ".." }
+                .joinToString("/")
+            val cleanInput = input.trim().replace('\\', '/')
+            val combined = listOf(normalizedFolder, cleanInput)
+                .filter { it.isNotBlank() }
+                .joinToString("/")
+            return normalizePath(combined)
+        }
+
+        fun collectFolders(notePaths: List<String>, directoryPaths: List<String> = emptyList()): List<String> {
+            val folders = linkedSetOf<String>()
+            notePaths.forEach { path ->
+                val parts = normalizedPathParts(path)
+                parts.dropLast(1).indices.forEach { index ->
+                    folders += parts.take(index + 1).joinToString("/")
+                }
+            }
+            directoryPaths.forEach { path ->
+                val parts = normalizedPathParts(path)
+                parts.indices.forEach { index ->
+                    folders += parts.take(index + 1).joinToString("/")
+                }
+            }
+            return folders.sortedWith(String.CASE_INSENSITIVE_ORDER)
+        }
+
+        private fun normalizedPathParts(input: String): List<String> {
+            return input
+                .trim()
+                .replace('\\', '/')
+                .split('/')
+                .filter { it.isNotBlank() && it != "." && it != ".." }
         }
 
         fun isManagedAssetDirName(name: String): Boolean = name == "assets" || name.endsWith(".assets")

@@ -87,6 +87,8 @@ class MainActivity : Activity() {
     private var todoRefreshRunnable: Runnable? = null
     private var firebasePullRunnable: Runnable? = null
     private var firebaseSettingsPushRunnable: Runnable? = null
+    private val firebaseViewSyncLock = Any()
+    private val firebaseViewSyncInFlight = mutableSetOf<FirebaseViewSyncScope>()
     private var pagesLocalEditUntilMs = 0L
     private var pagesLocalEditAtMs = 0L
 	private var todoDraftText = ""
@@ -113,6 +115,7 @@ class MainActivity : Activity() {
         buildRoot()
         showLastScreen()
         startFirebaseRealtimeIfEnabled()
+        syncCurrentScreenToFirebase(force = true)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -356,10 +359,14 @@ class MainActivity : Activity() {
     }
 
     private fun showScreen(screen: Screen) {
+        val changed = currentScreen != screen
         currentScreen = screen
         val lastScreen = screen.settingValue
         if (settings.androidApp.lastScreen != lastScreen) {
             persistLocalSettings(settings.copy(androidApp = settings.androidApp.copy(lastScreen = lastScreen)))
+        }
+        if (changed) {
+            syncCurrentScreenToFirebase()
         }
     }
 
@@ -712,21 +719,50 @@ class MainActivity : Activity() {
     }
 
     private fun promptNewNote() {
+        var selectedFolder = ""
+        val folders = notesRepository.listFolders()
+        lateinit var folderButton: Button
+        folderButton = commandButton("Folder: Root", View.generateViewId()) {
+            showNewNoteFolderPicker(folders, selectedFolder) { folder ->
+                selectedFolder = folder
+                folderButton.text = "Folder: ${folder.ifBlank { "Root" }}"
+            }
+        }
         val input = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT
             hint = "folder/name.md"
+            setSingleLine(true)
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            addView(folderButton)
+            addView(input)
         }
         AlertDialog.Builder(this)
             .setTitle("New note")
-            .setView(input)
+            .setView(form)
             .setPositiveButton("Create") { _, _ ->
-                val path = NotesRepository.normalizePath(input.text.toString())
+                val path = NotesRepository.buildNewNotePath(selectedFolder, input.text.toString())
                 currentNotePath = path
                 notesRepository.save(path, "")
                 pushNoteToFirebase(path, "")
                 loadedNoteText = ""
                 refreshNotes()
                 selectNote(path)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showNewNoteFolderPicker(folders: List<String>, selectedFolder: String, onSelect: (String) -> Unit) {
+        val labels = listOf("Root") + folders
+        val selectedIndex = folders.indexOf(selectedFolder).let { if (it >= 0) it + 1 else 0 }
+        AlertDialog.Builder(this)
+            .setTitle("Folder")
+            .setSingleChoiceItems(labels.toTypedArray(), selectedIndex) { dialog, which ->
+                onSelect(if (which == 0) "" else folders[which - 1])
+                dialog.dismiss()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -1609,6 +1645,127 @@ class MainActivity : Activity() {
         noteAutosaveHandler.postDelayed(runnable, FIREBASE_PULL_INTERVAL_MS)
     }
 
+    private fun syncCurrentScreenToFirebase(force: Boolean = false) {
+        syncScreenToFirebase(currentScreen, force)
+    }
+
+    private fun syncScreenToFirebase(screen: Screen, force: Boolean = false) {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        val scope = screen.syncScope
+        synchronized(firebaseViewSyncLock) {
+            if (!force && firebaseViewSyncInFlight.contains(scope)) return
+            if (!firebaseViewSyncInFlight.add(scope)) return
+        }
+        if (scope == FirebaseViewSyncScope.Full) {
+            syncToFirebase()
+            synchronized(firebaseViewSyncLock) {
+                firebaseViewSyncInFlight.remove(scope)
+            }
+            return
+        }
+        if (scope == FirebaseViewSyncScope.Notes) {
+            saveCurrentNoteSilently()
+        }
+        setSyncStatus("Firebase ${scope.label} sync started", transient = true)
+        Thread {
+            val session = freshFirebaseSession()
+            if (session == null) {
+                runOnUiThread { setSyncStatus("Firebase login required") }
+                finishViewSync(scope)
+                return@Thread
+            }
+            when (scope) {
+                FirebaseViewSyncScope.Todos -> syncTodoView(session)
+                FirebaseViewSyncScope.Notes -> syncNotesView(session)
+                FirebaseViewSyncScope.Settings -> syncSettingsView(session)
+                FirebaseViewSyncScope.Full -> finishViewSync(scope)
+            }
+        }.start()
+    }
+
+    private fun finishViewSync(scope: FirebaseViewSyncScope) {
+        synchronized(firebaseViewSyncLock) {
+            firebaseViewSyncInFlight.remove(scope)
+        }
+    }
+
+    private fun syncTodoView(session: FirebaseSession) {
+        runCatching {
+            val local = todoRepository.load()
+            val merged = firebaseSyncRepository.pullTodos(settings.firebase, local, session)
+            val changed = merged != local
+            if (changed) todoRepository.save(merged)
+            firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
+            changed to merged
+        }.onSuccess { (changed, merged) ->
+            runOnUiThread {
+                todoStore = merged
+                if (currentScreen == Screen.Todo && changed && canRebuildTodoAfterRemotePull()) {
+                    showTodoPreservingScroll()
+                }
+                setSyncStatus("Firebase todo view synced", transient = true)
+            }
+        }.onFailure { error ->
+            runOnUiThread { setSyncStatus("Firebase todo view sync failed: ${error.message}", transient = true) }
+        }
+        finishViewSync(FirebaseViewSyncScope.Todos)
+    }
+
+    private fun syncNotesView(session: FirebaseSession) {
+        runCatching {
+            firebaseSyncRepository.pullNotes(settings.firebase, session)
+        }.onSuccess { remoteNotes ->
+            runOnUiThread {
+                applyRemoteNotes(remoteNotes)
+                if (currentScreen == Screen.Notes) refreshNotes()
+                Thread {
+                    runCatching {
+                        notesRepository.listNotes().forEach { note ->
+                            firebaseSyncRepository.pushNote(settings.firebase, note.relativePath, notesRepository.read(note.relativePath), session)
+                        }
+                    }.onSuccess {
+                        runOnUiThread { setSyncStatus("Firebase notes view synced", transient = true) }
+                    }.onFailure { error ->
+                        runOnUiThread { setSyncStatus("Firebase notes view push failed: ${error.message}", transient = true) }
+                    }
+                    finishViewSync(FirebaseViewSyncScope.Notes)
+                }.start()
+            }
+        }.onFailure { error ->
+            runOnUiThread { setSyncStatus("Firebase notes view sync failed: ${error.message}", transient = true) }
+            finishViewSync(FirebaseViewSyncScope.Notes)
+        }
+    }
+
+    private fun syncSettingsView(session: FirebaseSession) {
+        runCatching {
+            firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
+        }.onSuccess { shared ->
+            runOnUiThread {
+                val localEditActive = hasActiveLocalEdit()
+                if (shared != null && !localEditActive && shared.rev > pagesLocalEditAtMs) {
+                    settings = SettingsRepository.applySharedSettings(settings, shared.values)
+                    settingsRepository.save(settings)
+                    firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
+                    showCurrentScreen()
+                }
+                Thread {
+                    runCatching {
+                        firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
+                    }.onSuccess {
+                        runOnUiThread { setSyncStatus("Firebase settings view synced", transient = true) }
+                    }.onFailure { error ->
+                        runOnUiThread { setSyncStatus("Firebase settings view push failed: ${error.message}", transient = true) }
+                    }
+                    finishViewSync(FirebaseViewSyncScope.Settings)
+                }.start()
+            }
+        }.onFailure { error ->
+            runOnUiThread { setSyncStatus("Firebase settings view sync failed: ${error.message}", transient = true) }
+            finishViewSync(FirebaseViewSyncScope.Settings)
+        }
+    }
+
     private fun promptFirebaseConfig() {
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2409,12 +2566,19 @@ class MainActivity : Activity() {
     private val COLOR_TEXT_MUTED: Int get() = palette.textMuted
     private val COLOR_SCRIM: Int get() = palette.scrim
 
-    private enum class Screen(val settingValue: String) {
-        Notes(AndroidScreenState.NOTES),
-        Pages(AndroidScreenState.PAGES),
-        Todo(AndroidScreenState.TODO),
-        Sync(AndroidScreenState.SYNC),
-        Settings(AndroidScreenState.SETTINGS),
+    private enum class Screen(val settingValue: String, val syncScope: FirebaseViewSyncScope) {
+        Notes(AndroidScreenState.NOTES, FirebaseViewSyncScope.Notes),
+        Pages(AndroidScreenState.PAGES, FirebaseViewSyncScope.Settings),
+        Todo(AndroidScreenState.TODO, FirebaseViewSyncScope.Todos),
+        Sync(AndroidScreenState.SYNC, FirebaseViewSyncScope.Full),
+        Settings(AndroidScreenState.SETTINGS, FirebaseViewSyncScope.Settings),
+    }
+
+    private enum class FirebaseViewSyncScope(val label: String) {
+        Todos("todo"),
+        Notes("notes"),
+        Settings("settings"),
+        Full("full"),
     }
 
     companion object {

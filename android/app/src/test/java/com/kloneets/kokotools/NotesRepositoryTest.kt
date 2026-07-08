@@ -21,6 +21,31 @@ class NotesRepositoryTest {
     }
 
     @Test
+    fun collectFoldersIncludesNoteAndDirectoryFolders() {
+        val folders = NotesRepository.collectFolders(
+            notePaths = listOf("daily/today.md", "Work/Ideas/one.md", "root.md"),
+            directoryPaths = listOf("Archive/2026", "daily"),
+        )
+
+        assertEquals(listOf("Archive", "Archive/2026", "daily", "Work", "Work/Ideas"), folders)
+    }
+
+    @Test
+    fun buildNewNotePathCombinesSelectedFolderAndName() {
+        assertEquals("Work/today.md", NotesRepository.buildNewNotePath("Work", "today"))
+    }
+
+    @Test
+    fun buildNewNotePathPreservesSlashFolderCreation() {
+        assertEquals("Work/Ideas/today.md", NotesRepository.buildNewNotePath("Work", "Ideas/today"))
+    }
+
+    @Test
+    fun buildNewNotePathRootKeepsExistingSlashBehavior() {
+        assertEquals("daily/today.md", NotesRepository.buildNewNotePath("", "daily/today"))
+    }
+
+    @Test
     fun detectsManagedAssetDirectoryNames() {
         assertTrue(NotesRepository.isManagedAssetDirName("daily.assets"))
         assertTrue(NotesRepository.isManagedAssetDirName("assets"))

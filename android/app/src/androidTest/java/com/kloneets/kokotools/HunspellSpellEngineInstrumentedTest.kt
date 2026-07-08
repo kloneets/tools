@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-class HunspellSpellEngineInstrumentedTest {
+class    HunspellSpellEngineInstrumentedTest {
     @Test
     fun loadsBundledDictionaries() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
