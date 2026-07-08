@@ -11,6 +11,9 @@
 - `make build`: build the normal desktop binary.
 - `make test`: run the full Go test suite.
 
+## Agent Development Workflow
+For feature work, behavioral changes, and non-trivial fixes, follow `docs/agent-development-workflow.md`. Use `.agents/planner.md` to create the accepted plan, `.agents/coder.md` to implement it, `.agents/reviewer.md` for iterative code review, and `.agents/done-auditor.md` to confirm the final work matches the plan. Every review finding must be fixed or explicitly waived before the task is considered done.
+
 ## Coding Style & Naming Conventions
 Use standard Go formatting with tabs and let `gofmt` own layout. Keep packages lowercase (`src/settings`, `src/app`) and exported identifiers in PascalCase. Prefer short, focused files inside the feature package instead of large cross-package helpers. Code should remain human-readable and maintainable. When working in an existing file, refactor it as needed to improve readability, structure, and maintainability instead of only adding the minimum change. Do not use emoji in code, comments, commit messages, pull requests, or repository documentation.
 
