@@ -427,42 +427,53 @@ func TestRenderEditorPaneReusesSpellCacheWhileTypingActiveWord(t *testing.T) {
 	settings.Inst().NotesApp.SpellDictionaries = []string{"en"}
 	defer ResetSpellTestHooksForTests()
 	writeSpellDictionaryForTest(t, "en", "SET UTF-8\n", "1\nknown/nm\n")
-	runCount := 0
+	var runCount atomic.Int32
+	refreshDone := make(chan struct{}, 2)
+	SetSpellRefreshHook(func() {
+		refreshDone <- struct{}{}
+	})
+	waitForRefresh := func(stage string) {
+		t.Helper()
+		select {
+		case <-refreshDone:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s spell check to complete", stage)
+		}
+	}
 	SetSpellNativeHooksForTests(func(name string) (string, error) {
 		if name == "nuspell" {
 			return "/bin/nuspell", nil
 		}
 		return "", errors.New("missing")
 	}, func(name string, args []string, input string) (string, error) {
-		runCount++
 		if strings.Contains(input, "kokotoolsspellprobe") {
 			return "& Wrong: kokotoolsspellprobe. How about: tool\n", nil
 		}
+		runCount.Add(1)
 		return "INFO: Pointed dictionary /tmp/index.aff\nEnter some text: * OK\n& Wrong: badwrd. How about: backward\n", nil
 	})
 
 	ed := &Editor{Text: "known badwrd ", Cursor: len([]rune("known badwrd ")), Mode: ModeInsert}
 	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
-	firstRunCount := runCount
+	waitForRefresh("initial")
+	firstRunCount := runCount.Load()
+	if firstRunCount != 1 {
+		t.Fatalf("native document checks = %d, want 1 after initial render", firstRunCount)
+	}
 
 	ed.Text = "known badwrdx"
 	ed.Cursor = len([]rune(ed.Text))
 	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
-	if runCount != firstRunCount {
-		t.Fatalf("native command runs = %d, want unchanged while typing active word (%d)", runCount, firstRunCount)
+	if got := runCount.Load(); got != firstRunCount {
+		t.Fatalf("native document checks = %d, want unchanged while typing active word (%d)", got, firstRunCount)
 	}
 
 	ed.Text += " "
 	ed.Cursor = len([]rune(ed.Text))
 	_ = strings.Join(renderEditorPane(ed, 40, 1), "\n")
-	deadline := time.After(time.Second)
-	for runCount <= firstRunCount {
-		select {
-		case <-deadline:
-			t.Fatalf("native command runs = %d, want another check after finishing word", runCount)
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	waitForRefresh("delimiter-triggered")
+	if got := runCount.Load(); got != firstRunCount+1 {
+		t.Fatalf("native document checks = %d, want exactly one new check after finishing word (%d)", got, firstRunCount+1)
 	}
 }
 
