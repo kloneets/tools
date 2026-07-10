@@ -610,37 +610,25 @@ class FirebaseSyncRepository(private val context: Context) {
         }
 
         fun remoteTodoHash(records: List<FirebaseRemoteTodo>): String {
-            val values = org.json.JSONArray()
-            records.sortedBy { it.item.id }.forEach { record ->
-                values.put(JSONObject()
-                    .put("id", record.item.id)
-                    .put("rev", record.rev)
-                    .put("deleted", record.deleted))
+            val values = records.sortedBy { it.item.id }.joinToString(separator = ",", prefix = "[", postfix = "]") { record ->
+                """{"id":${JSONObject.quote(record.item.id)},"rev":${record.rev},"deleted":${record.deleted}}"""
             }
-            return sha256String(values.toString())
+            return sha256String(values)
         }
 
         fun todoArchiveMonthHash(items: List<TodoItem>): String {
-            val values = org.json.JSONArray()
-            items.sortedBy { it.id }.forEach { item ->
-                values.put(JSONObject()
-                    .put("id", item.id)
-                    .put("rev", item.updatedAt.toInstant().toEpochMilli())
-                    .put("deleted", false))
+            val values = items.sortedBy { it.id }.joinToString(separator = ",", prefix = "[", postfix = "]") { item ->
+                """{"id":${JSONObject.quote(item.id)},"rev":${item.updatedAt.toInstant().toEpochMilli()},"deleted":false}"""
             }
-            return sha256String(values.toString())
+            return sha256String(values)
         }
 
         fun noteMetadataHash(notes: List<FirebaseRemoteNote>): String {
-            val values = org.json.JSONArray()
-            notes.sortedBy { it.id }.forEach { note ->
-                values.put(JSONObject()
-                    .put("id", note.id)
-                    .put("path", NotesRepository.normalizePath(note.path).replace('\\', '/'))
-                    .put("rev", note.rev)
-                    .put("deleted", note.deleted))
+            val values = notes.sortedBy { it.id }.joinToString(separator = ",", prefix = "[", postfix = "]") { note ->
+                val path = NotesRepository.normalizePath(note.path).replace('\\', '/')
+                """{"id":${JSONObject.quote(note.id)},"path":${JSONObject.quote(path)},"rev":${note.rev},"deleted":${note.deleted}}"""
             }
-            return sha256String(values.toString())
+            return sha256String(values)
         }
 
         private fun canonicalJson(value: Any?): String {
@@ -648,12 +636,12 @@ class FirebaseSyncRepository(private val context: Context) {
                 null, JSONObject.NULL -> "null"
                 is JSONObject -> {
                     val keys = value.keys().asSequence().toList().sorted()
-                    keys.joinToString(prefix = "{", postfix = "}") { key ->
+                    keys.joinToString(separator = ",", prefix = "{", postfix = "}") { key ->
                         JSONObject.quote(key) + ":" + canonicalJson(value.opt(key))
                     }
                 }
                 is org.json.JSONArray -> {
-                    (0 until value.length()).joinToString(prefix = "[", postfix = "]") { index ->
+                    (0 until value.length()).joinToString(separator = ",", prefix = "[", postfix = "]") { index ->
                         canonicalJson(value.opt(index))
                     }
                 }

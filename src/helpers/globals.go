@@ -1,7 +1,5 @@
 package helpers
 
-import "log"
-
 type GlobalOptions struct {
 	Debug bool
 }
@@ -14,7 +12,7 @@ func CurrentGlobals() *GlobalOptions {
 
 func Globals() *GlobalOptions {
 	if goInstance == nil {
-		log.Fatal("We have no global options!")
+		return InitGlobals()
 	}
 	return goInstance
 }

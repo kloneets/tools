@@ -1001,8 +1001,9 @@ class MainActivity : Activity() {
         scroll.addView(list)
         content.addView(scroll)
 
-        addTodoSection(list, "Short term", TodoRepository.shortItems(todoStore), archived = false)
-        addTodoSection(list, "Long term", TodoRepository.longItems(todoStore), archived = false)
+        TodoScreenRows.activeSections(todoStore).forEach { section ->
+            addTodoSection(list, section, archived = false)
+        }
         list.addView(sectionTitle("Archive"))
         val groups = TodoRepository.archiveGroups(todoStore)
         val archiveMonths = TodoRepository.archiveMonths(todoStore)
@@ -1097,13 +1098,13 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun addTodoSection(parent: LinearLayout, title: String, items: List<TodoItem>, archived: Boolean) {
-        parent.addView(sectionTitle(title))
-        if (items.isEmpty()) {
-            parent.addView(emptySectionText("No ${title.lowercase()} todos"))
+    private fun addTodoSection(parent: LinearLayout, section: TodoDisplaySection, archived: Boolean) {
+        parent.addView(sectionTitle(section.title))
+        if (section.items.isEmpty()) {
+            parent.addView(emptySectionText(section.emptyText))
             return
         }
-        items.forEach { parent.addView(todoRow(it, archived)) }
+        section.items.forEach { parent.addView(todoRow(it, archived)) }
     }
 
     private fun emptySectionText(text: String): TextView {

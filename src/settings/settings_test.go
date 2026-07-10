@@ -169,6 +169,29 @@ func TestInitMissingFileUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestInstInitializesWhenMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settingsInstance = nil
+
+	got := Inst()
+	if got == nil {
+		t.Fatal("Inst() returned nil")
+	}
+	if settingsInstance != got {
+		t.Fatal("Inst() did not store initialized settings")
+	}
+}
+
+func TestGetFileNameFallsBackWhenHomeMissing(t *testing.T) {
+	t.Setenv("HOME", "")
+
+	got := getFileName("settings.json")
+	want := filepath.Join(".", helpers.AppConfigMainDir, helpers.AppConfigAppDir, "settings.json")
+	if got != want {
+		t.Fatalf("getFileName() = %q, want %q", got, want)
+	}
+}
+
 func TestPersistedNotesEditorWidth(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

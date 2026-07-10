@@ -35,6 +35,34 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Run vet
+        run: go vet ./...
+
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Run Android unit tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest
+
+      - name: Run Android lint
+        working-directory: android
+        run: ./gradlew :app:lintDebug
+
   build-macos-arm64:
     runs-on: macos-14
 

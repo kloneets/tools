@@ -2,6 +2,7 @@ package com.kloneets.kokotools
 
 import android.content.Context
 import android.graphics.Color
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
@@ -171,8 +172,10 @@ class AndroidSpellChecker(
     private class AppSpellCheckUnderlineSpan : CharacterStyle(), UpdateAppearance {
         override fun updateDrawState(textPaint: TextPaint) {
             textPaint.isUnderlineText = true
-            textPaint.underlineColor = Color.RED
-            textPaint.underlineThickness = UNDERLINE_THICKNESS
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                textPaint.underlineColor = Color.RED
+                textPaint.underlineThickness = UNDERLINE_THICKNESS
+            }
         }
     }
 

@@ -1,7 +1,6 @@
 package helpers
 
 import (
-	"log"
 	"sync"
 )
 
@@ -18,7 +17,7 @@ func HasStatusBar() bool {
 
 func StatusBarInst() *StatusBar {
 	if statusBarInstance == nil {
-		log.Fatal("We have no status bar instance!")
+		InitStatusBar()
 	}
 	return statusBarInstance
 }

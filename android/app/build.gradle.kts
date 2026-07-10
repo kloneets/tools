@@ -88,6 +88,12 @@ android {
         buildConfig = true
     }
 
+    sourceSets {
+        getByName("test") {
+            resources.directories.add("../../src/sync/testdata")
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")

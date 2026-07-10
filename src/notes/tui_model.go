@@ -5468,7 +5468,7 @@ func (w *Workspace) ensureEditorVisible() {
 func notesDir() string {
 	dirname, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		dirname = "."
 	}
 	return filepath.Join(dirname, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes")
 }
@@ -5476,7 +5476,7 @@ func notesDir() string {
 func legacyFileName() string {
 	dirname, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		dirname = "."
 	}
 	return filepath.Join(dirname, helpers.AppConfigMainDir, helpers.AppConfigAppDir, "notes.txt")
 }

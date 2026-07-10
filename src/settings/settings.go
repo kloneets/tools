@@ -144,7 +144,7 @@ var BuiltInThemes = []string{
 
 func Inst() *UserSettings {
 	if settingsInstance == nil {
-		log.Fatal("Settings is not initialized")
+		Init()
 	}
 
 	return settingsInstance
@@ -468,7 +468,7 @@ func runSaveHooks(notifyHooks bool) {
 func getFileName(n string) string {
 	dirname, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		dirname = "."
 	}
 
 	return filepath.Join(

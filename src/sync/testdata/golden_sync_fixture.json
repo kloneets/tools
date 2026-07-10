@@ -1,0 +1,56 @@
+{
+  "todo_store": {
+    "items": [
+      {
+        "id": "archived",
+        "text": "archived body is ignored by metadata hash",
+        "status": "archived",
+        "term": "long",
+        "order": 1,
+        "created_at": "2026-06-01T00:00:00Z",
+        "updated_at": "2026-06-01T00:00:00Z",
+        "archived_at": "2026-06-01T00:00:00Z"
+      },
+      {
+        "id": "active",
+        "text": "active",
+        "status": "todo",
+        "term": "short",
+        "order": 0,
+        "created_at": "2026-06-01T00:00:00Z",
+        "updated_at": "2026-06-01T00:00:00Z"
+      }
+    ],
+    "archive_months": ["2026-06", "2026-05"]
+  },
+  "note_records": {
+    "b": {
+      "id": "b",
+      "path": "Folder/B.md",
+      "text": "",
+      "rev": 2,
+      "deleted": true
+    },
+    "a": {
+      "id": "a",
+      "path": "A.md",
+      "text": "body",
+      "rev": 1,
+      "deleted": false
+    }
+  },
+  "shared_settings": {
+    "pages_app": {
+      "read_pages": 12
+    },
+    "ui": {
+      "theme": "tokyo-night"
+    }
+  },
+  "expected": {
+    "todo_store_hash": "45c8fec3cb6aafbc481ad4605a0dc5faf2f4cf5a320ad69f3e01b346d3f97dec",
+    "todo_archive_months_hash": "e282b18d738b47acb7535bb0fe382296f10a82dcf40e0530cbcb74add8c3d93b",
+    "note_metadata_hash": "bef675e455812535b7a75196f9972d9df42ee48734750e0bbae09a7552588275",
+    "shared_settings_hash": "3cd30388873dffba89c002a2baee22fefb279387c10ec0be67591be7a78d3f7b"
+  }
+}

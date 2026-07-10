@@ -1,6 +1,7 @@
 .vscode
 koko-tools
 main
+*.test
 !android/app/src/main/
 !android/app/src/main/**
 dist

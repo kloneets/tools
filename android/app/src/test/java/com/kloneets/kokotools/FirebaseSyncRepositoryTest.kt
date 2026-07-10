@@ -1,6 +1,7 @@
 package com.kloneets.kokotools
 
 import org.junit.Assert.assertEquals
+import org.json.JSONObject
 import org.junit.Test
 import java.net.URLDecoder
 import java.time.OffsetDateTime
@@ -49,5 +50,43 @@ class FirebaseSyncRepositoryTest {
             FirebaseSyncRepository.todoStoreHash(store),
             FirebaseSyncRepository.todoStoreHash(changedArchiveBody),
         )
+    }
+
+    @Test
+    fun goldenSyncHashesMatchSharedFixture() {
+        val fixture = JSONObject(readResource("golden_sync_fixture.json"))
+        val expected = fixture.getJSONObject("expected")
+        val store = TodoStore(
+            items = fixture.getJSONObject("todo_store")
+                .getJSONArray("items")
+                .let { items ->
+                    (0 until items.length()).map { index ->
+                        TodoRepository.parseItem(items.getJSONObject(index))
+                    }
+                },
+            archiveMonths = fixture.getJSONObject("todo_store")
+                .getJSONArray("archive_months")
+                .let { months -> (0 until months.length()).map { months.getString(it) } },
+        )
+        val notesObject = fixture.getJSONObject("note_records")
+        val notes = notesObject.keys().asSequence().map { key ->
+            val note = notesObject.getJSONObject(key)
+            FirebaseRemoteNote(
+                id = note.optString("id", key),
+                path = note.getString("path"),
+                text = note.optString("text", ""),
+                rev = note.getLong("rev"),
+                deleted = note.optBoolean("deleted", false),
+            )
+        }.toList()
+
+        assertEquals(expected.getString("todo_store_hash"), FirebaseSyncRepository.todoStoreHash(store))
+        assertEquals(expected.getString("todo_archive_months_hash"), FirebaseSyncRepository.todoArchiveMonthsHash(store.archiveMonths))
+        assertEquals(expected.getString("note_metadata_hash"), FirebaseSyncRepository.noteMetadataHash(notes))
+        assertEquals(expected.getString("shared_settings_hash"), FirebaseSyncRepository.sharedSettingsHash(fixture.getJSONObject("shared_settings")))
+    }
+
+    private fun readResource(name: String): String {
+        return requireNotNull(javaClass.classLoader?.getResource(name)) { "missing resource $name" }.readText()
     }
 }

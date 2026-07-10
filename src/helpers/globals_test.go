@@ -18,3 +18,18 @@ func TestInitGlobalsSetsDefaultDebug(t *testing.T) {
 		t.Fatal("Globals() did not return initialized instance")
 	}
 }
+
+func TestGlobalsInitializesWhenMissing(t *testing.T) {
+	t.Cleanup(func() {
+		goInstance = nil
+	})
+	goInstance = nil
+
+	got := Globals()
+	if got == nil {
+		t.Fatal("Globals() returned nil")
+	}
+	if CurrentGlobals() != got {
+		t.Fatal("Globals() did not store initialized instance")
+	}
+}
