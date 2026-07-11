@@ -123,21 +123,6 @@ func (s *NoteSyncer) PushNotes(ctx context.Context, notes []NoteFile) (NotePushR
 		state.NoteHashes[id] = hash
 		result.Pushed++
 	}
-	records := make(map[string]NoteRecord, len(notes))
-	for _, note := range notes {
-		path := NormalizeNotePath(note.Path)
-		if path == "" || strings.ToLower(filepath.Ext(path)) != ".md" {
-			continue
-		}
-		id := note.ID
-		if id == "" {
-			id = NoteID(path)
-		}
-		records[id] = NoteRecord{ID: id, Path: path, Rev: state.Notes[id]}
-	}
-	featureHash := NoteMetadataHash(records)
-	markFeaturePulled(&state, SyncFeatureNotes, featureHash, now)
-	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureNotes, featureHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	if err := SaveState(s.StatePath, state); err != nil {
@@ -202,10 +187,6 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 		return result, err
 	}
 	now := s.now()
-	if hashes, ok := pullSyncHashes(ctx, s.Provider, s.WorkspaceID); ok && shouldSkipFeaturePull(state, s.WorkspaceID, SyncFeatureNotes, hashes[SyncFeatureNotes], now) {
-		result.State = state
-		return result, nil
-	}
 	remoteNotes, err := pullRemoteNotes(ctx, s.Provider, s.WorkspaceID)
 	if err != nil {
 		return result, err
@@ -256,9 +237,6 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 			result.Changed = true
 		}
 	}
-	featureHash := NoteMetadataHash(remoteNotes)
-	markFeaturePulled(&state, SyncFeatureNotes, featureHash, now)
-	pushSyncHashBestEffort(ctx, s.Provider, s.WorkspaceID, SyncFeatureNotes, featureHash, now, s.Session.UID)
 	state.WorkspaceID = s.WorkspaceID
 	state.Provider = ProviderFirebase
 	result.State = state

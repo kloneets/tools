@@ -3517,7 +3517,7 @@ func (a *terminalApp) pullNotesFromFirebase(ctx context.Context) error {
 		return err
 	}
 	if !result.Changed {
-		return nil
+		return a.firebaseNoteSyncer.SaveState(result.State)
 	}
 	for _, rel := range result.Deletes {
 		if err := os.Remove(a.noteAbsPath(rel)); err != nil && !os.IsNotExist(err) {

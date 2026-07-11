@@ -16,6 +16,7 @@ import android.os.Looper
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -1878,14 +1879,16 @@ class MainActivity : Activity() {
     }
 
     private fun handleFirebaseGoogleSignInResult(resultCode: Int, data: Intent?) {
-        if (resultCode != RESULT_OK || data == null) {
+        if (data == null) {
+            Log.w(TAG, "Google sign-in returned no result data (resultCode=$resultCode)")
             setSyncStatus("Firebase Google login canceled")
             return
         }
         val account = try {
             GoogleSignIn.getSignedInAccountFromIntent(data).getResult(ApiException::class.java)
         } catch (error: ApiException) {
-            setSyncStatus("Firebase Google login failed: ${error.message}")
+            Log.e(TAG, "Google sign-in failed with status ${error.statusCode}", error)
+            setSyncStatus(formatGoogleSignInError(error.statusCode, error.message))
             return
         }
         val googleIdToken = account.idToken
@@ -2583,6 +2586,7 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private const val TAG = "MainActivity"
         private const val FIREBASE_GOOGLE_SIGN_IN_REQUEST_CODE = 4203
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L

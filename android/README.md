@@ -72,8 +72,10 @@ Firebase requirements:
 1. Android package name must be `com.kloneets.kokotools`.
 2. Firebase Authentication must enable Email/password and Google providers.
 3. Realtime Database must be configured with production-safe rules.
-4. Release builds need SHA-1 and SHA-256 fingerprints added to the Firebase Android app for the upload key and Play app signing key.
-5. After changing Firebase fingerprints or OAuth clients, download a fresh `google-services.json` into `android/google-services.json`.
+4. Debug builds need the local debug key SHA-1 and SHA-256 fingerprints registered in Firebase.
+5. Release builds need SHA-1 and SHA-256 fingerprints added for both the upload key and Play app signing key.
+6. Google Authentication must use the same web OAuth client ID as `KOKO_GOOGLE_WEB_CLIENT_ID`; Android OAuth clients remain package/certificate specific.
+7. After changing Firebase fingerprints or OAuth clients, download a fresh `google-services.json` into `android/google-services.json` and confirm it contains a type-1 Android OAuth client for the intended signing certificate.
 
 ## Firebase Config Policy
 

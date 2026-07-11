@@ -1,0 +1,4 @@
+Improved Firebase sync reliability across Android and desktop.
+Added short-term and long-term todo sections with easy task moves.
+Restored reliable Google sign-in and clearer authentication errors.
+Improved note creation, folders, navigation, and saved app state.

@@ -15,8 +15,28 @@
       },
       "oauth_client": [
         {
-          "client_id": "863485242223-572skgr49ttjc61e9sfei7ff0h0d2jb5.apps.googleusercontent.com",
-          "client_type": 3
+          "client_id": "863485242223-2j4i5dcgevj1q8rknd8trruhg632jds0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kloneets.kokotools",
+            "certificate_hash": "0c8ed1f7d7366dd28e9941b891a9a0cbd8033d2a"
+          }
+        },
+        {
+          "client_id": "863485242223-6ongvo2lfto243gcqp9qmtm02asqojkf.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kloneets.kokotools",
+            "certificate_hash": "d3c58710dc35823efb665bc63a218ee167497b5a"
+          }
+        },
+        {
+          "client_id": "863485242223-7qet5cmmke8r4b6qgnefd6rgcoh9c5qe.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kloneets.kokotools",
+            "certificate_hash": "25f9ebf730260fe8f4445fad79f01d07179111f0"
+          }
         }
       ],
       "api_key": [

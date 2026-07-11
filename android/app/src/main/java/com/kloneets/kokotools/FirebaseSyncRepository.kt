@@ -225,7 +225,6 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
             .put("deleted", false)
         putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
-        clearLocalSyncHash(settings, SYNC_FEATURE_NOTES)
     }
 
     fun pushNoteDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
@@ -241,32 +240,11 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_by", session.uid)
             .put("deleted", true)
         putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
-        clearLocalSyncHash(settings, SYNC_FEATURE_NOTES)
     }
 
     fun pullNotes(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteNote> {
-        syncHashes(settings, session)[SYNC_FEATURE_NOTES]?.let { remote ->
-            if (shouldSkipFeature(settings, SYNC_FEATURE_NOTES, remote)) return emptyList()
-        }
-        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/notes", session.idToken) ?: return emptyList()
-        val notes = mutableListOf<FirebaseRemoteNote>()
-        remote.keys().forEach { id ->
-            val record = remote.optJSONObject(id) ?: return@forEach
-            val path = record.optString("path", "")
-            if (path.isBlank()) return@forEach
-            notes += FirebaseRemoteNote(
-                id = record.optString("id", id),
-                path = NotesRepository.normalizePath(path).replace('\\', '/'),
-                text = record.optString("text", ""),
-                rev = record.optLong("rev", 0L),
-                deleted = record.optBoolean("deleted", false),
-            )
-        }
-        val sorted = notes.sortedBy { it.path.lowercase() }
-        val hash = noteMetadataHash(sorted)
-        markFeaturePulled(settings, SYNC_FEATURE_NOTES, hash)
-        writeSyncHashBestEffort(settings, SYNC_FEATURE_NOTES, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
-        return sorted
+        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/notes", session.idToken)
+        return parseRemoteNotes(remote)
     }
 
     fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession, forceFull: Boolean = false): TodoStore {
@@ -526,13 +504,6 @@ class FirebaseSyncRepository(private val context: Context) {
             .apply()
     }
 
-    private fun clearLocalSyncHash(settings: FirebaseSettings, feature: String) {
-        syncState.edit()
-            .remove(syncHashKey(settings, feature))
-            .remove(syncHashPulledAtKey(settings, feature))
-            .apply()
-    }
-
     private fun requestJson(method: String, url: String, body: String?, contentType: String): JSONObject {
         val response = request(method, url, body, contentType)
         return JSONObject(response)
@@ -579,7 +550,6 @@ class FirebaseSyncRepository(private val context: Context) {
         private const val SYNC_FEATURE_TODOS = "todos"
         private const val SYNC_FEATURE_TODO_ARCHIVE_MONTHS = "todo_archive_months"
         private const val SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX = "todo_archive_month:"
-        private const val SYNC_FEATURE_NOTES = "notes"
         private const val SYNC_FEATURE_SETTINGS = "settings"
         private const val SYNC_HASH_FULL_VALIDATION_MS = 24L * 60L * 60L * 1000L
 
@@ -623,12 +593,20 @@ class FirebaseSyncRepository(private val context: Context) {
             return sha256String(values)
         }
 
-        fun noteMetadataHash(notes: List<FirebaseRemoteNote>): String {
-            val values = notes.sortedBy { it.id }.joinToString(separator = ",", prefix = "[", postfix = "]") { note ->
-                val path = NotesRepository.normalizePath(note.path).replace('\\', '/')
-                """{"id":${JSONObject.quote(note.id)},"path":${JSONObject.quote(path)},"rev":${note.rev},"deleted":${note.deleted}}"""
-            }
-            return sha256String(values)
+        fun parseRemoteNotes(remote: JSONObject?): List<FirebaseRemoteNote> {
+            if (remote == null) return emptyList()
+            return remote.keys().asSequence().mapNotNull { fallbackId ->
+                val record = remote.optJSONObject(fallbackId) ?: return@mapNotNull null
+                val path = record.optString("path", "")
+                if (path.isBlank()) return@mapNotNull null
+                FirebaseRemoteNote(
+                    id = record.optString("id", fallbackId).ifBlank { fallbackId },
+                    path = NotesRepository.normalizePath(path).replace('\\', '/'),
+                    text = record.optString("text", ""),
+                    rev = record.optLong("rev", 0L),
+                    deleted = record.optBoolean("deleted", false),
+                )
+            }.sortedWith(compareBy<FirebaseRemoteNote> { it.path.lowercase() }.thenBy { it.path }.thenBy { it.id }).toList()
         }
 
         private fun canonicalJson(value: Any?): String {

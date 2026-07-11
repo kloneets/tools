@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -93,6 +94,9 @@ func TestNoteSyncerPushSkipsUnchangedNoteContent(t *testing.T) {
 	if len(provider.mutations) != 1 {
 		t.Fatalf("mutations len = %d, want unchanged note skipped", len(provider.mutations))
 	}
+	if provider.hashPushes != 0 {
+		t.Fatalf("note hash pushes = %d, want none", provider.hashPushes)
+	}
 }
 
 func TestNoteSyncerPullRecordsAppliedNoteHash(t *testing.T) {
@@ -117,9 +121,57 @@ func TestNoteSyncerPullRecordsAppliedNoteHash(t *testing.T) {
 	}
 }
 
+func TestNoteSyncerPullIgnoresLegacyMatchingHashAcrossDirtyDeferral(t *testing.T) {
+	now := time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC)
+	id := NoteID("Work/Plan.md")
+	remote := map[string]NoteRecord{id: {ID: id, Path: "Work/Plan.md", Text: "remote", Rev: 2}}
+	hash := NoteMetadataHash(remote)
+	provider := &fakeNoteProvider{
+		snapshot: Snapshot{Notes: remote},
+		hashes:   map[string]SyncHashRecord{SyncFeatureNotes: {Hash: hash}},
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := defaultState()
+	state.WorkspaceID = "ws"
+	markFeaturePulled(&state, SyncFeatureNotes, hash, now)
+	if err := SaveState(statePath, state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	syncer := NoteSyncer{Provider: provider, WorkspaceID: "ws", StatePath: statePath, Session: Session{IDToken: "token"}, Now: func() time.Time { return now }}
+	dirty := map[string]LocalNote{"Work/Plan.md": {ID: id, Path: "Work/Plan.md", Text: "dirty local", Dirty: true}}
+
+	deferred, err := syncer.PullNotes(context.Background(), dirty)
+	if err != nil {
+		t.Fatalf("PullNotes() error = %v", err)
+	}
+	if deferred.Changed || deferred.State.Notes[id] != 0 || provider.notePulls != 1 {
+		t.Fatalf("deferred result = %#v, pulls = %d; want fetched and deferred", deferred, provider.notePulls)
+	}
+	if err := syncer.SaveState(deferred.State); err != nil {
+		t.Fatalf("SaveState() after deferred pull error = %v", err)
+	}
+
+	applied, err := syncer.PullNotes(context.Background(), map[string]LocalNote{
+		"Work/Plan.md": {ID: id, Path: "Work/Plan.md", Text: "clean local"},
+	})
+	if err != nil {
+		t.Fatalf("second PullNotes() error = %v", err)
+	}
+	if !applied.Changed || len(applied.Upserts) != 1 || applied.Upserts[0].Text != "remote" || provider.notePulls != 2 {
+		t.Fatalf("second result = %#v, pulls = %d; want fetched remote applied", applied, provider.notePulls)
+	}
+	if provider.hashPulls != 0 || provider.hashPushes != 0 {
+		t.Fatalf("note hash calls = pulls %d pushes %d, want none", provider.hashPulls, provider.hashPushes)
+	}
+}
+
 type fakeNoteProvider struct {
-	snapshot  Snapshot
-	mutations []Mutation
+	snapshot   Snapshot
+	mutations  []Mutation
+	hashes     map[string]SyncHashRecord
+	notePulls  int
+	hashPulls  int
+	hashPushes int
 }
 
 func (p fakeNoteProvider) Login(context.Context, string, string) (Session, error) {
@@ -136,7 +188,22 @@ func (p *fakeNoteProvider) PushMutation(_ context.Context, _ string, mutation Mu
 }
 
 func (p *fakeNoteProvider) PullSnapshot(context.Context, string) (Snapshot, error) {
+	p.notePulls++
 	return p.snapshot, nil
+}
+
+func (p *fakeNoteProvider) PullSyncHashes(context.Context, string) (map[string]SyncHashRecord, error) {
+	p.hashPulls++
+	return p.hashes, nil
+}
+
+func (p *fakeNoteProvider) PushSyncHash(_ context.Context, _ string, feature string, record SyncHashRecord) error {
+	p.hashPushes++
+	if p.hashes == nil {
+		p.hashes = map[string]SyncHashRecord{}
+	}
+	p.hashes[feature] = record
+	return nil
 }
 
 func (p fakeNoteProvider) CreateWorkspace(context.Context, string) (WorkspaceMeta, error) {

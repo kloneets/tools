@@ -1,6 +1,7 @@
 package com.kloneets.kokotools
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.json.JSONObject
 import org.junit.Test
 import java.net.URLDecoder
@@ -23,16 +24,41 @@ class FirebaseSyncRepositoryTest {
     }
 
     @Test
-    fun noteMetadataHashIsStableForInputOrder() {
-        val notes = listOf(
-            FirebaseRemoteNote(id = "b", path = "B.md", text = "body two", rev = 2L, deleted = false),
-            FirebaseRemoteNote(id = "a", path = "A.md", text = "body one", rev = 1L, deleted = false),
-        )
+    fun parseRemoteNotesNormalizesAndSortsWithFallbackIdsAndTombstones() {
+        val remote = JSONObject()
+            .put("fallback-z", JSONObject()
+                .put("id", "")
+                .put("path", "Folder\\Z.md")
+                .put("text", "")
+                .put("rev", 3L)
+                .put("deleted", true))
+            .put("a", JSONObject()
+                .put("id", "remote-a")
+                .put("path", "folder/a.md")
+                .put("text", "body")
+                .put("rev", 2L))
+            .put("invalid", JSONObject().put("text", "missing path"))
 
-        assertEquals(
-            FirebaseSyncRepository.noteMetadataHash(notes),
-            FirebaseSyncRepository.noteMetadataHash(notes.reversed()),
-        )
+        val notes = FirebaseSyncRepository.parseRemoteNotes(remote)
+
+        assertEquals(listOf("remote-a", "fallback-z"), notes.map { it.id })
+        assertEquals(listOf("folder/a.md", "Folder/Z.md"), notes.map { it.path })
+        assertTrue(notes.last().deleted)
+    }
+
+    @Test
+    fun parseRemoteNotesPreservesTextRevisionAndTombstone() {
+        val remote = JSONObject().put("note-key", JSONObject()
+            .put("path", "note.md")
+            .put("text", "note body")
+            .put("rev", 7L)
+            .put("deleted", true))
+        val note = FirebaseSyncRepository.parseRemoteNotes(remote).single()
+
+        assertEquals("note-key", note.id)
+        assertEquals("note body", note.text)
+        assertEquals(7L, note.rev)
+        assertTrue(note.deleted)
     }
 
     @Test
@@ -68,21 +94,8 @@ class FirebaseSyncRepositoryTest {
                 .getJSONArray("archive_months")
                 .let { months -> (0 until months.length()).map { months.getString(it) } },
         )
-        val notesObject = fixture.getJSONObject("note_records")
-        val notes = notesObject.keys().asSequence().map { key ->
-            val note = notesObject.getJSONObject(key)
-            FirebaseRemoteNote(
-                id = note.optString("id", key),
-                path = note.getString("path"),
-                text = note.optString("text", ""),
-                rev = note.getLong("rev"),
-                deleted = note.optBoolean("deleted", false),
-            )
-        }.toList()
-
         assertEquals(expected.getString("todo_store_hash"), FirebaseSyncRepository.todoStoreHash(store))
         assertEquals(expected.getString("todo_archive_months_hash"), FirebaseSyncRepository.todoArchiveMonthsHash(store.archiveMonths))
-        assertEquals(expected.getString("note_metadata_hash"), FirebaseSyncRepository.noteMetadataHash(notes))
         assertEquals(expected.getString("shared_settings_hash"), FirebaseSyncRepository.sharedSettingsHash(fixture.getJSONObject("shared_settings")))
     }
 
