@@ -10,9 +10,9 @@ Read Play release state through the Publishing API, register Play App Signing ce
 
 ## Implementation Notes
 - Coding agent: Codex.
-- Summary: Enabled Play publishing automation, confirmed production version code 1, extracted Play App Signing certificates, registered them in Firebase, refreshed OAuth configuration, prepared version 2 (`0.1.1`), and published the signed bundle to Internal testing.
+- Summary: Enabled Play publishing automation, confirmed production version code 1, extracted Play App Signing certificates, registered them in Firebase, refreshed OAuth configuration, prepared version 2 (`0.1.1`), published it to Internal testing, and promoted the verified artifact to Production.
 - Files changed: Android version/config/release notes, prior sync and SSO implementation files, documentation, and task records.
-- External changes: Enabled Google Play Android Developer API; registered Play App Signing SHA-1/SHA-256 in Firebase; uploaded AAB checksum `bb834e80a40dff66d397ea28eb8604cca894c180d5b0907bebb77ad9dfcd5f99`; committed Internal release `2 (0.1.1)`.
+- External changes: Enabled Google Play Android Developer API; registered Play App Signing SHA-1/SHA-256 in Firebase; uploaded AAB checksum `bb834e80a40dff66d397ea28eb8604cca894c180d5b0907bebb77ad9dfcd5f99`; committed Internal release `2 (0.1.1)`; installed and verified the Play build; promoted version 2 to a completed Production release.
 - Plan deviations: Google Play publishing automation was enabled and authenticated during this task rather than requiring manual console upload. The first combined clean Android build exhausted default Gradle metaspace; repository Gradle memory limits were raised and the signed release build then passed.
 - Tests and checks run: `go test ./...`, `go vet ./...`, Go build, Android unit tests, lint, debug assembly, clean release compilation, signed release bundle, `git diff --check`, AAB signature verification, checksum verification, Play version/track inspection, Firebase certificate registration, bundle upload, and committed Internal-track verification.
 
@@ -33,4 +33,4 @@ Read Play release state through the Publishing API, register Play App Signing ce
 - Status: complete with waivers.
 - Plan items confirmed: Version 2/0.1.1, signed and verified AAB, Play/Firebase signing configuration, committed Internal release, and complete reviewed sync/SSO source.
 - Tests and checks confirmed: Go tests/vet/build; Android unit tests, lint, debug and release builds; AAB signing/checksum; Play upload/track verification; `git diff --check`.
-- Waivers or skipped checks: Internal tester configuration is empty. Add `janis@xit.lv`, install version 2 from Play, and verify Google SSO/session restoration/sync before production promotion.
+- Waivers or skipped checks: None remaining for release publication. Version 2 was installed from Play, confirmed as Play-installed, restored Firebase-backed data, and completed Firebase sync before Production promotion.
