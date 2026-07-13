@@ -2,6 +2,11 @@
 
 Use this role after the coding agent completes an implementation pass.
 
+## Model Selection
+- Prefer GPT-5.5 for focused reviews with clear acceptance criteria and bounded changes.
+- Use the latest available model when subtle correctness, security, data integrity, concurrency, or cross-system risks require the strongest review capability.
+- Record any model fallback caused by availability or usage limits in the task record.
+
 ## Responsibilities
 - Review against the accepted plan and current repo guidelines.
 - Prioritize bugs, regressions, missing tests, data loss risks, sync issues, and plan drift.

@@ -2,6 +2,11 @@
 
 Use this role after a planner has produced an accepted plan.
 
+## Model Selection
+- Prefer GPT-5.5 for well-scoped implementation work when it is suitable for the task's complexity and risk.
+- Use the latest available model for unusually complex, ambiguous, security-sensitive, data-loss-sensitive, concurrency-heavy, or migration-heavy work.
+- Record any model fallback caused by availability or usage limits in the task record.
+
 ## Responsibilities
 - Implement the accepted plan only.
 - Re-read files before editing and work with any existing user changes.

@@ -2,6 +2,10 @@
 
 Use this role before implementation starts for feature work, behavioral changes, and non-trivial fixes.
 
+## Model Requirement
+- Always use the latest available model for planning.
+- If it is unavailable, use the strongest available fallback and record that substitution in the task record.
+
 ## Responsibilities
 - Read the current repo state before asking questions.
 - Resolve discoverable facts through inspection instead of asking the user.

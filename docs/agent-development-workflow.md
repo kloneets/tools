@@ -11,9 +11,16 @@ Use the role prompts in `.agents/`:
 - Review agent: reviews for defects, regressions, missing tests, and plan drift.
 - Done auditor: confirms that the final work matches the accepted plan.
 
+## Model Selection
+
+- Planning always uses the latest available model because planning owns product interpretation, architecture, risk identification, and the decision-complete implementation contract.
+- Coding, review, and done-audit agents should use GPT-5.5 when the assignment is well-scoped and its complexity and risk are appropriate for that model.
+- Use the latest available model instead of GPT-5.5 for unusually complex or ambiguous cross-system changes, security- or data-loss-sensitive work, difficult concurrency or migration work, and reviews where subtle correctness risks dominate cost or speed.
+- If a requested model is unavailable or usage-limited, use the strongest available fallback and record the substitution in the task record. Model availability must not silently skip a required workflow stage.
+
 ## Workflow
 
-1. Planner reads the repo, resolves discoverable facts, asks only necessary questions, and produces a decision-complete plan.
+1. A planner using the latest available model reads the repo, resolves discoverable facts, asks only necessary questions, and produces a decision-complete plan.
 2. Coding agent implements the accepted plan, keeps scope tight, updates tests, and records any deviations.
 3. Review agent reviews the implementation against the plan and repo guidelines.
 4. Coding agent fixes each finding or records an explicit waiver with the risk and reason.
