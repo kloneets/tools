@@ -39,9 +39,16 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 class MainActivity : Activity() {
     private lateinit var settingsRepository: SettingsRepository
@@ -63,6 +70,8 @@ class MainActivity : Activity() {
     private lateinit var titleText: TextView
     private lateinit var subtitleText: TextView
     private lateinit var actionsButton: ImageButton
+    private lateinit var syncToolbarControl: FrameLayout
+    private lateinit var syncProblemBadge: ImageView
     private lateinit var drawerScrim: View
     private lateinit var drawerPanel: LinearLayout
     private lateinit var content: LinearLayout
@@ -103,6 +112,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.enableEdgeToEdge(window)
         settingsRepository = SettingsRepository(this)
         notesRepository = NotesRepository(this)
         todoRepository = TodoRepository(this)
@@ -184,14 +194,41 @@ class MainActivity : Activity() {
         }
         val syncButton = toolbarIconButton(
             icon = R.drawable.ic_sync_24,
-            id = View.generateViewId(),
+            id = R.id.sync_toolbar,
             description = "Quick sync to Firebase",
         ) {
-            syncToFirebase()
+            if (firebaseHasProblem()) showSync() else syncToFirebase()
+        }.apply {
+            contentDescription = null
+            setOnClickListener(null)
+            isFocusable = false
+            layoutParams = FrameLayout.LayoutParams(dp(48), dp(48))
+        }
+        syncProblemBadge = ImageView(this).apply {
+            id = R.id.sync_problem_badge
+            setImageResource(R.drawable.ic_warning_18)
+            contentDescription = "Firebase sync needs attention"
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(dp(18), dp(18), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(2)
+                marginEnd = dp(2)
+            }
+        }
+        syncToolbarControl = FrameLayout(this).apply {
+            contentDescription = "Quick sync to Firebase"
+            isClickable = true
+            isFocusable = true
+            background = selectableBorderlessBackground()
+            setOnClickListener {
+                if (firebaseHasProblem()) showSync() else syncToFirebase()
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(4) }
+            addView(syncButton)
+            addView(syncProblemBadge)
         }
         toolbar.addView(toolsButton)
         toolbar.addView(titleGroup)
-        toolbar.addView(syncButton)
+        toolbar.addView(syncToolbarControl)
         toolbar.addView(actionsButton)
 
         content = LinearLayout(this).apply {
@@ -209,6 +246,28 @@ class MainActivity : Activity() {
         root.addView(appLayout)
         buildNavigationDrawer()
         setContentView(root)
+        applyWindowInsets()
+        ViewCompat.requestApplyInsets(root)
+        updateSyncProblemIndicator()
+    }
+
+    private fun applyWindowInsets() {
+        val appBasePadding = appLayout.rootPadding()
+        val drawerBasePadding = drawerPanel.rootPadding()
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, windowInsets ->
+            val insets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            appLayout.applyPadding(appBasePadding.withInsets(insets.left, insets.top, insets.right, insets.bottom))
+            drawerPanel.applyPadding(drawerBasePadding.withInsets(insets.left, insets.top, insets.right, insets.bottom))
+            windowInsets
+        }
+    }
+
+    private fun View.rootPadding() = RootPadding(paddingLeft, paddingTop, paddingRight, paddingBottom)
+
+    private fun View.applyPadding(padding: RootPadding) {
+        setPadding(padding.left, padding.top, padding.right, padding.bottom)
     }
 
     private fun toolbarIconButton(icon: Int, id: Int, description: String, action: () -> Unit): ImageButton {
@@ -1063,7 +1122,7 @@ class MainActivity : Activity() {
             if (session == null) {
                 runOnUiThread {
                     loadingTodoArchiveMonths.remove(month)
-                    setSyncStatus("Firebase login required")
+                    setSyncError("Firebase login required")
                     showTodoPreservingScroll()
                 }
                 return@Thread
@@ -1078,13 +1137,13 @@ class MainActivity : Activity() {
                     todoStore = merged
                     loadingTodoArchiveMonths.remove(month)
                     expandedTodoArchiveMonths.add(month)
-                    setSyncStatus("Firebase todo archive loaded: $month")
+                    setSyncSuccess("Firebase todo archive loaded: $month")
                     showTodoPreservingScroll()
                 }
             }.onFailure { error ->
                 runOnUiThread {
                     loadingTodoArchiveMonths.remove(month)
-                    setSyncStatus("Firebase todo archive load failed: ${error.message}")
+                    setSyncError("Firebase todo archive load failed: ${error.message}")
                     showTodoPreservingScroll()
                 }
             }
@@ -1606,12 +1665,14 @@ class MainActivity : Activity() {
     private fun persistSettings(next: AppSettings) {
         settings = next
         settingsRepository.save(settings)
+        updateSyncProblemIndicator()
         scheduleSharedSettingsPush()
     }
 
     private fun persistLocalSettings(next: AppSettings) {
         settings = next
         settingsRepository.save(settings)
+        updateSyncProblemIndicator()
     }
 
     private fun startFirebaseRealtimeIfEnabled() {
@@ -1672,7 +1733,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 finishViewSync(scope)
                 return@Thread
             }
@@ -1705,10 +1766,10 @@ class MainActivity : Activity() {
                 if (currentScreen == Screen.Todo && changed && canRebuildTodoAfterRemotePull()) {
                     showTodoPreservingScroll()
                 }
-                setSyncStatus("Firebase todo view synced", transient = true)
+                setSyncSuccess("Firebase todo view synced", transient = true)
             }
         }.onFailure { error ->
-            runOnUiThread { setSyncStatus("Firebase todo view sync failed: ${error.message}", transient = true) }
+            runOnUiThread { setSyncError("Firebase todo view sync failed: ${error.message}", transient = true) }
         }
         finishViewSync(FirebaseViewSyncScope.Todos)
     }
@@ -1726,15 +1787,15 @@ class MainActivity : Activity() {
                             firebaseSyncRepository.pushNote(settings.firebase, note.relativePath, notesRepository.read(note.relativePath), session)
                         }
                     }.onSuccess {
-                        runOnUiThread { setSyncStatus("Firebase notes view synced", transient = true) }
+                        runOnUiThread { setSyncSuccess("Firebase notes view synced", transient = true) }
                     }.onFailure { error ->
-                        runOnUiThread { setSyncStatus("Firebase notes view push failed: ${error.message}", transient = true) }
+                        runOnUiThread { setSyncError("Firebase notes view push failed: ${error.message}", transient = true) }
                     }
                     finishViewSync(FirebaseViewSyncScope.Notes)
                 }.start()
             }
         }.onFailure { error ->
-            runOnUiThread { setSyncStatus("Firebase notes view sync failed: ${error.message}", transient = true) }
+            runOnUiThread { setSyncError("Firebase notes view sync failed: ${error.message}", transient = true) }
             finishViewSync(FirebaseViewSyncScope.Notes)
         }
     }
@@ -1755,15 +1816,15 @@ class MainActivity : Activity() {
                     runCatching {
                         firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
                     }.onSuccess {
-                        runOnUiThread { setSyncStatus("Firebase settings view synced", transient = true) }
+                        runOnUiThread { setSyncSuccess("Firebase settings view synced", transient = true) }
                     }.onFailure { error ->
-                        runOnUiThread { setSyncStatus("Firebase settings view push failed: ${error.message}", transient = true) }
+                        runOnUiThread { setSyncError("Firebase settings view push failed: ${error.message}", transient = true) }
                     }
                     finishViewSync(FirebaseViewSyncScope.Settings)
                 }.start()
             }
         }.onFailure { error ->
-            runOnUiThread { setSyncStatus("Firebase settings view sync failed: ${error.message}", transient = true) }
+            runOnUiThread { setSyncError("Firebase settings view sync failed: ${error.message}", transient = true) }
             finishViewSync(FirebaseViewSyncScope.Settings)
         }
     }
@@ -1807,7 +1868,7 @@ class MainActivity : Activity() {
 
     private fun promptFirebaseLogin(register: Boolean) {
         if (!firebaseSyncRepository.backendConfigured(settings.firebase.copy(enabled = true, realtime = true))) {
-            setSyncStatus("Firebase config unavailable. Add bundled defaults or advanced custom config.")
+            setSyncError("Firebase config unavailable. Add bundled defaults or advanced custom config.")
             return
         }
         val form = LinearLayout(this).apply {
@@ -1841,14 +1902,14 @@ class MainActivity : Activity() {
                         firebaseSession = session
                         runOnUiThread {
                             persistSettings(settings.copy(firebase = workspaceSettings))
-                            setSyncStatus("Firebase workspace: ${workspaceSettings.workspaceName}")
+                            setSyncSuccess("Firebase workspace: ${workspaceSettings.workspaceName}")
                             scheduleFirebasePull()
                             pullFirebaseRealtimeData()
                             pushSharedFirebaseData()
                         }
                     }.onFailure { error ->
                         val label = if (register) "account creation" else "login"
-                        runOnUiThread { setSyncStatus("Firebase $label failed: ${error.message}") }
+                        runOnUiThread { setSyncError("Firebase $label failed: ${error.message}") }
                     }
                 }.start()
             }
@@ -1858,11 +1919,11 @@ class MainActivity : Activity() {
 
     private fun loginFirebaseWithGoogle() {
         if (!firebaseSyncRepository.backendConfigured(settings.firebase.copy(enabled = true, realtime = true))) {
-            setSyncStatus("Firebase config unavailable. Add bundled defaults or advanced custom config.")
+            setSyncError("Firebase config unavailable. Add bundled defaults or advanced custom config.")
             return
         }
         if (BuildConfig.GOOGLE_WEB_CLIENT_ID.isBlank()) {
-            setSyncStatus("Google web client ID is not configured.")
+            setSyncError("Google web client ID is not configured.")
             return
         }
         val options = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
@@ -1881,19 +1942,19 @@ class MainActivity : Activity() {
     private fun handleFirebaseGoogleSignInResult(resultCode: Int, data: Intent?) {
         if (data == null) {
             Log.w(TAG, "Google sign-in returned no result data (resultCode=$resultCode)")
-            setSyncStatus("Firebase Google login canceled")
+            setSyncError("Firebase Google login canceled")
             return
         }
         val account = try {
             GoogleSignIn.getSignedInAccountFromIntent(data).getResult(ApiException::class.java)
         } catch (error: ApiException) {
             Log.e(TAG, "Google sign-in failed with status ${error.statusCode}", error)
-            setSyncStatus(formatGoogleSignInError(error.statusCode, error.message))
+            setSyncError(formatGoogleSignInError(error.statusCode, error.message))
             return
         }
         val googleIdToken = account.idToken
         if (googleIdToken.isNullOrBlank()) {
-            setSyncStatus("Firebase Google login failed: missing Google ID token")
+            setSyncError("Firebase Google login failed: missing Google ID token")
             return
         }
         val next = settings.firebase.copy(
@@ -1914,13 +1975,13 @@ class MainActivity : Activity() {
                 firebaseSession = session
                 runOnUiThread {
                     persistSettings(settings.copy(firebase = workspaceSettings))
-                    setSyncStatus("Firebase Google login ready: ${workspaceSettings.workspaceName}")
+                    setSyncSuccess("Firebase Google login ready: ${workspaceSettings.workspaceName}")
                     scheduleFirebasePull()
                     pullFirebaseRealtimeData()
                     pushSharedFirebaseData()
                 }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase Google login failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase Google login failed: ${error.message}") }
             }
         }.start()
     }
@@ -1943,15 +2004,15 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
                 firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
             }.onSuccess {
-                runOnUiThread { setSyncStatus("Firebase todos pushed") }
+                runOnUiThread { setSyncSuccess("Firebase todos pushed") }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase push failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase push failed: ${error.message}") }
             }
         }.start()
     }
@@ -1961,15 +2022,15 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
                 firebaseSyncRepository.pushNote(settings.firebase, path, text, session)
             }.onSuccess {
-                runOnUiThread { setSyncStatus("Firebase note pushed") }
+                runOnUiThread { setSyncSuccess("Firebase note pushed") }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase note push failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase note push failed: ${error.message}") }
             }
         }.start()
     }
@@ -1977,11 +2038,17 @@ class MainActivity : Activity() {
     private fun pushNoteDeleteToFirebase(path: String) {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
-            val session = freshFirebaseSession() ?: return@Thread
+            val session = freshFirebaseSession()
+            if (session == null) {
+                runOnUiThread { setSyncError("Firebase login required") }
+                return@Thread
+            }
             runCatching {
                 firebaseSyncRepository.pushNoteDelete(settings.firebase, path, session)
+            }.onSuccess {
+                runOnUiThread { setSyncSuccess("Firebase note deleted") }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase note delete failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase note delete failed: ${error.message}") }
             }
         }.start()
     }
@@ -2002,7 +2069,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
@@ -2012,10 +2079,10 @@ class MainActivity : Activity() {
             }.onSuccess { settingsPushed ->
                 runOnUiThread {
                     val verb = if (pushSettings && settingsPushed) "pushed" else "unchanged"
-                    setSyncStatus("Firebase shared settings $verb")
+                    setSyncSuccess("Firebase shared settings $verb")
                 }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase shared push failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase shared push failed: ${error.message}") }
             }
         }.start()
     }
@@ -2025,7 +2092,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
@@ -2059,11 +2126,11 @@ class MainActivity : Activity() {
                     }
                     if (!localEditActive) {
                         val settingsStatus = if (shared != null) "shared settings pulled, " else ""
-                        setSyncStatus("Firebase shared sync: ${settingsStatus}complete")
+                        setSyncSuccess("Firebase shared sync: ${settingsStatus}complete")
                     }
                 }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase shared pull failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase shared pull failed: ${error.message}") }
             }
         }.start()
     }
@@ -2077,7 +2144,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
@@ -2127,12 +2194,12 @@ class MainActivity : Activity() {
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null) ", shared settings pulled" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
-                    setSyncStatus(
+                    setSyncSuccess(
                         "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
                     )
                 }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase pull failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase pull failed: ${error.message}") }
             }
         }.start()
     }
@@ -2144,7 +2211,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
@@ -2197,7 +2264,7 @@ class MainActivity : Activity() {
                     pushLocalStateAfterManualFirebasePull(pullResult, shared)
                 }
 			}.onFailure { error ->
-				runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}", transient = true) }
+				runOnUiThread { setSyncError("Firebase sync failed: ${error.message}", transient = true) }
 			}
 		}.start()
 	}
@@ -2209,7 +2276,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
@@ -2225,13 +2292,13 @@ class MainActivity : Activity() {
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null || settingsPushed) ", shared settings synced" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
-					setSyncStatus(
+					setSyncSuccess(
 						"Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
 						transient = true,
 					)
 				}
 			}.onFailure { error ->
-				runOnUiThread { setSyncStatus("Firebase sync failed: ${error.message}", transient = true) }
+				runOnUiThread { setSyncError("Firebase sync failed: ${error.message}", transient = true) }
 			}
 		}.start()
 	}
@@ -2245,7 +2312,7 @@ class MainActivity : Activity() {
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
-                runOnUiThread { setSyncStatus("Firebase login required") }
+                runOnUiThread { setSyncError("Firebase login required") }
                 return@Thread
             }
             runCatching {
@@ -2278,12 +2345,12 @@ class MainActivity : Activity() {
                         }
                     }
                     if (currentScreen == Screen.Pages) showPages()
-                    setSyncStatus(
+                    setSyncSuccess(
                         "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s)",
                     )
                 }
             }.onFailure { error ->
-                runOnUiThread { setSyncStatus("Firebase replace failed: ${error.message}") }
+                runOnUiThread { setSyncError("Firebase replace failed: ${error.message}") }
             }
         }.start()
     }
@@ -2373,16 +2440,43 @@ class MainActivity : Activity() {
         return todoDraftText.isBlank()
     }
 
-	private fun setSyncStatus(status: String, transient: Boolean = false) {
-		lastSyncStatus = status
-		syncStatusText?.text = status
-		if (transient && currentScreen != Screen.Sync) {
-			Toast.makeText(this, status, Toast.LENGTH_SHORT).show()
-		}
-	}
+    private fun setSyncSuccess(status: String, transient: Boolean = false) =
+        setSyncStatus(status, transient, SyncOutcome.Success)
+
+    private fun setSyncError(status: String, transient: Boolean = false) =
+        setSyncStatus(status, transient, SyncOutcome.Error)
+
+    private fun setSyncStatus(
+        status: String,
+        transient: Boolean = false,
+        outcome: SyncOutcome = SyncOutcome.Information,
+    ) {
+        lastSyncStatus = status
+        syncStatusText?.text = status
+        if (outcome != SyncOutcome.Information) {
+            val firebaseStatus = if (outcome == SyncOutcome.Success) {
+                FirebaseSyncStatus.Success
+            } else {
+                FirebaseSyncStatus.Error
+            }
+            settings = settings.copy(
+                firebase = settings.firebase.copy(
+                    lastSyncAt = syncTimestamp(),
+                    lastSyncStatus = firebaseStatus,
+                    lastSyncMessage = status,
+                ),
+            )
+            settingsRepository.save(settings)
+        }
+        updateSyncProblemIndicator()
+        if (transient && currentScreen != Screen.Sync) {
+            Toast.makeText(this, status, Toast.LENGTH_SHORT).show()
+        }
+    }
 
 	private fun currentSyncStatus(): String {
 		if (lastSyncStatus.isNotBlank()) return lastSyncStatus
+		if (settings.firebase.lastSyncMessage.isNotBlank()) return settings.firebase.lastSyncMessage
 		if (settings.firebase.enabled) {
             val workspace = settings.firebase.workspaceName.ifBlank { settings.firebase.workspaceId }
             return if (firebaseSyncRepository.configured(settings.firebase)) {
@@ -2399,6 +2493,31 @@ class MainActivity : Activity() {
         }
         if (FirebaseDefaults.bundled.ready) return "Firebase: ready. Create account or login."
         return "Firebase config unavailable. Add bundled defaults or advanced custom config."
+    }
+
+    private fun firebaseHasProblem(): Boolean {
+        return SyncUiState.hasFirebaseProblem(
+            firebase = settings.firebase,
+            backendConfigured = firebaseSyncRepository.backendConfigured(settings.firebase),
+            hasSavedSession = firebaseSyncRepository.hasSavedSession(),
+        )
+    }
+
+    private fun updateSyncProblemIndicator() {
+        if (!::syncProblemBadge.isInitialized) return
+        val hasProblem = firebaseHasProblem()
+        syncProblemBadge.visibility = if (hasProblem) View.VISIBLE else View.GONE
+        syncToolbarControl.contentDescription = if (hasProblem) {
+            "Firebase sync needs attention. Open Sync"
+        } else {
+            "Quick sync to Firebase"
+        }
+    }
+
+    private fun syncTimestamp(): String {
+        return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
     }
 
     private fun dialogButton(label: String): Button {
@@ -2547,12 +2666,9 @@ class MainActivity : Activity() {
     }
 
     private fun applySystemBars() {
-        window.statusBarColor = palette.statusBar
-        window.navigationBarColor = palette.navigationBar
-        window.decorView.systemUiVisibility = if (palette.lightSystemBars) {
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-        } else {
-            0
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = palette.lightSystemBars
+            isAppearanceLightNavigationBars = palette.lightSystemBars
         }
     }
 
@@ -2583,6 +2699,12 @@ class MainActivity : Activity() {
         Notes("notes"),
         Settings("settings"),
         Full("full"),
+    }
+
+    private enum class SyncOutcome {
+        Information,
+        Success,
+        Error,
     }
 
     companion object {

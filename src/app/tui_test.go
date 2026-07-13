@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/kloneets/tools/src/pages"
 	"github.com/kloneets/tools/src/password"
 	"github.com/kloneets/tools/src/settings"
+	kokosync "github.com/kloneets/tools/src/sync"
 	"github.com/kloneets/tools/src/todo"
 	"github.com/rivo/tview"
 )
@@ -100,6 +102,171 @@ func TestRenderTabBarUsesConfiguredTabOrder(t *testing.T) {
 	}
 	if target, ok := app.appTabViewForKey("3"); !ok || target != viewTodo {
 		t.Fatalf("appTabViewForKey(3) = %v, %t; want todo, true", target, ok)
+	}
+}
+
+func TestFirebaseSyncUnhealthy(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *settings.FirebaseSettings
+		writeToken bool
+		password   bool
+		want       bool
+	}{
+		{name: "disabled hides stale error", cfg: &settings.FirebaseSettings{LastSyncStatus: "error"}},
+		{name: "enabled missing config", cfg: &settings.FirebaseSettings{Enabled: true, Realtime: true}, want: true},
+		{name: "enabled missing auth", cfg: &settings.FirebaseSettings{Enabled: true, Realtime: true, APIKey: "key", DatabaseURL: "https://db", WorkspaceID: "workspace"}, want: true},
+		{name: "latest error", cfg: &settings.FirebaseSettings{Enabled: true, Realtime: true, APIKey: "key", DatabaseURL: "https://db", WorkspaceID: "workspace", LastSyncStatus: "error"}, writeToken: true, want: true},
+		{name: "password auth", cfg: &settings.FirebaseSettings{Enabled: true, Realtime: true, APIKey: "key", DatabaseURL: "https://db", WorkspaceID: "workspace", LastSyncStatus: "ok"}, password: true},
+		{name: "healthy", cfg: &settings.FirebaseSettings{Enabled: true, Realtime: true, APIKey: "key", DatabaseURL: "https://db", WorkspaceID: "workspace", LastSyncStatus: "ok"}, writeToken: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("KOKO_FIREBASE_EMAIL", "")
+			t.Setenv("KOKO_FIREBASE_PASSWORD", "")
+			settings.Init()
+			settings.Inst().Firebase = tc.cfg
+			if tc.writeToken {
+				if err := kokosync.SaveToken(kokosync.TokenPath(), kokosync.TokenFile{RefreshToken: "refresh"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.password {
+				t.Setenv("KOKO_FIREBASE_EMAIL", "user@example.com")
+				t.Setenv("KOKO_FIREBASE_PASSWORD", "secret")
+			}
+			if got := (&terminalApp{}).firebaseSyncUnhealthy(); got != tc.want {
+				t.Fatalf("firebaseSyncUnhealthy() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSyncWarningDotRendersAndMapsToSyncTab(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true, Realtime: true}
+	app := &terminalApp{view: viewNotes}
+
+	if got := app.renderTabBar(); !strings.Contains(got, themeMarkupFG(currentTheme().ErrorAccent)+"●") {
+		t.Fatalf("renderTabBar() = %q, want colored warning dot", got)
+	}
+	pos := 0
+	for i, tab := range app.visibleAppTabs() {
+		label := fmt.Sprintf(" %s:%s ", tab.key, app.appTabPlainLabel(tab))
+		if tab.view == viewSync {
+			dotCol := pos + len([]rune(label)) - 2
+			if got, ok := app.appTabAtColumn(dotCol); !ok || got != viewSync {
+				t.Fatalf("appTabAtColumn(dot) = %v, %t; want sync, true", got, ok)
+			}
+			return
+		}
+		pos += len([]rune(label))
+		if i < len(app.visibleAppTabs())-1 {
+			pos++
+		}
+	}
+	t.Fatal("sync tab not found")
+}
+
+func TestRecordFirebaseSyncOutcomeKeepsWarningUntilSuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true}
+	app := &terminalApp{}
+
+	app.recordFirebaseSyncOutcome(errors.New("offline"), "")
+	if got := settings.Inst().Firebase.LastSyncStatus; got != "error" {
+		t.Fatalf("status after error = %q, want error", got)
+	}
+	// Starting a retry does not write status, so the prior warning remains.
+	if got := settings.Inst().Firebase.LastSyncStatus; got != "error" {
+		t.Fatalf("status during retry = %q, want error", got)
+	}
+	app.recordFirebaseSyncOutcome(nil, "Firebase sync complete")
+	if got := settings.Inst().Firebase.LastSyncStatus; got != "ok" {
+		t.Fatalf("status after success = %q, want ok", got)
+	}
+}
+
+func TestDeferredSyncCallersKeepPriorError(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*terminalApp)
+	}{
+		{name: "manual", run: func(app *terminalApp) {
+			app.manualFirebaseSync = func(context.Context) error { return errFirebaseSyncDeferred }
+			app.startManualFirebaseSync()
+		}},
+		{name: "view", run: func(app *terminalApp) {
+			app.viewFirebaseSync = func(context.Context, view) error { return errFirebaseSyncDeferred }
+			app.startViewFirebaseSync(viewTodo, true)
+		}},
+		{name: "periodic", run: func(app *terminalApp) {
+			app.runFirebaseSyncTick(context.Background())
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			settings.Init()
+			settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true, Realtime: true, LastSyncStatus: "error", LastSyncMessage: "offline"}
+			done := make(chan struct{}, 1)
+			app := &terminalApp{syncTimeout: time.Second, settingsDirty: true, firebaseSyncDone: done}
+			if tc.name == "periodic" {
+				app.periodicFirebaseSync = func(context.Context) error { return errFirebaseSyncDeferred }
+			}
+			tc.run(app)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for sync caller")
+			}
+			if got := settings.Inst().Firebase.LastSyncStatus; got != "error" {
+				t.Fatalf("status = %q, want prior error", got)
+			}
+		})
+	}
+}
+
+func TestAsyncFirebasePushesPersistErrorsAndComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*terminalApp)
+	}{
+		{name: "todos", run: func(app *terminalApp) { app.pushTodosToFirebaseSoon() }},
+		{name: "notes", run: func(app *terminalApp) { app.pushNotesToFirebaseSoon() }},
+		{name: "note delete", run: func(app *terminalApp) {
+			app.pushNoteDeleteToFirebaseSoon(filepath.Join(app.notesRootPath(), "gone.md"))
+		}},
+		{name: "settings", run: func(app *terminalApp) { app.pushSettingsToFirebaseSoon() }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			settings.Init()
+			settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true, Realtime: true}
+			done := make(chan struct{}, 1)
+			app := &terminalApp{
+				asyncFirebasePushDone: done,
+				asyncFirebasePush: func(context.Context, string, string) error {
+					return errors.New("push failed")
+				},
+			}
+			tc.run(app)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for async push")
+			}
+			if got := settings.Inst().Firebase.LastSyncStatus; got != "error" {
+				t.Fatalf("status = %q, want error", got)
+			}
+			if got := settings.Inst().Firebase.LastSyncMessage; got != "push failed" {
+				t.Fatalf("message = %q, want push failure", got)
+			}
+		})
 	}
 }
 
@@ -375,7 +542,9 @@ func TestHandleGlobalKeyCtrlRStartsQuickFirebaseSync(t *testing.T) {
 	helpers.InitStatusBar()
 	started := make(chan struct{})
 	release := make(chan struct{})
+	done := make(chan struct{}, 1)
 	app := &terminalApp{
+		firebaseSyncDone: done,
 		manualFirebaseSync: func(context.Context) error {
 			close(started)
 			<-release
@@ -386,7 +555,6 @@ func TestHandleGlobalKeyCtrlRStartsQuickFirebaseSync(t *testing.T) {
 	if !app.handleGlobalKey(notes.Key{Name: "r", Ctrl: true}) {
 		t.Fatal("handleGlobalKey(ctrl+r) = false, want true")
 	}
-	defer close(release)
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -397,6 +565,12 @@ func TestHandleGlobalKeyCtrlRStartsQuickFirebaseSync(t *testing.T) {
 	}
 	if app.syncProgressLabel != "sync to firebase" {
 		t.Fatalf("syncProgressLabel = %q, want %q", app.syncProgressLabel, "sync to firebase")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("quick Firebase sync did not finish")
 	}
 }
 
@@ -677,8 +851,10 @@ func TestSwitchAppTabStartsCurrentViewSync(t *testing.T) {
 	settings.Init()
 	settings.Inst().Firebase = &settings.FirebaseSettings{Enabled: true, Realtime: true}
 	called := make(chan view, 1)
+	done := make(chan struct{}, 1)
 	app := &terminalApp{
-		view: viewNotes,
+		view:             viewNotes,
+		firebaseSyncDone: done,
 		viewFirebaseSync: func(_ context.Context, target view) error {
 			called <- target
 			return nil
@@ -694,6 +870,11 @@ func TestSwitchAppTabStartsCurrentViewSync(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for view sync")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for view sync completion")
 	}
 }
 
@@ -1321,6 +1502,7 @@ func TestAnsiToTViewActiveTabCloseUsesErrorOnActiveBackground(t *testing.T) {
 }
 
 func TestHandleGlobalKeyMovesTabSelectionWithArrows(t *testing.T) {
+	settings.Inst().Firebase.Enabled = false
 	app := &terminalApp{view: viewNotes, tabSelect: true}
 	if !app.handleGlobalKey(notes.Key{Name: "right"}) {
 		t.Fatal("handleGlobalKey() = false, want true for right in tab select")

@@ -8,6 +8,8 @@
     <item name="app_title" type="id" />
     <item name="tools_menu" type="id" />
     <item name="actions_menu" type="id" />
+    <item name="sync_toolbar" type="id" />
+    <item name="sync_problem_badge" type="id" />
     <item name="drawer_scrim" type="id" />
     <item name="drawer_panel" type="id" />
     <item name="notes_list" type="id" />

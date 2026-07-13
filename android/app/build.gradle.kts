@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.kloneets.kokotools"
-    compileSdk = 35
+    compileSdk = 36
 
     val keystorePropertiesFile = rootProject.file("keystore.properties")
     val keystoreProperties = Properties()
@@ -110,6 +110,7 @@ android {
 fun Any?.orEmptyString(): String = (this as? String).orEmpty()
 
 dependencies {
+    implementation("androidx.core:core-ktx:1.17.0")
     implementation("com.google.android.gms:play-services-auth:21.5.0")
     implementation("io.noties:prism4j:2.0.0") {
         exclude(group = "org.jetbrains", module = "annotations-java5")

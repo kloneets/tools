@@ -64,6 +64,9 @@ class SettingsRepository(private val context: Context) {
                         userEmail = firebase.optString("user_email", ""),
                         workspaceId = firebase.optString("workspace_id", ""),
                         workspaceName = firebase.optString("workspace_name", ""),
+                        lastSyncAt = firebase.optString("last_sync_at", ""),
+                        lastSyncStatus = FirebaseSyncStatus.fromValue(firebase.optString("last_sync_status", "")),
+                        lastSyncMessage = firebase.optString("last_sync_message", ""),
                     ),
                     firebaseDefaults,
                 ),
@@ -127,9 +130,9 @@ class SettingsRepository(private val context: Context) {
             firebase.put("user_email", settings.firebase.userEmail)
             firebase.put("workspace_id", settings.firebase.workspaceId)
             firebase.put("workspace_name", settings.firebase.workspaceName)
-            firebase.putIfMissing("last_sync_at", "")
-            firebase.putIfMissing("last_sync_status", "")
-            firebase.putIfMissing("last_sync_message", "")
+            firebase.put("last_sync_at", settings.firebase.lastSyncAt)
+            firebase.put("last_sync_status", settings.firebase.lastSyncStatus.value)
+            firebase.put("last_sync_message", settings.firebase.lastSyncMessage)
 
             return root
         }

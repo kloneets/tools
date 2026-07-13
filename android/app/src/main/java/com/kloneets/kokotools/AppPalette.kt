@@ -16,8 +16,6 @@ data class AppPalette(
     val textSecondary: Int,
     val textMuted: Int,
     val scrim: Int,
-    val statusBar: Int,
-    val navigationBar: Int,
     val lightSystemBars: Boolean,
     val markdown: MarkdownHighlighter.Theme,
 ) {
@@ -37,8 +35,6 @@ data class AppPalette(
                 textSecondary = Color.rgb(75, 86, 58),
                 textMuted = Color.rgb(109, 122, 88),
                 scrim = Color.argb(132, 22, 28, 17),
-                statusBar = Color.rgb(238, 242, 228),
-                navigationBar = Color.rgb(225, 230, 212),
                 lightSystemBars = true,
                 markdown = MarkdownHighlighter.Theme(
                     heading = Color.rgb(168, 78, 0),
@@ -83,8 +79,6 @@ data class AppPalette(
                 textSecondary = Color.rgb(187, 202, 159),
                 textMuted = Color.rgb(142, 158, 118),
                 scrim = Color.argb(166, 6, 8, 5),
-                statusBar = Color.rgb(34, 40, 28),
-                navigationBar = Color.rgb(24, 28, 20),
                 lightSystemBars = false,
                 markdown = MarkdownHighlighter.Theme(
                     heading = Color.rgb(255, 190, 112),

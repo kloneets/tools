@@ -44,6 +44,24 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun readsAndWritesStructuredFirebaseSyncOutcome() {
+        val parsed = SettingsRepository.parse(
+            """{"firebase":{"last_sync_at":"2026-07-12T10:20:30Z","last_sync_status":"error","last_sync_message":"Permission denied"}}""",
+        )
+
+        assertEquals("2026-07-12T10:20:30Z", parsed.firebase.lastSyncAt)
+        assertEquals(FirebaseSyncStatus.Error, parsed.firebase.lastSyncStatus)
+        assertEquals("Permission denied", parsed.firebase.lastSyncMessage)
+
+        val json = SettingsRepository.toJson(
+            parsed.copy(firebase = parsed.firebase.copy(lastSyncStatus = FirebaseSyncStatus.Success, lastSyncMessage = "Synced")),
+        ).getJSONObject("firebase")
+        assertEquals("2026-07-12T10:20:30Z", json.getString("last_sync_at"))
+        assertEquals("ok", json.getString("last_sync_status"))
+        assertEquals("Synced", json.getString("last_sync_message"))
+    }
+
+    @Test
     fun writesDesktopCompatibleFieldNames() {
         val json = SettingsRepository.toJson(
             AppSettings(

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -47,6 +48,9 @@ const (
 const manualSyncTimeout = 20 * time.Second
 const recorderDuration = 5 * time.Second
 const firebasePollingInterval = 5 * time.Minute
+
+var errFirebaseSyncDeferred = errors.New("firebase sync deferred")
+var firebaseOutcomeMu sync.Mutex
 
 type terminalApp struct {
 	view                   view
@@ -109,6 +113,10 @@ type terminalApp struct {
 	firebaseSettingsSyncer *kokosync.SettingsSyncer
 	viewSyncMu             sync.Mutex
 	viewSyncInFlight       map[view]bool
+	asyncFirebasePush      func(context.Context, string, string) error
+	asyncFirebasePushDone  chan struct{}
+	periodicFirebaseSync   func(context.Context) error
+	firebaseSyncDone       chan struct{}
 	openLinks              []string
 	deleteNotePath         string
 	deleteNoteLabel        string
@@ -919,10 +927,7 @@ func (a *terminalApp) appTabAtColumn(col int) (view, bool) {
 	pos := 0
 	tabs := a.visibleAppTabs()
 	for i, tab := range tabs {
-		labelName := tab.label
-		if a != nil && a.viewDirty(tab.view) {
-			labelName += "*"
-		}
+		labelName := a.appTabPlainLabel(tab)
 		label := fmt.Sprintf(" %s:%s ", tab.key, labelName)
 		next := pos + len([]rune(label))
 		if col >= pos && col < next {
@@ -2003,9 +2008,22 @@ func (a *terminalApp) startManualFirebaseSync() {
 	a.startSyncOperation("sync to firebase", func() error {
 		return syncFunc(context.Background())
 	}, func() {
+		if a.shouldRecordAsyncFirebaseOutcome() {
+			a.recordFirebaseSyncOutcome(nil, "Firebase sync complete")
+		}
 		helpers.StatusBarInst().UpdateStatusBar("Firebase sync complete")
+		a.notifyFirebaseSyncDone()
 	}, func(err error) {
+		if errors.Is(err, errFirebaseSyncDeferred) {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase sync deferred")
+			a.notifyFirebaseSyncDone()
+			return
+		}
+		if a.shouldRecordAsyncFirebaseOutcome() {
+			a.recordFirebaseSyncOutcome(err, "")
+		}
 		helpers.StatusBarInst().UpdateStatusBar("Firebase sync failed: " + err.Error())
+		a.notifyFirebaseSyncDone()
 	})
 }
 
@@ -2049,14 +2067,38 @@ func (a *terminalApp) startViewFirebaseSync(target view, force bool) {
 		a.viewSyncMu.Lock()
 		delete(a.viewSyncInFlight, target)
 		a.viewSyncMu.Unlock()
+		if errors.Is(err, errFirebaseSyncDeferred) {
+			helpers.StatusBarInst().UpdateStatusBar("Firebase " + label + " sync deferred")
+			a.queueUIDraw(func() { a.refresh() })
+			a.notifyFirebaseSyncDone()
+			return
+		}
 		if err != nil {
+			if a.shouldRecordAsyncFirebaseOutcome() {
+				a.recordFirebaseSyncOutcome(err, "")
+			}
 			helpers.StatusBarInst().UpdateStatusBar("Firebase " + label + " sync failed: " + err.Error())
 			a.queueUIDraw(func() { a.refresh() })
+			a.notifyFirebaseSyncDone()
 			return
+		}
+		if a.shouldRecordAsyncFirebaseOutcome() {
+			a.recordFirebaseSyncOutcome(nil, "Firebase "+label+" synced")
 		}
 		helpers.StatusBarInst().UpdateStatusBar("Firebase " + label + " synced")
 		a.queueUIDraw(func() { a.refresh() })
+		a.notifyFirebaseSyncDone()
 	}()
+}
+
+func (a *terminalApp) notifyFirebaseSyncDone() {
+	if a.firebaseSyncDone != nil {
+		a.firebaseSyncDone <- struct{}{}
+	}
+}
+
+func (a *terminalApp) shouldRecordAsyncFirebaseOutcome() bool {
+	return a != nil && (a.tui != nil || a.firebaseSyncDone != nil || a.asyncFirebasePushDone != nil)
 }
 
 func (a *terminalApp) syncViewToFirebase(ctx context.Context, target view) error {
@@ -2323,22 +2365,68 @@ func (a *terminalApp) renderTabBar() string {
 	tabs := a.visibleAppTabs()
 	parts := make([]string, 0, len(tabs))
 	for _, tab := range tabs {
-		labelName := tab.label
-		if a.viewDirty(tab.view) {
-			labelName += "*"
-		}
+		labelName := a.appTabPlainLabel(tab)
 		label := fmt.Sprintf(" %s:%s ", tab.key, labelName)
+		escapedLabel := tview.Escape(label)
+		if tab.view == viewSync && a.firebaseSyncUnhealthy() {
+			escapedLabel = strings.Replace(escapedLabel, " ● ", " "+themeMarkupFG(currentTheme().ErrorAccent)+"●[-:-:-] ", 1)
+		}
 		if a.tabSelect && tab.view == a.view {
-			parts = append(parts, themeMarkupFGStyleBG(currentTheme().Background, currentTheme().StatusAccent, ":b")+tview.Escape(label)+"[-:-:-]")
+			parts = append(parts, themeMarkupFGStyleBG(currentTheme().Background, currentTheme().StatusAccent, ":b")+escapedLabel+"[-:-:-]")
 			continue
 		}
 		if tab.view == a.view {
-			parts = append(parts, themeMarkupFGStyleBG(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG, ":b")+tview.Escape(label)+"[-:-:-]")
+			parts = append(parts, themeMarkupFGStyleBG(currentTheme().ActiveTabFG, currentTheme().ActiveTabBG, ":b")+escapedLabel+"[-:-:-]")
 			continue
 		}
-		parts = append(parts, themeMarkupFG(currentTheme().Dim)+tview.Escape(label)+"[-:-:-]")
+		parts = append(parts, themeMarkupFG(currentTheme().Dim)+escapedLabel+"[-:-:-]")
 	}
 	return strings.Join(parts, " ")
+}
+
+func (a *terminalApp) appTabPlainLabel(tab appTab) string {
+	label := tab.label
+	if a != nil && a.viewDirty(tab.view) {
+		label += "*"
+	}
+	if tab.view == viewSync && a.firebaseSyncUnhealthy() {
+		label += " ●"
+	}
+	return label
+}
+
+func (a *terminalApp) firebaseSyncUnhealthy() bool {
+	firebaseOutcomeMu.Lock()
+	defer firebaseOutcomeMu.Unlock()
+	cfg := settings.Inst().Firebase
+	fileCfg, _ := kokosync.LoadConfig(kokosync.ConfigPath())
+	if cfg == nil || !cfg.Enabled {
+		return false
+	}
+	if firebaseAPIKey(cfg, fileCfg) == "" || firebaseDatabaseURL(cfg, fileCfg) == "" || firebaseWorkspaceID(cfg, fileCfg) == "" {
+		return true
+	}
+	token, err := kokosync.LoadToken(kokosync.TokenPath())
+	hasPasswordAuth := strings.TrimSpace(os.Getenv("KOKO_FIREBASE_EMAIL")) != "" && strings.TrimSpace(os.Getenv("KOKO_FIREBASE_PASSWORD")) != ""
+	return (err != nil || token.RefreshToken == "") && !hasPasswordAuth || cfg.LastSyncStatus == "error"
+}
+
+func (a *terminalApp) recordFirebaseSyncOutcome(err error, successMessage string) {
+	firebaseOutcomeMu.Lock()
+	defer firebaseOutcomeMu.Unlock()
+	cfg := settings.Inst().Firebase
+	if cfg == nil {
+		return
+	}
+	cfg.LastSyncAt = time.Now().Format(time.RFC3339)
+	if err != nil {
+		cfg.LastSyncStatus = "error"
+		cfg.LastSyncMessage = err.Error()
+	} else {
+		cfg.LastSyncStatus = "ok"
+		cfg.LastSyncMessage = successMessage
+	}
+	settings.SaveSettingsLocal()
 }
 
 func (a *terminalApp) viewDirty(v view) bool {
@@ -3189,7 +3277,9 @@ func (a *terminalApp) startFirebaseTodoPolling(ctx context.Context) {
 
 func (a *terminalApp) runFirebaseSyncTick(ctx context.Context) {
 	var syncErr error
-	if err := a.pullTodosFromFirebase(ctx); err != nil {
+	if a.periodicFirebaseSync != nil {
+		syncErr = a.periodicFirebaseSync(ctx)
+	} else if err := a.pullTodosFromFirebase(ctx); err != nil {
 		syncErr = err
 	} else if err := a.pullNotesFromFirebase(ctx); err != nil {
 		syncErr = err
@@ -3197,19 +3287,24 @@ func (a *terminalApp) runFirebaseSyncTick(ctx context.Context) {
 		syncErr = err
 	}
 
-	if syncErr != nil {
-		cfg := settings.Inst().Firebase
-		if cfg != nil {
-			if cfg.LastSyncStatus != "error" || cfg.LastSyncMessage != syncErr.Error() {
-				cfg.LastSyncStatus = "error"
-				cfg.LastSyncMessage = syncErr.Error()
-				settings.SaveSettingsLocal()
-				a.queueUIDraw(func() {
-					a.refresh()
-				})
-			}
-		}
+	if errors.Is(syncErr, errFirebaseSyncDeferred) {
+		a.queueUIDraw(func() { a.refresh() })
+		a.notifyFirebaseSyncDone()
+		return
 	}
+	if syncErr != nil {
+		if a.shouldRecordAsyncFirebaseOutcome() {
+			a.recordFirebaseSyncOutcome(syncErr, "")
+		}
+		a.queueUIDraw(func() { a.refresh() })
+		a.notifyFirebaseSyncDone()
+		return
+	}
+	if a.shouldRecordAsyncFirebaseOutcome() {
+		a.recordFirebaseSyncOutcome(nil, "Firebase realtime sync complete")
+	}
+	a.queueUIDraw(func() { a.refresh() })
+	a.notifyFirebaseSyncDone()
 }
 
 func (a *terminalApp) ensureFirebaseSyncer(ctx context.Context) error {
@@ -3277,8 +3372,6 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 	_ = notes.CleanupManagedAssetDirs(a.notesRootPath())
 	provider.DeleteLegacyAssetsBestEffort(ctx, workspaceID)
 	cfg.WorkspaceID = workspaceID
-	cfg.LastSyncStatus = "ok"
-	cfg.LastSyncMessage = "Firebase sync configured"
 	settings.SaveSettingsLocal()
 	return nil
 }
@@ -3363,9 +3456,7 @@ func (a *terminalApp) loginFirebaseWithGoogle() {
 		cfg.UserEmail = session.Email
 		cfg.WorkspaceID = meta.ID
 		cfg.WorkspaceName = meta.Name
-		cfg.LastSyncStatus = "ok"
-		cfg.LastSyncMessage = "Firebase Google login configured"
-		settings.SaveSettingsLocal()
+		a.recordFirebaseSyncOutcome(nil, "Firebase Google login configured")
 		if err := a.configureFirebaseTodoSyncer(context.Background()); err != nil {
 			helpers.StatusBarInst().UpdateStatusBar("Firebase sync not ready: " + err.Error())
 			return
@@ -3396,12 +3487,7 @@ func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
 		return err
 	}
 	a.todoStore = merged
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase todos pulled"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase todos pulled")
 	a.queueUIDraw(func() {
 		a.reloadTodosForRender()
 		a.refresh()
@@ -3431,12 +3517,7 @@ func (a *terminalApp) pullTodoArchiveMonthFromFirebase(ctx context.Context, mont
 		return err
 	}
 	a.todoStore = merged
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase todo archive pulled: " + month
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase todo archive pulled: "+month)
 	return nil
 }
 
@@ -3459,12 +3540,7 @@ func (a *terminalApp) syncToFirebase(ctx context.Context) error {
 	if err := a.pushSettingsToFirebase(ctx); err != nil {
 		return err
 	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase sync complete"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase sync complete")
 	return nil
 }
 
@@ -3473,9 +3549,7 @@ func (a *terminalApp) pushTodosToFirebaseSoon() {
 	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
 		return
 	}
-	go func() {
-		_ = a.pushTodosToFirebase(context.Background())
-	}()
+	a.startAsyncFirebasePush("Firebase todos pushed", "", a.pushTodosToFirebase)
 }
 
 func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
@@ -3492,12 +3566,7 @@ func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
 	if err := a.firebaseTodoSyncer.PushStore(ctx, store); err != nil {
 		return err
 	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase todos pushed"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase todos pushed")
 	return nil
 }
 
@@ -3549,12 +3618,7 @@ func (a *terminalApp) pullNotesFromFirebase(ctx context.Context) error {
 	if err := a.firebaseNoteSyncer.SaveState(result.State); err != nil {
 		return err
 	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase notes pulled"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase notes pulled")
 	a.queueUIDraw(func() {
 		if a.notes != nil {
 			a.notes.Refresh()
@@ -3569,9 +3633,7 @@ func (a *terminalApp) pushNotesToFirebaseSoon() {
 	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
 		return
 	}
-	go func() {
-		_ = a.pushNotesToFirebase(context.Background())
-	}()
+	a.startAsyncFirebasePush("Firebase notes pushed", "", a.pushNotesToFirebase)
 }
 
 func (a *terminalApp) pushNotesToFirebase(ctx context.Context) error {
@@ -3592,12 +3654,7 @@ func (a *terminalApp) pushNotesToFirebase(ctx context.Context) error {
 	if result.Pushed == 0 {
 		return nil
 	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase notes pushed"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase notes pushed")
 	return nil
 }
 
@@ -3607,14 +3664,15 @@ func (a *terminalApp) pushNoteDeleteToFirebaseSoon(absPath string) {
 		return
 	}
 	rel := a.noteRelPath(absPath)
-	go func() {
-		if err := a.ensureFirebaseSyncer(context.Background()); err != nil {
-			return
+	a.startAsyncFirebasePush("Firebase note deleted", rel, func(ctx context.Context) error {
+		if err := a.ensureFirebaseSyncer(ctx); err != nil {
+			return err
 		}
-		if a.firebaseNoteSyncer != nil {
-			_ = a.firebaseNoteSyncer.PushDelete(context.Background(), rel)
+		if a.firebaseNoteSyncer == nil {
+			return nil
 		}
-	}()
+		return a.firebaseNoteSyncer.PushDelete(ctx, rel)
+	})
 }
 
 func (a *terminalApp) pushSettingsToFirebaseSoon() {
@@ -3622,8 +3680,26 @@ func (a *terminalApp) pushSettingsToFirebaseSoon() {
 	if a == nil || !firebaseEnabled(settings.Inst().Firebase, fileCfg) {
 		return
 	}
+	a.startAsyncFirebasePush("Firebase settings pushed", "", a.pushSettingsToFirebase)
+}
+
+func (a *terminalApp) startAsyncFirebasePush(successMessage, detail string, push func(context.Context) error) {
 	go func() {
-		_ = a.pushSettingsToFirebase(context.Background())
+		defer func() {
+			if a.asyncFirebasePushDone != nil {
+				a.asyncFirebasePushDone <- struct{}{}
+			}
+		}()
+		var err error
+		if a.asyncFirebasePush != nil {
+			err = a.asyncFirebasePush(context.Background(), successMessage, detail)
+		} else {
+			err = push(context.Background())
+		}
+		if a.shouldRecordAsyncFirebaseOutcome() {
+			a.recordFirebaseSyncOutcome(err, successMessage)
+		}
+		a.queueUIDraw(func() { a.refresh() })
 	}()
 }
 
@@ -3645,12 +3721,7 @@ func (a *terminalApp) pushSettingsToFirebase(ctx context.Context) error {
 	if !result.Pushed {
 		return nil
 	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase settings pushed"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase settings pushed")
 	return nil
 }
 
@@ -3662,12 +3733,7 @@ func (a *terminalApp) pullSettingsFromFirebase(ctx context.Context) error {
 		return nil
 	}
 	if a.deferRemoteSettingsApply() {
-		if settings.Inst().Firebase != nil {
-			settings.Inst().Firebase.LastSyncStatus = "deferred"
-			settings.Inst().Firebase.LastSyncMessage = "Firebase settings pull deferred while local edits are active"
-			settings.SaveSettingsLocal()
-		}
-		return nil
+		return errFirebaseSyncDeferred
 	}
 	result, err := a.firebaseSettingsSyncer.PullSettings(ctx)
 	if err != nil || !result.Changed {
@@ -3680,12 +3746,7 @@ func (a *terminalApp) pullSettingsFromFirebase(ctx context.Context) error {
 	if err := applySettingsMap(kokosync.ApplySharedWorkspaceSettings(local, result.Values)); err != nil {
 		return err
 	}
-	if settings.Inst().Firebase != nil {
-		settings.Inst().Firebase.LastSyncAt = time.Now().Format(time.RFC3339)
-		settings.Inst().Firebase.LastSyncStatus = "ok"
-		settings.Inst().Firebase.LastSyncMessage = "Firebase settings pulled"
-		settings.SaveSettingsLocal()
-	}
+	a.recordFirebaseSyncOutcome(nil, "Firebase settings pulled")
 	a.queueUIDraw(func() {
 		if a.pages != nil && !a.viewDirty(viewPages) {
 			a.pages = pages.NewModel()

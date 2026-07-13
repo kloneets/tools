@@ -47,7 +47,22 @@ data class FirebaseSettings(
     val userEmail: String = "",
     val workspaceId: String = "",
     val workspaceName: String = "",
+    val lastSyncAt: String = "",
+    val lastSyncStatus: FirebaseSyncStatus = FirebaseSyncStatus.None,
+    val lastSyncMessage: String = "",
 )
+
+enum class FirebaseSyncStatus(val value: String) {
+    None(""),
+    Success("ok"),
+    Error("error");
+
+    companion object {
+        fun fromValue(value: String): FirebaseSyncStatus {
+            return values().firstOrNull { it.value == value.trim().lowercase() } ?: None
+        }
+    }
+}
 
 data class NoteFile(
     val relativePath: String,
