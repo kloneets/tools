@@ -25,6 +25,15 @@
             ".validate": "newData.hasChildren(['id', 'path', 'text', 'rev', 'updated_at', 'updated_by', 'deleted']) && newData.child('id').isString() && newData.child('path').isString() && newData.child('text').isString() && newData.child('rev').isNumber() && newData.child('updated_at').isString() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
           }
         },
+        "note_versions": {
+          ".read": "auth != null && root.child('workspaces').child($workspace).child('members').child(auth.uid).exists()",
+          "$note": {
+            "$rev": {
+              ".write": "auth != null && newData.exists() && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor') && (!data.exists() || newData.val() == data.val())",
+              ".validate": "newData.hasChildren(['id', 'path', 'text', 'rev', 'updated_at', 'updated_by', 'deleted']) && newData.child('id').val() == $note && newData.child('path').isString() && newData.child('text').isString() && newData.child('rev').isNumber() && newData.child('updated_at').isString() && newData.child('updated_by').isString() && newData.child('deleted').isBoolean()"
+            }
+          }
+        },
         "todos": {
           ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
           "$todo": {

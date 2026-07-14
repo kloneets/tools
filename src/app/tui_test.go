@@ -42,6 +42,74 @@ func TestEnsureConfigDirExistsCreatesParents(t *testing.T) {
 	}
 }
 
+func TestApplyPulledNotesBacksUpEmptyRemoteOverwriteForRecovery(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	app := &terminalApp{}
+	notePath := app.noteAbsPath("Home/uz-Bebreni.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notePath, []byte("verified local content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := app.applyPulledNotes(kokosync.NoteMergeResult{
+		Upserts: []kokosync.LocalNote{{Path: "Home/uz-Bebreni.md", Text: ""}},
+	})
+	if err != nil {
+		t.Fatalf("applyPulledNotes() error = %v", err)
+	}
+	backup, err := notes.LatestNoteBackup(notePath)
+	if err != nil {
+		t.Fatalf("LatestNoteBackup() error = %v", err)
+	}
+	if err := notes.RestoreNoteBackup(notePath, backup); err != nil {
+		t.Fatalf("RestoreNoteBackup() error = %v", err)
+	}
+	content, err := os.ReadFile(notePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "verified local content" {
+		t.Fatalf("restored content = %q, want verified local content", content)
+	}
+	files, err := app.localNoteFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Path != "Home/uz-Bebreni.md" {
+		t.Fatalf("synced note files = %#v, want only live note", files)
+	}
+}
+
+func TestApplyPulledNotesBacksUpRemoteDelete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	app := &terminalApp{}
+	notePath := app.noteAbsPath("Home/delete-me.md")
+	if err := os.MkdirAll(filepath.Dir(notePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notePath, []byte("recover after delete"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.applyPulledNotes(kokosync.NoteMergeResult{Deletes: []string{"Home/delete-me.md"}}); err != nil {
+		t.Fatalf("applyPulledNotes() error = %v", err)
+	}
+	if _, err := os.Stat(notePath); !os.IsNotExist(err) {
+		t.Fatalf("deleted note stat error = %v, want not exist", err)
+	}
+	backup, err := notes.LatestNoteBackup(notePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(backup.Path)
+	if err != nil || string(content) != "recover after delete" {
+		t.Fatalf("backup content = %q, error = %v", content, err)
+	}
+}
+
 func TestHelpTextForSettings(t *testing.T) {
 	app := &terminalApp{view: viewSettings}
 	got := app.helpText()

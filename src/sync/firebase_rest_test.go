@@ -210,6 +210,131 @@ func TestPushMutationDoesNotWriteUnusedEventRecord(t *testing.T) {
 	}
 }
 
+func TestPushMutationPreservesNonEmptyRemoteNoteBeforeEmptyOverwrite(t *testing.T) {
+	old := NoteRecord{ID: "note-1", Path: "Home/uz-Bebreni.md", Text: "recoverable content", Rev: 7, UpdatedBy: "uid-old"}
+	var requests []string
+	var history NoteRecord
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/workspaces/ws/notes/note-1.json":
+			if r.Method == http.MethodGet {
+				if r.Header.Get("X-Firebase-ETag") != "true" {
+					t.Fatalf("X-Firebase-ETag = %q, want true", r.Header.Get("X-Firebase-ETag"))
+				}
+				w.Header().Set("ETag", `"note-etag-7"`)
+				_ = json.NewEncoder(w).Encode(old)
+				return
+			}
+			if got := r.Header.Get("If-Match"); got != `"note-etag-7"` {
+				t.Fatalf("If-Match = %q, want note etag", got)
+			}
+			var replacement NoteRecord
+			if err := json.NewDecoder(r.Body).Decode(&replacement); err != nil {
+				t.Fatal(err)
+			}
+			if replacement.Text != "" || replacement.Rev != 8 {
+				t.Fatalf("replacement = %#v, want empty rev 8", replacement)
+			}
+		case "/workspaces/ws/note_versions/note-1/7.json":
+			if r.Method != http.MethodPut {
+				t.Fatalf("history method = %s, want PUT", r.Method)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&history); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`null`))
+	}))
+	defer server.Close()
+
+	provider := NewFirebaseRESTProvider("api-key", server.URL)
+	err := provider.PushMutation(context.Background(), "ws", Mutation{Note: &NoteRecord{
+		ID: "note-1", Path: "Home/uz-Bebreni.md", Text: "", Rev: 8,
+	}})
+	if err != nil {
+		t.Fatalf("PushMutation() error = %v", err)
+	}
+	wantRequests := []string{
+		"GET /workspaces/ws/notes/note-1.json",
+		"PUT /workspaces/ws/note_versions/note-1/7.json",
+		"PUT /workspaces/ws/notes/note-1.json",
+	}
+	if strings.Join(requests, "\n") != strings.Join(wantRequests, "\n") {
+		t.Fatalf("requests = %#v, want %#v", requests, wantRequests)
+	}
+	if history.Text != "recoverable content" || history.Rev != 7 {
+		t.Fatalf("history = %#v, want exact prior non-empty record", history)
+	}
+}
+
+func TestPushMutationHistoryFailureBlocksCurrentNoteOverwrite(t *testing.T) {
+	var currentWrites int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/workspaces/ws/notes/note-1.json":
+			if r.Method == http.MethodPut {
+				currentWrites++
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.Header().Set("ETag", `"note-etag-7"`)
+			_ = json.NewEncoder(w).Encode(NoteRecord{ID: "note-1", Path: "a.md", Text: "old", Rev: 7})
+		case "/workspaces/ws/note_versions/note-1/7.json":
+			http.Error(w, "history denied", http.StatusForbidden)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewFirebaseRESTProvider("api-key", server.URL)
+	err := provider.PushMutation(context.Background(), "ws", Mutation{Note: &NoteRecord{
+		ID: "note-1", Path: "a.md", Text: "new", Rev: 8,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "preserve Firebase note history") {
+		t.Fatalf("PushMutation() error = %v, want history failure", err)
+	}
+	if currentWrites != 0 {
+		t.Fatalf("current note writes = %d, want overwrite blocked", currentWrites)
+	}
+}
+
+func TestPushMutationETagConflictBlocksStaleNoteOverwrite(t *testing.T) {
+	var historyWrites int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/workspaces/ws/notes/note-1.json":
+			if r.Method == http.MethodGet {
+				w.Header().Set("ETag", `"note-etag-7"`)
+				_ = json.NewEncoder(w).Encode(NoteRecord{ID: "note-1", Path: "a.md", Text: "old", Rev: 7})
+				return
+			}
+			http.Error(w, "etag mismatch", http.StatusPreconditionFailed)
+		case "/workspaces/ws/note_versions/note-1/7.json":
+			historyWrites++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewFirebaseRESTProvider("api-key", server.URL)
+	err := provider.PushMutation(context.Background(), "ws", Mutation{Note: &NoteRecord{
+		ID: "note-1", Path: "a.md", Text: "stale replacement", Rev: 8,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "412 Precondition Failed") {
+		t.Fatalf("PushMutation() error = %v, want ETag conflict", err)
+	}
+	if historyWrites != 1 {
+		t.Fatalf("history writes = %d, want recovery point before guarded overwrite", historyWrites)
+	}
+}
+
 func todoItemForTest(id string) todo.Item {
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	return todo.Item{

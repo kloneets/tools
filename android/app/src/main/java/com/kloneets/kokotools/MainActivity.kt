@@ -889,12 +889,24 @@ class MainActivity : Activity() {
             .setTitle("Delete note")
             .setMessage("Delete $path?")
             .setPositiveButton("Delete") { _, _ ->
-                notesRepository.delete(path)
-                pushNoteDeleteToFirebase(path)
-                currentNotePath = ""
-                loadedNoteText = ""
-                persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
-                refreshNotes()
+                runCatching {
+                    completeLocalNoteDeletion(
+                        deleteLocal = { notesRepository.delete(path) },
+                        afterDelete = {
+                            pushNoteDeleteToFirebase(path)
+                            currentNotePath = ""
+                            loadedNoteText = ""
+                            persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
+                            refreshNotes()
+                        },
+                    )
+                }.onSuccess { deleted ->
+                    if (!deleted) {
+                        Toast.makeText(this, "Note was not deleted locally", Toast.LENGTH_SHORT).show()
+                    }
+                }.onFailure { error ->
+                    Toast.makeText(this, "Local note delete failed: ${error.message}", Toast.LENGTH_LONG).show()
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -1781,18 +1793,8 @@ class MainActivity : Activity() {
             runOnUiThread {
                 applyRemoteNotes(remoteNotes)
                 if (currentScreen == Screen.Notes) refreshNotes()
-                Thread {
-                    runCatching {
-                        notesRepository.listNotes().forEach { note ->
-                            firebaseSyncRepository.pushNote(settings.firebase, note.relativePath, notesRepository.read(note.relativePath), session)
-                        }
-                    }.onSuccess {
-                        runOnUiThread { setSyncSuccess("Firebase notes view synced", transient = true) }
-                    }.onFailure { error ->
-                        runOnUiThread { setSyncError("Firebase notes view push failed: ${error.message}", transient = true) }
-                    }
-                    finishViewSync(FirebaseViewSyncScope.Notes)
-                }.start()
+                setSyncSuccess("Firebase notes view synced", transient = true)
+                finishViewSync(FirebaseViewSyncScope.Notes)
             }
         }.onFailure { error ->
             runOnUiThread { setSyncError("Firebase notes view sync failed: ${error.message}", transient = true) }
@@ -2281,9 +2283,6 @@ class MainActivity : Activity() {
             }
             runCatching {
                 firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
-                notesRepository.listNotes().forEach { note ->
-                    firebaseSyncRepository.pushNote(settings.firebase, note.relativePath, notesRepository.read(note.relativePath), session)
-                }
                 val settingsPushed = firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
                 firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
                 settingsPushed

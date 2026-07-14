@@ -3588,32 +3588,8 @@ func (a *terminalApp) pullNotesFromFirebase(ctx context.Context) error {
 	if !result.Changed {
 		return a.firebaseNoteSyncer.SaveState(result.State)
 	}
-	for _, rel := range result.Deletes {
-		if err := os.Remove(a.noteAbsPath(rel)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		a.removeOpenNoteTab(rel)
-	}
-	for _, note := range result.Upserts {
-		if strings.ToLower(filepath.Ext(note.Path)) != ".md" {
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(a.noteAbsPath(note.Path)), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(a.noteAbsPath(note.Path), []byte(note.Text), 0o644); err != nil {
-			return err
-		}
-		a.updateOpenCleanNote(note.Path, note.Text)
-	}
-	for _, conflict := range result.ConflictCopy {
-		path := a.noteAbsPath(conflict.Path)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, []byte(conflict.Text), 0o644); err != nil {
-			return err
-		}
+	if err := a.applyPulledNotes(result); err != nil {
+		return err
 	}
 	if err := a.firebaseNoteSyncer.SaveState(result.State); err != nil {
 		return err
@@ -3625,6 +3601,31 @@ func (a *terminalApp) pullNotesFromFirebase(ctx context.Context) error {
 		}
 		a.refresh()
 	})
+	return nil
+}
+
+func (a *terminalApp) applyPulledNotes(result kokosync.NoteMergeResult) error {
+	for _, rel := range result.Deletes {
+		if err := notes.RemoveNoteFile(a.noteAbsPath(rel)); err != nil {
+			return err
+		}
+		a.removeOpenNoteTab(rel)
+	}
+	for _, note := range result.Upserts {
+		if strings.ToLower(filepath.Ext(note.Path)) != ".md" {
+			continue
+		}
+		if err := notes.ReplaceNoteFile(a.noteAbsPath(note.Path), []byte(note.Text)); err != nil {
+			return err
+		}
+		a.updateOpenCleanNote(note.Path, note.Text)
+	}
+	for _, conflict := range result.ConflictCopy {
+		path := a.noteAbsPath(conflict.Path)
+		if err := notes.ReplaceNoteFile(path, []byte(conflict.Text)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

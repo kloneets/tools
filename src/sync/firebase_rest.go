@@ -275,7 +275,17 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 	}
 	if mutation.Note != nil {
 		path := fmt.Sprintf("workspaces/%s/notes/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Note.ID))
-		if err := p.putRTDB(ctx, path, mutation.Note, nil); err != nil {
+		existing, etag, err := p.pullNoteForMutation(ctx, path)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			historyPath := fmt.Sprintf("workspaces/%s/note_versions/%s/%d", url.PathEscape(workspaceID), url.PathEscape(mutation.Note.ID), existing.Rev)
+			if err := p.putRTDB(ctx, historyPath, existing, nil); err != nil {
+				return fmt.Errorf("preserve Firebase note history: %w", err)
+			}
+		}
+		if err := p.putRTDBIfMatch(ctx, path, mutation.Note, etag); err != nil {
 			return err
 		}
 	}
@@ -437,9 +447,34 @@ func (p *FirebaseRESTProvider) getRTDB(ctx context.Context, path string, out any
 	return nil
 }
 
+func (p *FirebaseRESTProvider) pullNoteForMutation(ctx context.Context, path string) (*NoteRecord, string, error) {
+	var record *NoteRecord
+	headers, err := p.doJSONRequest(ctx, http.MethodGet, p.rtdbURL(path), nil, &record, map[string]string{
+		"X-Firebase-ETag": "true",
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("firebase GET %s failed: %w", path, err)
+	}
+	etag := headers.Get("ETag")
+	if etag == "" {
+		return nil, "", fmt.Errorf("firebase GET %s did not return an ETag", path)
+	}
+	return record, etag, nil
+}
+
 func (p *FirebaseRESTProvider) putRTDB(ctx context.Context, path string, in any, out any) error {
 	if err := p.doJSON(ctx, http.MethodPut, p.rtdbURL(path), in, out); err != nil {
 		return fmt.Errorf("firebase PUT %s failed: %w", path, err)
+	}
+	return nil
+}
+
+func (p *FirebaseRESTProvider) putRTDBIfMatch(ctx context.Context, path string, in any, etag string) error {
+	_, err := p.doJSONRequest(ctx, http.MethodPut, p.rtdbURL(path), in, nil, map[string]string{
+		"If-Match": etag,
+	})
+	if err != nil {
+		return fmt.Errorf("firebase conditional PUT %s failed: %w", path, err)
 	}
 	return nil
 }
@@ -478,20 +513,28 @@ func (p *FirebaseRESTProvider) postForm(ctx context.Context, endpoint string, in
 }
 
 func (p *FirebaseRESTProvider) doJSON(ctx context.Context, method string, endpoint string, in any, out any) error {
+	_, err := p.doJSONRequest(ctx, method, endpoint, in, out, nil)
+	return err
+}
+
+func (p *FirebaseRESTProvider) doJSONRequest(ctx context.Context, method string, endpoint string, in any, out any, headers map[string]string) (http.Header, error) {
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		body = bytes.NewReader(data)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	client := p.Client
 	if client == nil {
@@ -499,20 +542,20 @@ func (p *FirebaseRESTProvider) doJSON(ctx context.Context, method string, endpoi
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return res.Header, err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("firebase request failed: %s: %s", res.Status, strings.TrimSpace(string(data)))
+		return res.Header, fmt.Errorf("firebase request failed: %s: %s", res.Status, strings.TrimSpace(string(data)))
 	}
 	if out == nil || len(data) == 0 || string(data) == "null" {
-		return nil
+		return res.Header, nil
 	}
-	return json.Unmarshal(data, out)
+	return res.Header, json.Unmarshal(data, out)
 }
 
 func (p *FirebaseRESTProvider) rtdbURL(path string) string {

@@ -68,6 +68,27 @@ func TestNoteSyncerPullDefersDirtyRemoteNote(t *testing.T) {
 	}
 }
 
+func TestNoteSyncerPullIgnoresRemotePathsOutsideMarkdownNotes(t *testing.T) {
+	id := NoteID("settings.json")
+	provider := &fakeNoteProvider{snapshot: Snapshot{Notes: map[string]NoteRecord{
+		id: {ID: id, Path: "settings.json", Text: "not a note", Rev: 2},
+	}}}
+	syncer := NoteSyncer{
+		Provider:    provider,
+		WorkspaceID: "ws",
+		StatePath:   t.TempDir() + "/state.json",
+		Session:     Session{IDToken: "token"},
+	}
+
+	got, err := syncer.PullNotes(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("PullNotes() error = %v", err)
+	}
+	if got.Changed || len(got.Upserts) != 0 || got.State.Notes[id] != 0 {
+		t.Fatalf("result = %#v, want non-Markdown remote record ignored", got)
+	}
+}
+
 func TestNoteSyncerPushSkipsUnchangedNoteContent(t *testing.T) {
 	provider := &fakeNoteProvider{}
 	syncer := NoteSyncer{

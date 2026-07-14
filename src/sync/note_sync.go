@@ -203,7 +203,7 @@ func (s *NoteSyncer) PullNotes(ctx context.Context, local map[string]LocalNote) 
 			continue
 		}
 		path := NormalizeNotePath(remote.Path)
-		if path == "" {
+		if path == "" || !strings.EqualFold(filepath.Ext(path), ".md") {
 			continue
 		}
 		localNote := result.Notes[path]

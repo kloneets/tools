@@ -59,6 +59,40 @@ data class FirebaseSyncHash(
     val updatedBy: String,
 )
 
+internal class FirebaseNoteHistoryWriter(
+    private val getRecord: (String) -> FirebaseVersionedNote,
+    private val putHistory: (String, JSONObject) -> Unit,
+    private val putCurrent: (String, JSONObject, String) -> Unit,
+) {
+    fun replace(workspacePath: String, noteId: String, newRecord: JSONObject) {
+        val notePath = "$workspacePath/notes/$noteId"
+        val current = getRecord(notePath)
+        if (current.record != null) {
+            val currentRevision = current.record.optLong("rev", 0L)
+            putHistory("$workspacePath/note_versions/$noteId/$currentRevision", current.record)
+            val proposedRevision = newRecord.optLong("rev", 0L)
+            if (proposedRevision <= currentRevision && currentRevision < Long.MAX_VALUE) {
+                newRecord.put("rev", currentRevision + 1L)
+            }
+        }
+        putCurrent(notePath, newRecord, current.etag)
+    }
+}
+
+internal data class FirebaseVersionedNote(
+    val record: JSONObject?,
+    val etag: String,
+) {
+    init {
+        require(etag.isNotBlank()) { "Firebase note ETag is required" }
+    }
+}
+
+internal fun requireFirebaseNoteEtag(etag: String?): String {
+    return etag?.takeIf { it.isNotBlank() }
+        ?: throw IllegalStateException("Firebase note GET response did not include an ETag")
+}
+
 class FirebaseSyncRepository(private val context: Context) {
     private val tokenFile: File
         get() = File(context.filesDir, TOKEN_FILE)
@@ -212,6 +246,7 @@ class FirebaseSyncRepository(private val context: Context) {
         writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, todoArchiveMonthsHash(TodoRepository.archiveMonths(store)), now, session)
     }
 
+    @Synchronized
     fun pushNote(settings: FirebaseSettings, path: String, text: String, session: FirebaseSession) {
         val normalized = NotesRepository.normalizePath(path).replace('\\', '/')
         val rev = System.currentTimeMillis()
@@ -224,9 +259,10 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
             .put("updated_by", session.uid)
             .put("deleted", false)
-        putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
+        replaceNoteRecord(settings, id, record, session.idToken)
     }
 
+    @Synchronized
     fun pushNoteDelete(settings: FirebaseSettings, path: String, session: FirebaseSession) {
         val normalized = NotesRepository.normalizePath(path).replace('\\', '/')
         val rev = System.currentTimeMillis()
@@ -239,7 +275,7 @@ class FirebaseSyncRepository(private val context: Context) {
             .put("updated_at", TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)))
             .put("updated_by", session.uid)
             .put("deleted", true)
-        putDatabase(settings, "workspaces/${settings.workspaceId}/notes/$id", record, session.idToken)
+        replaceNoteRecord(settings, id, record, session.idToken)
     }
 
     fun pullNotes(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteNote> {
@@ -449,6 +485,50 @@ class FirebaseSyncRepository(private val context: Context) {
         requestJson("PUT", databaseUrl(settings, path, idToken), body, "application/json")
     }
 
+    private fun replaceNoteRecord(settings: FirebaseSettings, id: String, record: JSONObject, idToken: String) {
+        FirebaseNoteHistoryWriter(
+            getRecord = { path -> getVersionedNote(settings, path, idToken) },
+            putHistory = { path, body -> putDatabase(settings, path, body, idToken) },
+            putCurrent = { path, body, etag -> putDatabaseIfMatch(settings, path, body, idToken, etag) },
+        ).replace("workspaces/${settings.workspaceId}", id, record)
+    }
+
+    private fun getVersionedNote(settings: FirebaseSettings, path: String, idToken: String): FirebaseVersionedNote {
+        val response = runCatching {
+            requestWithMetadata(
+                method = "GET",
+                url = databaseUrl(settings, path, idToken),
+                body = null,
+                contentType = null,
+                headers = mapOf("X-Firebase-ETag" to "true"),
+            )
+        }.getOrElse { error ->
+            throw IllegalStateException("Firebase GET $path failed: ${error.message}", error)
+        }
+        val record = response.body.takeUnless { it.isBlank() || it == "null" }?.let(::JSONObject)
+        return FirebaseVersionedNote(record = record, etag = requireFirebaseNoteEtag(response.etag))
+    }
+
+    private fun putDatabaseIfMatch(
+        settings: FirebaseSettings,
+        path: String,
+        body: JSONObject,
+        idToken: String,
+        etag: String,
+    ) {
+        runCatching {
+            requestJson(
+                method = "PUT",
+                url = databaseUrl(settings, path, idToken),
+                body = body.toString(),
+                contentType = "application/json",
+                headers = mapOf("If-Match" to etag),
+            )
+        }.getOrElse { error ->
+            throw IllegalStateException("Firebase conditional PUT $path failed: ${error.message}", error)
+        }
+    }
+
     private fun getDatabase(settings: FirebaseSettings, path: String, idToken: String): JSONObject? {
         val response = runCatching {
             request("GET", databaseUrl(settings, path, idToken), null, null)
@@ -504,28 +584,58 @@ class FirebaseSyncRepository(private val context: Context) {
             .apply()
     }
 
-    private fun requestJson(method: String, url: String, body: String?, contentType: String): JSONObject {
-        val response = request(method, url, body, contentType)
+    private fun requestJson(
+        method: String,
+        url: String,
+        body: String?,
+        contentType: String,
+        headers: Map<String, String> = emptyMap(),
+    ): JSONObject {
+        val response = request(method, url, body, contentType, headers)
         return JSONObject(response)
     }
 
-    private fun request(method: String, url: String, body: String?, contentType: String?): String {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        connection.requestMethod = method
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 20_000
-        if (body != null) {
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", contentType ?: "application/json")
-            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-        }
-        val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
-        val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        if (connection.responseCode !in 200..299) {
-            throw IllegalStateException("Firebase request failed ${connection.responseCode}: $response")
-        }
-        return response
+    private fun request(
+        method: String,
+        url: String,
+        body: String?,
+        contentType: String?,
+        headers: Map<String, String> = emptyMap(),
+    ): String {
+        return requestWithMetadata(method, url, body, contentType, headers).body
     }
+
+    private fun requestWithMetadata(
+        method: String,
+        url: String,
+        body: String?,
+        contentType: String?,
+        headers: Map<String, String> = emptyMap(),
+    ): FirebaseHttpResponse {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = method
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 20_000
+            headers.forEach(connection::setRequestProperty)
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", contentType ?: "application/json")
+                connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            }
+            val responseCode = connection.responseCode
+            val stream = if (responseCode in 200..299) connection.inputStream else connection.errorStream
+            val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (responseCode !in 200..299) {
+                throw IllegalStateException("Firebase request failed $responseCode: $response")
+            }
+            return FirebaseHttpResponse(body = response, etag = connection.getHeaderField("ETag"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private data class FirebaseHttpResponse(val body: String, val etag: String?)
 
     private fun databaseUrl(settings: FirebaseSettings, path: String, idToken: String): String {
         return settings.databaseUrl.trimEnd('/') + "/" + path.trim('/') + ".json?auth=${encode(idToken)}"

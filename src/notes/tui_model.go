@@ -626,7 +626,7 @@ func (w *Workspace) saveCurrent(sync bool) error {
 	if err := os.MkdirAll(filepath.Dir(ed.Path), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(ed.Path, []byte(ed.Text), 0o644); err != nil {
+	if err := ReplaceNoteFile(ed.Path, []byte(ed.Text)); err != nil {
 		return err
 	}
 	ed.Dirty = false
@@ -670,7 +670,7 @@ func (w *Workspace) saveAllDirty(sync bool) (bool, error) {
 		if err := os.MkdirAll(filepath.Dir(ed.Path), 0o755); err != nil {
 			return wroteAny, err
 		}
-		if err := os.WriteFile(ed.Path, []byte(ed.Text), 0o644); err != nil {
+		if err := ReplaceNoteFile(ed.Path, []byte(ed.Text)); err != nil {
 			return wroteAny, err
 		}
 		ed.Dirty = false
@@ -883,7 +883,7 @@ func (w *Workspace) DeleteNoteByPath(path string) error {
 	if w == nil || strings.TrimSpace(path) == "" {
 		return fmt.Errorf("no note selected")
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := RemoveNoteFile(path); err != nil {
 		if ed := w.ActiveEditor(); ed != nil {
 			ed.Status = err.Error()
 		}
@@ -907,7 +907,7 @@ func (w *Workspace) DeleteFolderByRel(folder string) error {
 	if folder == "" {
 		return fmt.Errorf("no folder selected")
 	}
-	if err := os.RemoveAll(noteFolderPath(folder)); err != nil {
+	if err := RemoveNoteFolder(noteFolderPath(folder)); err != nil {
 		return err
 	}
 	w.closeTabsInFolder(folder)
@@ -1524,7 +1524,7 @@ func (w *Workspace) DeleteSelection() error {
 		return nil
 	}
 	if entry.Kind == treeFolder {
-		if err := os.RemoveAll(noteFolderPath(entry.Folder)); err != nil {
+		if err := RemoveNoteFolder(noteFolderPath(entry.Folder)); err != nil {
 			return err
 		}
 		w.closeTabsInFolder(entry.Folder)
