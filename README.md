@@ -151,7 +151,6 @@ The Notes view is the main Markdown workspace. It supports:
 - Mouse close buttons on note tabs.
 - Sidebar folder and note navigation.
 - Note rename, create, delete, save, and restore of open note session.
-- Managed file assets for notes.
 - Opening all unique external links in the current note.
 
 Useful normal-mode keys:
@@ -279,6 +278,11 @@ Transparent background is independent from the theme. When transparent backgroun
 The app creates its config directory under the user home directory at startup. Settings and note session state are persisted locally. Firebase sync, when enabled and configured, can sync todos, notes, and shared settings.
 
 Changes to settings, file paths, notes, or sync behavior should handle missing directories and read failures safely.
+
+## Privacy And Data Deletion
+
+- Privacy policy: https://koko.lv/koko-tools/privacy-policy.html
+- Account and data deletion: https://koko.lv/koko-tools/account-deletion.html
 
 ## Development
 

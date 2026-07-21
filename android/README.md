@@ -29,12 +29,12 @@ The project currently uses:
 
 - package name: `com.kloneets.kokotools`
 - min SDK: 26
-- compile SDK: 35
-- target SDK: 35
-- version code: 1
-- version name: 0.1.0
+- compile SDK: 36
+- target SDK: 36
+- version code: 4
+- version name: 0.1.3
 
-If your installed Android SDK differs, install API 35 with Android Studio SDK Manager or adjust `compileSdk` and `targetSdk` in `app/build.gradle.kts`.
+If your installed Android SDK differs, install API 36 with Android Studio SDK Manager or adjust `compileSdk` and `targetSdk` in `app/build.gradle.kts`.
 
 ## Local Data
 

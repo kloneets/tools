@@ -46,14 +46,21 @@ The bundle is written under `android/app/build/outputs/bundle/release/`. If `and
 
 Complete these before production:
 
-- App content -> Privacy policy: `https://koko.lv/privacy-policy.html`
+- App content -> Privacy policy: `https://koko.lv/koko-tools/privacy-policy.html`
 - App content -> Data safety: declare account info, user content, and cloud sync.
-- App content -> Data deletion: `https://koko.lv/account-deletion.html`
-- App content -> Content rating.
+- App content -> Data deletion: `https://koko.lv/koko-tools/account-deletion.html`
+- App content -> Content rating: complete or re-check before each production submission.
 - App content -> Target audience.
 - Store listing: use `android/play-store/koko-tools-icon-512.png` for the app icon, then add screenshots, short description, full description, category, and contact email.
 
 If this is a new personal developer account, complete the required closed test with 12 opted-in testers for 14 days before applying for production access.
+
+## Policy Gates
+
+- Target API: new apps and app updates must target Android 16 (API level 36) or higher starting August 31, 2026. Keep `targetSdk = 36` or higher before submitting any update after that date. Reference: `https://developer.android.com/google/play/requirements/target-sdk`.
+- Developer verification: confirm the Play Console developer account, package name, and signing lineage are verified or automatically registered before release. Android developer verification regional enforcement starts September 30, 2026 for participating stores. Reference: `https://developer.android.com/developer-verification`.
+- Content rating: verify the Play Console content rating questionnaire is complete and still matches app behavior before promoting a release.
+- 16 KB native compatibility: this app builds native code, so confirm release artifacts are rebuilt with 16 KB page-size compatible tooling and pass Play Console/pre-review native library checks before production. Reference: `https://developer.android.com/about/versions/15/behavior-changes-all#page-size`.
 
 ## Release Validation
 

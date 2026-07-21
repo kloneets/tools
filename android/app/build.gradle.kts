@@ -47,9 +47,9 @@ android {
     defaultConfig {
         applicationId = "com.kloneets.kokotools"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        targetSdk = 36
+        versionCode = 4
+        versionName = "0.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FIREBASE_API_KEY", "\"${firebaseBuildConfigValue("KOKO_FIREBASE_API_KEY")}\"")
@@ -110,6 +110,7 @@ android {
 fun Any?.orEmptyString(): String = (this as? String).orEmpty()
 
 dependencies {
+    implementation("androidx.activity:activity:1.12.2")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("com.google.android.gms:play-services-auth:21.5.0")
     implementation("io.noties:prism4j:2.0.0") {

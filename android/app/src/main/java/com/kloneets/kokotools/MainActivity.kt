@@ -1,6 +1,5 @@
 package com.kloneets.kokotools
 
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.res.ColorStateList
 import android.content.res.Configuration
@@ -39,6 +38,8 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -50,7 +51,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private lateinit var settingsRepository: SettingsRepository
     private lateinit var notesRepository: NotesRepository
     private lateinit var todoRepository: TodoRepository
@@ -74,6 +75,11 @@ class MainActivity : Activity() {
     private lateinit var syncProblemBadge: ImageView
     private lateinit var drawerScrim: View
     private lateinit var drawerPanel: LinearLayout
+    private val drawerBackCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            hideNavigationDrawer()
+        }
+    }
     private lateinit var content: LinearLayout
 
     private var noteListView: ListView? = null
@@ -112,6 +118,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, drawerBackCallback)
         WindowCompat.enableEdgeToEdge(window)
         settingsRepository = SettingsRepository(this)
         notesRepository = NotesRepository(this)
@@ -368,30 +375,19 @@ class MainActivity : Activity() {
     private fun showNavigationDrawer() {
         drawerScrim.visibility = View.VISIBLE
         drawerPanel.visibility = View.VISIBLE
+        drawerBackCallback.isEnabled = true
         drawerScrim.animate().alpha(1f).setDuration(DRAWER_ANIMATION_MS).start()
         drawerPanel.animate().translationX(0f).setDuration(DRAWER_ANIMATION_MS).start()
     }
 
     private fun hideNavigationDrawer() {
+        drawerBackCallback.isEnabled = false
         drawerScrim.animate().alpha(0f).setDuration(DRAWER_ANIMATION_MS).withEndAction {
             drawerScrim.visibility = View.GONE
         }.start()
         drawerPanel.animate().translationX(-drawerWidth().toFloat()).setDuration(DRAWER_ANIMATION_MS).withEndAction {
             drawerPanel.visibility = View.GONE
         }.start()
-    }
-
-    private fun isNavigationDrawerOpen(): Boolean {
-        return ::drawerPanel.isInitialized && drawerPanel.visibility == View.VISIBLE
-    }
-
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    override fun onBackPressed() {
-        if (isNavigationDrawerOpen()) {
-            hideNavigationDrawer()
-            return
-        }
-        super.onBackPressed()
     }
 
     private fun drawerWidth(): Int {
@@ -2712,7 +2708,7 @@ class MainActivity : Activity() {
         private const val DRAWER_ANIMATION_MS = 180L
         private const val NOTE_AUTOSAVE_DELAY_MS = 600L
         private const val FIREBASE_PULL_INTERVAL_MS = 30 * 1_000L
-        private const val PRIVACY_POLICY_URL = "https://koko.lv/privacy-policy.html"
-        private const val ACCOUNT_DELETION_URL = "https://koko.lv/account-deletion.html"
+        private const val PRIVACY_POLICY_URL = "https://koko.lv/koko-tools/privacy-policy.html"
+        private const val ACCOUNT_DELETION_URL = "https://koko.lv/koko-tools/account-deletion.html"
     }
 }

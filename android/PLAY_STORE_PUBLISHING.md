@@ -141,15 +141,15 @@ Store listing:
 
 App content:
 
-- Privacy policy URL: `https://koko.lv/privacy-policy.html`
+- Privacy policy URL: `https://koko.lv/koko-tools/privacy-policy.html`
 - Data safety form.
-- Data deletion URL: `https://koko.lv/account-deletion.html`
+- Data deletion URL: `https://koko.lv/koko-tools/account-deletion.html`
 - Content rating questionnaire.
 - Target audience.
 - Ads: `No`, unless ads are added later.
 - App access: explain Firebase login if reviewers need credentials.
 
-Important: upload `docs/privacy-policy.html` and `docs/account-deletion.html` to `https://koko.lv/` before entering these URLs in Play Console. The pages must be public without login.
+Important: upload `docs/privacy-policy.html` and `docs/account-deletion.html` to `https://koko.lv/koko-tools/` before entering these URLs in Play Console. The pages must be public without login.
 
 Google references:
 
@@ -188,13 +188,8 @@ If Play Console says production is locked:
 1. Go to `Production`.
 2. Create a release.
 3. Upload the final signed AAB.
-4. Add release notes:
-
-```text
-Initial release of Koko Tools for Android with notes, todos, Pages calculator, managed assets, and Firebase sync.
-```
-
-5. Start with a staged rollout, such as 10% or 20%.
+4. Add release notes from `android/play-store/release-notes/4-en-US.txt`.
+5. Set rollout status to full Production release for this version. Do not configure a staged rollout fraction for release 0.1.3.
 6. Watch:
    - Pre-launch report
    - Crashes and ANRs

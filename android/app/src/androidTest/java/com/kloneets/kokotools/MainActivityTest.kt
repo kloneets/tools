@@ -1,16 +1,19 @@
 package com.kloneets.kokotools
 
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.RadioButton
 import android.widget.TextView
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -42,6 +45,41 @@ class MainActivityTest {
 
                 assertEquals("Pages", activity.findViewById<TextView>(R.id.app_title).text.toString())
                 assertTrue(activity.findViewById<EditText>(R.id.pages_first).isShown)
+            }
+        }
+    }
+
+    @Test
+    fun backClosesOpenNavigationDrawer() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                activity.findViewById<ImageButton>(R.id.tools_menu).performClick()
+            }
+            scenario.waitUntil("navigation drawer opens") { activity ->
+                activity.findViewById<View>(R.id.drawer_panel).visibility == View.VISIBLE
+            }
+
+            scenario.onActivity { activity ->
+                activity.onBackPressedDispatcher.onBackPressed()
+            }
+
+            scenario.waitUntil("navigation drawer closes") { activity ->
+                activity.findViewById<View>(R.id.drawer_panel).visibility == View.GONE
+            }
+            assertEquals(Lifecycle.State.RESUMED, scenario.state)
+        }
+    }
+
+    @Test
+    fun backWithClosedNavigationDrawerFinishesActivity() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                assertEquals(View.GONE, activity.findViewById<View>(R.id.drawer_panel).visibility)
+                activity.onBackPressedDispatcher.onBackPressed()
+            }
+
+            waitUntil("activity finishes after back with closed drawer") {
+                scenario.state == Lifecycle.State.DESTROYED
             }
         }
     }
@@ -301,6 +339,31 @@ class MainActivityTest {
             isAccessible = true
             get(activity)
         }
+    }
+
+    private fun ActivityScenario<MainActivity>.waitUntil(
+        message: String,
+        timeoutMs: Long = 2_000,
+        condition: (MainActivity) -> Boolean,
+    ) {
+        waitUntil(message, timeoutMs) {
+            var matched = false
+            onActivity { activity ->
+                matched = condition(activity)
+            }
+            matched
+        }
+    }
+
+    private fun waitUntil(message: String, timeoutMs: Long = 2_000, condition: () -> Boolean) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() <= deadline) {
+            if (condition()) {
+                return
+            }
+            Thread.sleep(50)
+        }
+        fail(message)
     }
 
     private fun visibleTextLabels(view: View): Set<String> {

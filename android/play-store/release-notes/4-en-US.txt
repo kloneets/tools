@@ -1,0 +1,2 @@
+Updated for Android 16 compatibility, including predictive back support.
+Updated in-app privacy policy and data deletion links.
