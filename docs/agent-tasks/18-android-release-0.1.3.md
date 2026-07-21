@@ -3,7 +3,7 @@
 ## Task
 - Request: Build Android release 0.1.3 and promote it to Google Play Production while preserving task 16 and task 17 changes.
 - Date: 2026-07-17
-- Branch or commit: working tree
+- Branch or commit: `e732b8f`
 
 ## Accepted Plan
 - Preserve task 16 Android API 36 compatibility and task 17 privacy/account deletion work.
@@ -49,6 +49,11 @@
   - Target SDK evidence: `android/app/build/intermediates/merged_manifests/release/processReleaseManifest/AndroidManifest.xml` contains `android:targetSdkVersion="36"`.
   - 16 KB native compatibility evidence: bundle metadata includes `PAGE_ALIGNMENT_16K`; extracted native libraries for `arm64-v8a` and `x86_64` report `0x4000` load alignment.
   - Final live policy verification on July 21, 2026 confirmed the privacy page contains the Android backup/OEM migration disclosure and the deletion page contains the private request path and 30-day completion statement.
+  - Release candidate commit: `e732b8f release: prepare Android 0.1.3`.
+  - Android Publisher edit `00491301437055390367` uploaded version code 4 with Play SHA-256 `c1d8d90362994afc911ef01342439391790ed59579018f564cf6b6c271716f76`, exactly matching the local signed AAB.
+  - The Production track was set to release name `0.1.3`, version code 4, status `completed`, English release notes, and no staged rollout fraction. The edit validated and committed successfully.
+  - A fresh readback edit confirmed Production version code 4, status `completed`, and no `userFraction`; the temporary edit was deleted with HTTP 204.
+  - The read-only Production release endpoint reports version 4 lifecycle `RELEASE_LIFECYCLE_STATE_IN_REVIEW`; version 3 remains `RELEASE_LIFECYCLE_STATE_PUBLISHED` while Google reviews 0.1.3.
 
 ## Review Round 1
 - Review agent: Sartre (`gpt-5.6-sol`).
@@ -79,8 +84,8 @@
 - Fixes or waivers: The final privacy page was uploaded and verified live on July 21, resolving the deployment finding. Connected-device testing is explicitly waived for release 0.1.3 because ADB reports no device; Android unit tests, instrumentation APK compilation, lint, debug assembly, and release bundle assembly pass, and predictive-back dispatcher behavior has focused instrumentation coverage.
 
 ## Final Audit
-- Done auditor:
-- Status:
-- Plan items confirmed:
-- Tests and checks confirmed:
-- Waivers or skipped checks:
+- Done auditor: Herschel (`gpt-5.6-sol`).
+- Status: Incomplete while Google Play review is pending.
+- Plan items confirmed: Candidate commit, release metadata, final live policies, test/build/signing/16 KB checks, exact bundle upload, validated and committed Production edit, full-rollout track state, and post-commit readback.
+- Tests and checks confirmed: Go test/vet/build; Android unit/lint/debug/instrumentation APK/release bundle; signature, manifest, native alignment, live URL, upload hash, track, and lifecycle checks.
+- Waivers or skipped checks: Connected-device verification is waived because ADB reports no device. Version 4 remains `RELEASE_LIFECYCLE_STATE_IN_REVIEW`; completion requires a fresh lifecycle query to report `RELEASE_LIFECYCLE_STATE_PUBLISHED`.
