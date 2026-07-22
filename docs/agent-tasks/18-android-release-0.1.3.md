@@ -84,8 +84,8 @@
 - Fixes or waivers: The final privacy page was uploaded and verified live on July 21, resolving the deployment finding. Connected-device testing is explicitly waived for release 0.1.3 because ADB reports no device; Android unit tests, instrumentation APK compilation, lint, debug assembly, and release bundle assembly pass, and predictive-back dispatcher behavior has focused instrumentation coverage.
 
 ## Final Audit
-- Done auditor: Herschel (`gpt-5.6-sol`).
-- Status: Incomplete while Google Play review is pending.
+- Done auditors: Herschel (`gpt-5.6-sol`) for submission; Newton (`gpt-5.5`) for publication follow-up.
+- Status: Complete. Android Publisher reports Production release `0.1.3`, version code 4, lifecycle `RELEASE_LIFECYCLE_STATE_PUBLISHED`.
 - Plan items confirmed: Candidate commit, release metadata, final live policies, test/build/signing/16 KB checks, exact bundle upload, validated and committed Production edit, full-rollout track state, and post-commit readback.
 - Tests and checks confirmed: Go test/vet/build; Android unit/lint/debug/instrumentation APK/release bundle; signature, manifest, native alignment, live URL, upload hash, track, and lifecycle checks.
-- Waivers or skipped checks: Connected-device verification is waived because ADB reports no device. Version 4 remains `RELEASE_LIFECYCLE_STATE_IN_REVIEW`; completion requires a fresh lifecycle query to report `RELEASE_LIFECYCLE_STATE_PUBLISHED`.
+- Waivers or skipped checks: Connected-device verification was waived because ADB reported no device. The former Play-review blocker is resolved; a fresh lifecycle query on July 22, 2026 reported version 4 as `RELEASE_LIFECYCLE_STATE_PUBLISHED`.
