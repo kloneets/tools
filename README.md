@@ -121,6 +121,8 @@ Common keys:
 - `1` through `6`: jump to a view while the tab bar is active.
 - `ctrl+1` through `ctrl+6`: jump directly to a view without activating the tab bar.
 - Mouse click an app tab: jump directly to that view.
+- Mouse click a displayed `http`, `https`, `ftp`, or `file` link: open it with the system handler.
+- Mouse drag in the Todo view: select exact visible text and copy it when the button is released.
 - `left` / `right`: move through views while the tab bar is active.
 - `enter`: confirm a tab selection.
 - `esc`: cancel prompts or mode-specific UI states.
@@ -152,6 +154,7 @@ The Notes view is the main Markdown workspace. It supports:
 - Sidebar folder and note navigation.
 - Note rename, create, delete, save, and restore of open note session.
 - Opening all unique external links in the current note.
+- Mouse click links in the Markdown preview, or Ctrl+click links in the editor without changing normal cursor and selection clicks.
 
 Useful normal-mode keys:
 

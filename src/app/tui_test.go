@@ -1551,6 +1551,243 @@ func TestCaptureMouseScrollMovesNoteCursor(t *testing.T) {
 	}
 }
 
+func TestLinkAtTextPositionHandlesMarkdownWrappingAndWideRunes(t *testing.T) {
+	text := "界 [documentation](https://example.com/docs)"
+	uri, ok := linkAtTextPosition(text, 0, 4, 80, false)
+	if !ok || uri != "https://example.com/docs" {
+		t.Fatalf("linkAtTextPosition() = %q, %t", uri, ok)
+	}
+	uri, ok = linkAtTextPosition("prefix https://example.com/long", 1, 2, 12, true)
+	if !ok || uri != "https://example.com/long" {
+		t.Fatalf("wrapped linkAtTextPosition() = %q, %t", uri, ok)
+	}
+}
+
+func TestTodoSelectionHelpersHandleMultilineReverseAndWideText(t *testing.T) {
+	text := "界ab\ncd"
+	if got := textOffsetAtPosition(text, 0, 2); got != 1 {
+		t.Fatalf("wide text offset = %d, want 1", got)
+	}
+	if got := textOffsetAtPosition(text, 1, 1); got != 5 {
+		t.Fatalf("second-line offset = %d, want 5", got)
+	}
+	if got := textInRange(text, 5, 1); got != "ab\nc" {
+		t.Fatalf("reverse multiline selection = %q, want %q", got, "ab\nc")
+	}
+	if got := textInRange(text, -10, 100); got != text {
+		t.Fatalf("clamped selection = %q, want full text", got)
+	}
+}
+
+func TestStyleTextRangePreservesPlainTextAndMarksSelection(t *testing.T) {
+	text := helpers.ANSI(helpers.ANSIBold, "prefix") + " alpha"
+	got := styleTextRange(text, 7, 12, helpers.ANSIRoleSelection)
+	if plain := helpers.StripANSI(got); plain != "prefix alpha" {
+		t.Fatalf("styled plain text = %q", plain)
+	}
+	if !strings.Contains(got, helpers.ANSIRoleSelection+"alpha") {
+		t.Fatalf("styled text = %q, want selection role", got)
+	}
+}
+
+func TestTodoMouseDragCopiesExactVisibleText(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	copied := []string{}
+	restore := helpers.SetClipboardWriterForTesting(func(text string) error {
+		copied = append(copied, text)
+		return nil
+	})
+	defer restore()
+	single := tview.NewTextView()
+	single.SetRect(0, 0, 80, 10)
+	app := &terminalApp{
+		view:           viewTodo,
+		single:         single,
+		singleLinkText: "Todo\n  [ ] alpha\n  [ ] beta",
+	}
+	start := tcell.NewEventMouse(6, 1, tcell.Button1, 0)
+	end := tcell.NewEventMouse(11, 1, tcell.ButtonNone, 0)
+	if !app.handleTodoMouse(start, tview.MouseLeftDown) {
+		t.Fatal("Todo mouse down was not consumed")
+	}
+	app.handleTodoMouse(end, tview.MouseMove)
+	app.handleTodoMouse(end, tview.MouseLeftUp)
+	if len(copied) != 1 || copied[0] != "alpha" {
+		t.Fatalf("copied = %#v, want alpha", copied)
+	}
+	if !app.todoSelection.visible {
+		t.Fatal("selection highlight cleared before feedback delay")
+	}
+	if status := helpers.StatusBarInst().Text(); status != "Todo selection copied" {
+		t.Fatalf("status = %q", status)
+	}
+}
+
+func TestTodoMouseClickDoesNotCopy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	copies := 0
+	restore := helpers.SetClipboardWriterForTesting(func(string) error { copies++; return nil })
+	defer restore()
+	single := tview.NewTextView()
+	single.SetRect(0, 0, 80, 10)
+	app := &terminalApp{view: viewTodo, single: single, singleLinkText: "Todo"}
+	event := tcell.NewEventMouse(1, 0, tcell.Button1, 0)
+	app.handleTodoMouse(event, tview.MouseLeftDown)
+	app.handleTodoMouse(event, tview.MouseLeftUp)
+	app.handleTodoMouse(event, tview.MouseLeftClick)
+	if copies != 0 || app.todoSelection.visible {
+		t.Fatalf("copies = %d, visible = %t; want no selection copy", copies, app.todoSelection.visible)
+	}
+}
+
+func TestTodoMouseDragOverLinkCopiesWithoutOpening(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	copied := ""
+	opened := ""
+	clipboardRestore := helpers.SetClipboardWriterForTesting(func(text string) error {
+		copied = text
+		return nil
+	})
+	defer clipboardRestore()
+	openerRestore := helpers.SetURIOpenerForTesting(func(uri string) { opened = uri })
+	defer openerRestore()
+	single := tview.NewTextView()
+	single.SetRect(0, 0, 80, 10)
+	app := &terminalApp{view: viewTodo, single: single, singleLinkText: "visit https://example.com"}
+	start := tcell.NewEventMouse(6, 0, tcell.Button1, 0)
+	end := tcell.NewEventMouse(11, 0, tcell.ButtonNone, 0)
+	app.captureMouse(start, tview.MouseLeftDown)
+	app.captureMouse(end, tview.MouseMove)
+	app.captureMouse(end, tview.MouseLeftUp)
+	if copied != "https" || opened != "" {
+		t.Fatalf("copied = %q, opened = %q; want https copied without opening", copied, opened)
+	}
+}
+
+func TestTodoMouseCopyFailureIsReported(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	restore := helpers.SetClipboardWriterForTesting(func(string) error { return os.ErrPermission })
+	defer restore()
+	app := &terminalApp{singleLinkText: "alpha", todoSelection: todoMouseSelection{start: 0, end: 5}}
+	app.copyTodoMouseSelection()
+	if status := helpers.StatusBarInst().Text(); !strings.Contains(status, "Todo selection copy failed") {
+		t.Fatalf("status = %q, want clipboard failure", status)
+	}
+}
+
+func TestTodoSelectionGenerationProtectsNewHighlight(t *testing.T) {
+	app := &terminalApp{todoSelection: todoMouseSelection{visible: true}}
+	old := app.todoSelection.generation.Add(1)
+	app.todoSelection.generation.Add(1)
+	if app.clearTodoSelectionIfGeneration(old) || !app.todoSelection.visible {
+		t.Fatal("stale generation cleared a newer selection")
+	}
+	current := app.todoSelection.generation.Load()
+	if !app.clearTodoSelectionIfGeneration(current) || app.todoSelection.visible {
+		t.Fatal("current generation did not clear selection")
+	}
+}
+
+func TestLeavingTodoClearsMouseSelection(t *testing.T) {
+	app := &terminalApp{
+		view: viewTodo,
+		todoSelection: todoMouseSelection{
+			selecting: true,
+			visible:   true,
+			start:     1,
+			end:       4,
+		},
+	}
+	app.switchAppTab(viewNotes)
+	if app.todoSelection.selecting || app.todoSelection.visible || app.todoSelection.start != 0 || app.todoSelection.end != 0 {
+		t.Fatalf("Todo selection not cleared: %#v", app)
+	}
+}
+
+func TestCaptureMouseOpensReadOnlyViewLink(t *testing.T) {
+	helpers.InitStatusBar()
+	opened := ""
+	restore := helpers.SetURIOpenerForTesting(func(uri string) { opened = uri })
+	defer restore()
+	single := tview.NewTextView()
+	single.SetRect(0, 0, 80, 10)
+	app := &terminalApp{
+		view:           viewTodo,
+		single:         single,
+		singleLinkText: "visit https://example.com",
+	}
+	event := tcell.NewEventMouse(8, 0, tcell.Button1, 0)
+	returned, _ := app.captureMouse(event, tview.MouseLeftClick)
+	if returned != nil || opened != "https://example.com" {
+		t.Fatalf("captureMouse() returned %v, opened %q", returned, opened)
+	}
+}
+
+func TestCaptureMouseRequiresControlForEditorLink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	opened := []string{}
+	restore := helpers.SetURIOpenerForTesting(func(uri string) { opened = append(opened, uri) })
+	defer restore()
+	ws := &notes.Workspace{
+		EditorRenderWidth: 40,
+		Tabs: []*notes.Editor{{
+			Text: "See [docs](https://example.com/docs)",
+			Mode: notes.ModeNormal,
+		}},
+	}
+	editor := tview.NewTextView()
+	editor.SetRect(0, 0, 40, 10)
+	app := &terminalApp{view: viewNotes, notes: ws, editor: editor}
+
+	plainClick := tcell.NewEventMouse(7, 1, tcell.Button1, 0)
+	app.captureMouse(plainClick, tview.MouseLeftClick)
+	if len(opened) != 0 {
+		t.Fatalf("ordinary editor click opened %v", opened)
+	}
+	ctrlClick := tcell.NewEventMouse(7, 1, tcell.Button1, tcell.ModCtrl)
+	beforeCursor := ws.ActiveEditor().Cursor
+	app.captureMouse(ctrlClick, tview.MouseLeftDown)
+	app.captureMouse(ctrlClick, tview.MouseLeftUp)
+	if ws.ActiveEditor().Cursor != beforeCursor || ws.ActiveEditor().Mode != notes.ModeNormal {
+		t.Fatalf("Ctrl+click precursor changed editor state: cursor %d mode %s", ws.ActiveEditor().Cursor, ws.ActiveEditor().Mode)
+	}
+	returned, _ := app.captureMouse(ctrlClick, tview.MouseLeftClick)
+	if returned != nil || len(opened) != 1 || opened[0] != "https://example.com/docs" {
+		t.Fatalf("Ctrl+click returned %v, opened %v", returned, opened)
+	}
+}
+
+func TestCaptureMouseOpensPreviewLink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	opened := ""
+	restore := helpers.SetURIOpenerForTesting(func(uri string) { opened = uri })
+	defer restore()
+	ws := &notes.Workspace{Tabs: []*notes.Editor{{
+		Text: "[docs](https://example.com/docs)",
+		Mode: notes.ModeNormal,
+	}}}
+	preview := tview.NewTextView()
+	preview.SetRect(50, 0, 30, 10)
+	app := &terminalApp{view: viewNotes, notes: ws, preview: preview}
+	event := tcell.NewEventMouse(51, 0, tcell.Button1, 0)
+	returned, _ := app.captureMouse(event, tview.MouseLeftClick)
+	if returned != nil || opened != "https://example.com/docs" {
+		t.Fatalf("preview click returned %v, opened %q", returned, opened)
+	}
+}
+
 func TestAnsiToTViewSpellErrorUsesStableForegroundOnly(t *testing.T) {
 	got := ansiToTView(helpers.ANSI(helpers.ANSIRoleSpellError, "badwrd"))
 	if !strings.Contains(got, themeMarkupFG(currentTheme().ErrorAccent)+"badwrd") {

@@ -694,43 +694,68 @@ func applyReplaceCandidates(text string, candidates []replaceCandidate, accepted
 }
 
 var bareExternalLinkPattern = regexp.MustCompile(`(?i)(?:https?|ftp|file)://[^\s<>"']+`)
+var markdownExternalLinkPattern = regexp.MustCompile(`\[([^\]\n]+)\]\(([^)\s]+)\)`)
 
-func collectSupportedLinks(text string) []string {
-	type occurrence struct {
-		start int
-		uri   string
-	}
-	occurrences := make([]occurrence, 0, 8)
-	render := markdownPreview(text, 4)
-	for _, link := range render.Links {
-		occurrences = append(occurrences, occurrence{start: link.Start, uri: link.URL})
-	}
-	for _, idx := range bareExternalLinkPattern.FindAllStringIndex(text, -1) {
-		occurrences = append(occurrences, occurrence{
-			start: utf8.RuneCountInString(text[:idx[0]]),
-			uri:   text[idx[0]:idx[1]],
+// SupportedLink describes the clickable source text for a supported URI.
+type SupportedLink struct {
+	Start int
+	End   int
+	URI   string
+}
+
+func FindSupportedLinks(text string) []SupportedLink {
+	links := make([]SupportedLink, 0, 8)
+	for _, match := range markdownExternalLinkPattern.FindAllStringSubmatchIndex(text, -1) {
+		uri := trimTrailingExternalPunctuation(strings.TrimSpace(text[match[4]:match[5]]))
+		if !isSupportedExternalURI(uri) {
+			continue
+		}
+		links = append(links, SupportedLink{
+			Start: utf8.RuneCountInString(text[:match[2]]),
+			End:   utf8.RuneCountInString(text[:match[3]]),
+			URI:   uri,
 		})
 	}
-	sort.SliceStable(occurrences, func(i, j int) bool {
-		return occurrences[i].start < occurrences[j].start
+	for _, idx := range bareExternalLinkPattern.FindAllStringIndex(text, -1) {
+		raw := text[idx[0]:idx[1]]
+		uri := trimTrailingExternalPunctuation(strings.TrimSpace(raw))
+		if !isSupportedExternalURI(uri) {
+			continue
+		}
+		start := utf8.RuneCountInString(text[:idx[0]])
+		links = append(links, SupportedLink{
+			Start: start,
+			End:   start + utf8.RuneCountInString(uri),
+			URI:   uri,
+		})
+	}
+	sort.SliceStable(links, func(i, j int) bool {
+		if links[i].Start == links[j].Start {
+			return links[i].End < links[j].End
+		}
+		return links[i].Start < links[j].Start
 	})
+	return links
+}
 
+func SupportedLinkAt(text string, offset int) (string, bool) {
+	for _, link := range FindSupportedLinks(text) {
+		if offset >= link.Start && offset < link.End {
+			return link.URI, true
+		}
+	}
+	return "", false
+}
+
+func collectSupportedLinks(text string) []string {
 	seen := make(map[string]struct{})
 	links := make([]string, 0, 8)
-	add := func(uri string) {
-		uri = trimTrailingExternalPunctuation(strings.TrimSpace(uri))
-		if !isSupportedExternalURI(uri) {
-			return
+	for _, item := range FindSupportedLinks(text) {
+		if _, ok := seen[item.URI]; ok {
+			continue
 		}
-		if _, ok := seen[uri]; ok {
-			return
-		}
-		seen[uri] = struct{}{}
-		links = append(links, uri)
-	}
-
-	for _, item := range occurrences {
-		add(item.uri)
+		seen[item.URI] = struct{}{}
+		links = append(links, item.URI)
 	}
 	return links
 }

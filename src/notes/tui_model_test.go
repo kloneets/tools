@@ -1062,6 +1062,42 @@ func TestEditorOffsetAtVisualPositionMapsWrappedTextAndLongLinks(t *testing.T) {
 	}
 }
 
+func TestEditorLinkAtVisualPositionResolvesMarkdownLabel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		EditorRenderWidth: 40,
+		Tabs: []*Editor{{
+			Text: "See [docs](https://example.com/docs)",
+			Mode: ModeNormal,
+		}},
+	}
+	uri, ok := w.EditorLinkAtVisualPosition(0, 7)
+	if !ok || uri != "https://example.com/docs" {
+		t.Fatalf("EditorLinkAtVisualPosition() = %q, %t", uri, ok)
+	}
+}
+
+func TestPreviewLinkAtVisualPositionResolvesWrappedAndScrolledLinks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	w := &Workspace{
+		Tabs: []*Editor{{
+			Text:      "first line\n[documentation](https://example.com/docs)",
+			Mode:      ModeNormal,
+			ScrollTop: 1,
+		}},
+	}
+	uri, ok := w.PreviewLinkAtVisualPosition(0, 2, 8)
+	if !ok || uri != "https://example.com/docs" {
+		t.Fatalf("PreviewLinkAtVisualPosition() = %q, %t", uri, ok)
+	}
+	uri, ok = w.PreviewLinkAtVisualPosition(1, 2, 8)
+	if !ok || uri != "https://example.com/docs" {
+		t.Fatalf("wrapped PreviewLinkAtVisualPosition() = %q, %t", uri, ok)
+	}
+}
+
 func TestMouseDragSelectionUsesVisualPositions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()

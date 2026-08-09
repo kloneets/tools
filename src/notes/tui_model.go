@@ -4437,6 +4437,7 @@ func editorLineNumberWidth(lines []string, width int) int {
 
 func renderPreviewPane(ed *Editor, width int, height int) []string {
 	render := markdownPreview(ed.Text, settings.Inst().NotesApp.TabSpaces)
+	render.Spans = append(render.Spans, supportedLinkSpans(render.Text)...)
 	lines := strings.Split(render.Text, "\n")
 	out := make([]string, 0, height)
 	lineSpans := groupSpansByLine(render.Text, render.Spans)
@@ -4826,6 +4827,62 @@ func (w *Workspace) EditorOffsetAtVisualPosition(row int, col int) (int, bool) {
 	return editorOffsetAtAbsoluteVisualPosition(ed.Text, w.editorRenderWidth(), targetRow, cell), true
 }
 
+func (w *Workspace) EditorLinkAtVisualPosition(row int, col int) (string, bool) {
+	offset, ok := w.EditorOffsetAtVisualPosition(row, col)
+	if !ok {
+		return "", false
+	}
+	ed := w.ActiveEditor()
+	if ed == nil {
+		return "", false
+	}
+	return SupportedLinkAt(ed.Text, offset)
+}
+
+func (w *Workspace) PreviewLinkAtVisualPosition(row int, col int, width int) (string, bool) {
+	ed := w.ActiveEditor()
+	if ed == nil || width <= 0 || row < 0 || col < 0 {
+		return "", false
+	}
+	render := markdownPreview(ed.Text, settings.Inst().NotesApp.TabSpaces)
+	offset, ok := previewOffsetAtVisualPosition(render, ed.ScrollTop+row, col, width)
+	if !ok {
+		return "", false
+	}
+	for _, link := range render.Links {
+		uri := trimTrailingExternalPunctuation(strings.TrimSpace(link.URL))
+		if offset >= link.Start && offset < link.End && isSupportedExternalURI(uri) {
+			return uri, true
+		}
+	}
+	return SupportedLinkAt(render.Text, offset)
+}
+
+func previewOffsetAtVisualPosition(render markdownRender, targetRow int, col int, width int) (int, bool) {
+	lines := strings.Split(render.Text, "\n")
+	lineSpans := groupSpansByLine(render.Text, render.Spans)
+	lineOffset := 0
+	visualRow := 0
+	for lineIndex, line := range lines {
+		if lineIndex < len(lineSpans) && hasTag(lineSpans[lineIndex], tagHorizontalRule) {
+			if visualRow == targetRow {
+				return lineOffset + min(col, len([]rune(line))), true
+			}
+			visualRow++
+			lineOffset += len([]rune(line)) + 1
+			continue
+		}
+		for _, segment := range wrapPlainLine(line, width) {
+			if visualRow == targetRow {
+				return lineOffset + segment.start + segmentRuneOffsetAtCell(segment, col), true
+			}
+			visualRow++
+		}
+		lineOffset += len([]rune(line)) + 1
+	}
+	return 0, false
+}
+
 func editorOffsetAtAbsoluteVisualPosition(text string, width int, targetRow int, cell int) int {
 	lines := strings.Split(text, "\n")
 	offsets := lineStartOffsets(text)
@@ -5139,8 +5196,10 @@ func styleForMarkdownTag(tag string, text string) string {
 		return helpers.ANSI(helpers.ANSIRoleType, text)
 	case tagCodeFunction:
 		return helpers.ANSI(helpers.ANSIRoleFunction, text)
-	case tagCodeProperty, tagLink:
+	case tagCodeProperty:
 		return helpers.ANSI(helpers.ANSIRoleProperty, text)
+	case tagLink:
+		return helpers.ANSI(helpers.ANSIRoleLink, text)
 	case tagCodeConstant:
 		return helpers.ANSI(helpers.ANSIBold+helpers.ANSIRoleConstant, text)
 	case tagSearch:
@@ -5289,6 +5348,7 @@ func searchHighlightSpans(text string, query string) []markdownSpan {
 
 func editorRenderSpans(text string, tabSpaces int) []markdownSpan {
 	spans := editorMarkdownSpans(text)
+	spans = append(spans, supportedLinkSpans(text)...)
 	lines := strings.Split(text, "\n")
 	offset := 0
 	inCodeBlock := false
@@ -5322,6 +5382,29 @@ func editorRenderSpans(text string, tabSpaces int) []markdownSpan {
 		spans = append(spans, treeSitterSpans(blockText, blockStartOffset, codeLanguage)...)
 	}
 	return spans
+}
+
+func supportedLinkSpans(text string) []markdownSpan {
+	links := FindSupportedLinks(text)
+	spans := make([]markdownSpan, 0, len(links))
+	for _, link := range links {
+		if markdownLinkDestinationContains(text, link.Start) {
+			continue
+		}
+		spans = append(spans, markdownSpan{Tag: tagLink, Start: link.Start, End: link.End})
+	}
+	return spans
+}
+
+func markdownLinkDestinationContains(text string, offset int) bool {
+	for _, match := range markdownExternalLinkPattern.FindAllStringSubmatchIndex(text, -1) {
+		start := utf8.RuneCountInString(text[:match[4]])
+		end := utf8.RuneCountInString(text[:match[5]])
+		if offset >= start && offset < end {
+			return true
+		}
+	}
+	return false
 }
 
 func editorMarkdownSpans(text string) []markdownSpan {

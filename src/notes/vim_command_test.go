@@ -237,6 +237,32 @@ func TestCollectSupportedLinksDedupesAndFilters(t *testing.T) {
 	}
 }
 
+func TestFindSupportedLinksReturnsMarkdownAndBareSourceSpans(t *testing.T) {
+	text := "See [docs](https://example.com/docs) and https://example.org/path)."
+	links := FindSupportedLinks(text)
+	if len(links) != 3 {
+		t.Fatalf("FindSupportedLinks() len = %d, want 3 (%#v)", len(links), links)
+	}
+	if got := string([]rune(text)[links[0].Start:links[0].End]); got != "docs" {
+		t.Fatalf("markdown label span = %q, want docs", got)
+	}
+	if links[0].URI != "https://example.com/docs" {
+		t.Fatalf("markdown URI = %q", links[0].URI)
+	}
+	if links[2].URI != "https://example.org/path" {
+		t.Fatalf("trailing punctuation URI = %q", links[2].URI)
+	}
+	if _, ok := SupportedLinkAt(text, links[0].Start); !ok {
+		t.Fatal("SupportedLinkAt() did not resolve Markdown label")
+	}
+}
+
+func TestFindSupportedLinksRejectsUnsupportedSchemes(t *testing.T) {
+	if links := FindSupportedLinks("[email](mailto:test@example.com) relative/path"); len(links) != 0 {
+		t.Fatalf("FindSupportedLinks() = %#v, want no unsupported links", links)
+	}
+}
+
 func TestFindNext(t *testing.T) {
 	if got := findNext("abc abc", "abc", 1); got != 4 {
 		t.Fatalf("findNext() = %d, want 4", got)

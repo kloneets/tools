@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
 
 	"github.com/kloneets/tools/src/googleauth"
@@ -67,6 +68,7 @@ type terminalApp struct {
 	todoEditID             string
 	todoDirty              bool
 	todoArchiveExpanded    map[string]bool
+	todoSelection          todoMouseSelection
 	status                 string
 	width                  int
 	height                 int
@@ -118,6 +120,7 @@ type terminalApp struct {
 	periodicFirebaseSync   func(context.Context) error
 	firebaseSyncDone       chan struct{}
 	openLinks              []string
+	singleLinkText         string
 	deleteNotePath         string
 	deleteNoteLabel        string
 	recorderVisible        bool
@@ -146,6 +149,14 @@ type appTab struct {
 type todoSelectableRow struct {
 	item         *todo.Item
 	archiveMonth string
+}
+
+type todoMouseSelection struct {
+	selecting  bool
+	visible    bool
+	start      int
+	end        int
+	generation atomic.Int64
 }
 
 type recordedKeyEvent struct {
@@ -624,8 +635,30 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 			return event, action
 		}
 	}
+	if a.handleTodoMouse(event, action) {
+		return nil, action
+	}
+	if action == tview.MouseLeftClick && !a.showHelp && a.view != viewNotes && a.single != nil {
+		sx, sy, sw, sh := a.single.GetInnerRect()
+		if pointInRect(x, y, sx, sy, sw, sh) {
+			wrap := a.view == viewSync
+			if uri, ok := linkAtTextPosition(a.singleLinkText, y-sy, x-sx, sw, wrap); ok {
+				a.openClickedURI(uri)
+				return nil, action
+			}
+		}
+	}
 	if a.view != viewNotes || a.notes == nil || a.showHelp {
 		return event, action
+	}
+	if action == tview.MouseLeftClick && a.preview != nil {
+		px, py, pw, ph := a.preview.GetInnerRect()
+		if pointInRect(x, y, px, py, pw, ph) {
+			if uri, ok := a.notes.PreviewLinkAtVisualPosition(y-py, x-px, pw); ok {
+				a.openClickedURI(uri)
+				return nil, action
+			}
+		}
 	}
 	if !a.notes.SidebarBrowsing && settings.Inst().NotesApp.SidebarVisible && a.sidebar != nil {
 		sx, sy, sw, sh := a.sidebar.GetInnerRect()
@@ -687,6 +720,17 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	}
 	if row < 0 {
 		row = 0
+	}
+	if event.Modifiers()&tcell.ModCtrl != 0 {
+		if uri, ok := a.notes.EditorLinkAtVisualPosition(row, col); ok {
+			switch action {
+			case tview.MouseLeftDown, tview.MouseLeftUp:
+				return nil, action
+			case tview.MouseLeftClick:
+				a.openClickedURI(uri)
+				return nil, action
+			}
+		}
 	}
 	switch action {
 	case tview.MouseLeftDown:
@@ -868,6 +912,111 @@ func pointInRect(x int, y int, rx int, ry int, width int, height int) bool {
 	return x >= rx && x < rx+width && y >= ry && y < ry+height
 }
 
+func (a *terminalApp) handleTodoMouse(event *tcell.EventMouse, action tview.MouseAction) bool {
+	if a == nil || event == nil || a.view != viewTodo || a.showHelp || a.single == nil {
+		return false
+	}
+	sx, sy, sw, sh := a.single.GetInnerRect()
+	x, y := event.Position()
+	inside := pointInRect(x, y, sx, sy, sw, sh)
+	if !inside && !a.todoSelection.selecting {
+		return false
+	}
+	offset := 0
+	if inside || a.todoSelection.selecting {
+		x = min(max(x, sx), sx+max(0, sw-1))
+		y = min(max(y, sy), sy+max(0, sh-1))
+		offset = textOffsetAtPosition(a.singleLinkText, y-sy, x-sx)
+	}
+	switch action {
+	case tview.MouseLeftDown:
+		if !inside {
+			return false
+		}
+		a.todoSelection.generation.Add(1)
+		a.todoSelection.selecting = true
+		a.todoSelection.visible = false
+		a.todoSelection.start = offset
+		a.todoSelection.end = offset
+		a.refresh()
+		return true
+	case tview.MouseMove:
+		if !a.todoSelection.selecting {
+			return false
+		}
+		a.updateTodoMouseSelection(offset)
+		a.refresh()
+		return true
+	case tview.MouseLeftUp:
+		if !a.todoSelection.selecting {
+			return false
+		}
+		a.updateTodoMouseSelection(offset)
+		a.todoSelection.selecting = false
+		if a.todoSelection.visible {
+			a.copyTodoMouseSelection()
+			a.scheduleTodoSelectionClear()
+		}
+		a.refresh()
+		return true
+	case tview.MouseLeftClick:
+		if a.todoSelection.visible {
+			a.clearTodoMouseSelection()
+			a.refresh()
+		}
+		return false
+	}
+	return false
+}
+
+func (a *terminalApp) updateTodoMouseSelection(offset int) {
+	a.todoSelection.end = offset
+	a.todoSelection.visible = a.todoSelection.start != a.todoSelection.end
+}
+
+func (a *terminalApp) copyTodoMouseSelection() {
+	selected := textInRange(a.singleLinkText, a.todoSelection.start, a.todoSelection.end)
+	if selected == "" {
+		return
+	}
+	if err := helpers.CopyToClipboard(selected); err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo selection copy failed: " + err.Error())
+		return
+	}
+	helpers.StatusBarInst().UpdateStatusBar("Todo selection copied")
+}
+
+func (a *terminalApp) scheduleTodoSelectionClear() {
+	if a.tui == nil {
+		return
+	}
+	generation := a.todoSelection.generation.Load()
+	time.AfterFunc(notes.YankHighlightDuration(), func() {
+		a.tui.QueueUpdateDraw(func() {
+			if !a.clearTodoSelectionIfGeneration(generation) {
+				return
+			}
+			a.refresh()
+		})
+	})
+}
+
+func (a *terminalApp) clearTodoSelectionIfGeneration(generation int64) bool {
+	if a.todoSelection.generation.Load() != generation {
+		return false
+	}
+	a.todoSelection.visible = false
+	return true
+}
+
+func (a *terminalApp) clearTodoMouseSelection() {
+	a.todoSelection.generation.Add(1)
+	a.todoSelection.selecting = false
+	a.todoSelection.visible = false
+	a.todoSelection.start = 0
+	a.todoSelection.end = 0
+}
+
 func (a *terminalApp) visibleAppTabs() []appTab {
 	byID := make(map[string]appTab, len(baseAppTabs))
 	for _, tab := range baseAppTabs {
@@ -911,6 +1060,9 @@ func (a *terminalApp) switchAppTab(target view) {
 
 func (a *terminalApp) switchAppTabWithMode(target view, closeTabSelect bool) {
 	changed := a.view != target
+	if changed && a.view == viewTodo {
+		a.clearTodoMouseSelection()
+	}
 	a.view = target
 	if closeTabSelect {
 		a.tabSelect = false
@@ -2608,7 +2760,12 @@ func (a *terminalApp) refreshSingle(title string, text string) {
 	a.single.SetTitle(title)
 	a.single.SetWrap(title == "Sync")
 	a.single.SetWordWrap(title == "Sync")
-	a.single.SetText(joinTViewLines(strings.Split(text, "\n")))
+	a.singleLinkText = helpers.StripANSI(text)
+	styled := styleSupportedLinks(text)
+	if a.view == viewTodo && a.todoSelection.visible {
+		styled = styleTextRange(styled, a.todoSelection.start, a.todoSelection.end, helpers.ANSIRoleSelection)
+	}
+	a.single.SetText(joinTViewLines(strings.Split(styled, "\n")))
 	a.body.AddItem(a.single, 0, 1, false)
 }
 
@@ -2616,8 +2773,185 @@ func (a *terminalApp) refreshSingleMarkup(title string, text string) {
 	a.single.SetTitle(title)
 	a.single.SetWrap(title == "Sync")
 	a.single.SetWordWrap(title == "Sync")
+	a.singleLinkText = helpers.StripANSI(text)
 	a.single.SetText(text)
 	a.body.AddItem(a.single, 0, 1, false)
+}
+
+func styleSupportedLinks(text string) string {
+	plain := helpers.StripANSI(text)
+	links := notes.FindSupportedLinks(plain)
+	if len(links) == 0 {
+		return text
+	}
+	starts := make(map[int]struct{}, len(links))
+	ends := make(map[int]struct{}, len(links))
+	for _, link := range links {
+		starts[link.Start] = struct{}{}
+		ends[link.End] = struct{}{}
+	}
+	var out strings.Builder
+	visible := 0
+	for index := 0; index < len(text); {
+		if _, ok := ends[visible]; ok {
+			out.WriteString("\x1b[0m")
+		}
+		if _, ok := starts[visible]; ok {
+			out.WriteString(helpers.ANSIRoleLink)
+		}
+		if text[index] == '\x1b' {
+			end := strings.IndexByte(text[index:], 'm')
+			if end < 0 {
+				out.WriteString(text[index:])
+				break
+			}
+			end += index + 1
+			out.WriteString(text[index:end])
+			index = end
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(text[index:])
+		out.WriteString(text[index : index+size])
+		index += size
+		visible++
+	}
+	if _, ok := ends[visible]; ok {
+		out.WriteString("\x1b[0m")
+	}
+	return out.String()
+}
+
+func styleTextRange(text string, start int, end int, style string) string {
+	plainLength := len([]rune(helpers.StripANSI(text)))
+	start, end = normalizedTextRange(start, end, plainLength)
+	if start == end || style == "" {
+		return text
+	}
+	var out strings.Builder
+	visible := 0
+	selected := false
+	for index := 0; index < len(text); {
+		if text[index] == '\x1b' {
+			sequenceEnd := strings.IndexByte(text[index:], 'm')
+			if sequenceEnd < 0 {
+				if !selected {
+					out.WriteString(text[index:])
+				}
+				break
+			}
+			sequenceEnd += index + 1
+			if !selected {
+				out.WriteString(text[index:sequenceEnd])
+			}
+			index = sequenceEnd
+			continue
+		}
+		if visible == start {
+			out.WriteString(style)
+			selected = true
+		}
+		_, size := utf8.DecodeRuneInString(text[index:])
+		out.WriteString(text[index : index+size])
+		index += size
+		visible++
+		if visible == end {
+			out.WriteString("\x1b[0m")
+			selected = false
+		}
+	}
+	return out.String()
+}
+
+func normalizedTextRange(start int, end int, textLength int) (int, int) {
+	start = min(max(start, 0), textLength)
+	end = min(max(end, 0), textLength)
+	if start > end {
+		start, end = end, start
+	}
+	return start, end
+}
+
+func textInRange(text string, start int, end int) string {
+	runes := []rune(text)
+	start, end = normalizedTextRange(start, end, len(runes))
+	return string(runes[start:end])
+}
+
+func textOffsetAtPosition(text string, row int, col int) int {
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return 0
+	}
+	row = min(max(row, 0), len(lines)-1)
+	offset := 0
+	for index := 0; index < row; index++ {
+		offset += len([]rune(lines[index])) + 1
+	}
+	return offset + runeOffsetAtCell([]rune(lines[row]), max(col, 0))
+}
+
+func linkAtTextPosition(text string, row int, col int, width int, wrap bool) (string, bool) {
+	if text == "" || row < 0 || col < 0 || width <= 0 {
+		return "", false
+	}
+	lines := strings.Split(text, "\n")
+	if wrap {
+		lines = tview.WordWrap(text, width)
+	}
+	if row >= len(lines) {
+		return "", false
+	}
+	target := []rune(lines[row])
+	all := []rune(text)
+	searchFrom := 0
+	for current, line := range lines {
+		lineRunes := []rune(line)
+		start := runeSliceIndex(all, lineRunes, searchFrom)
+		if start < 0 {
+			return "", false
+		}
+		if current == row {
+			offset := start + runeOffsetAtCell(target, col)
+			return notes.SupportedLinkAt(text, offset)
+		}
+		searchFrom = start + len(lineRunes)
+		if searchFrom < len(all) && all[searchFrom] == '\n' {
+			searchFrom++
+		}
+	}
+	return "", false
+}
+
+func runeSliceIndex(text []rune, target []rune, start int) int {
+	if len(target) == 0 {
+		return min(start, len(text))
+	}
+	for index := max(0, start); index+len(target) <= len(text); index++ {
+		if string(text[index:index+len(target)]) == string(target) {
+			return index
+		}
+	}
+	return -1
+}
+
+func runeOffsetAtCell(text []rune, cell int) int {
+	width := 0
+	for index, r := range text {
+		runeWidth := runewidth.RuneWidth(r)
+		if runeWidth < 1 {
+			runeWidth = 1
+		}
+		if width+runeWidth > cell {
+			return index
+		}
+		width += runeWidth
+	}
+	return len(text)
+}
+
+func (a *terminalApp) openClickedURI(uri string) {
+	helpers.OpenURI(uri)
+	helpers.StatusBarInst().UpdateStatusBar("Opened link")
 }
 
 func (a *terminalApp) renderRecorder(height int) string {
@@ -2881,7 +3215,7 @@ func ansiToTView(s string) string {
 		helpers.ANSIRoleHeading5, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading5]),
 		helpers.ANSIRoleHeading6, themeMarkupFG(theme.Syntax[helpers.ANSIRoleHeading6]),
 		helpers.ANSIRoleListMarker, themeMarkupFGStyle(theme.Syntax[helpers.ANSIRoleListMarker], "b"),
-		helpers.ANSIRoleLink, themeMarkupFG(theme.Syntax[helpers.ANSIRoleLink]),
+		helpers.ANSIRoleLink, themeMarkupFGStyle(theme.Syntax[helpers.ANSIRoleLink], "u"),
 		helpers.ANSIRoleCode, themeMarkupFG(theme.Syntax[helpers.ANSIRoleCode]),
 		helpers.ANSIRoleString, themeMarkupFG(theme.Syntax[helpers.ANSIRoleString]),
 		helpers.ANSIRoleKeyword, themeMarkupFG(theme.Syntax[helpers.ANSIRoleKeyword]),
