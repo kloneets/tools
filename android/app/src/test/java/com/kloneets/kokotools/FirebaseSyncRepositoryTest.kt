@@ -1,6 +1,7 @@
 package com.kloneets.kokotools
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.json.JSONObject
@@ -10,6 +11,23 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 class FirebaseSyncRepositoryTest {
+    @Test
+    fun backendConfiguredRejectsInvalidDatabaseUrls() {
+        val base = FirebaseSettings(
+            enabled = true,
+            realtime = true,
+            apiKey = "key",
+            databaseUrl = "https://example.firebaseio.com",
+            workspaceId = "workspace",
+        )
+
+        listOf("", "   ", "example.firebaseio.com", "http://example.firebaseio.com", "https://").forEach { invalid ->
+            assertFalse(FirebaseSyncRepository.backendConfigReady(base.copy(databaseUrl = invalid)))
+        }
+
+        assertTrue(FirebaseSyncRepository.backendConfigReady(base))
+    }
+
     @Test
     fun googleSignInPostBodyUsesGoogleProviderAndIdToken() {
         val postBody = FirebaseSyncRepository.googleSignInPostBody("token with spaces")
@@ -60,6 +78,99 @@ class FirebaseSyncRepositoryTest {
         assertEquals("note body", note.text)
         assertEquals(7L, note.rev)
         assertTrue(note.deleted)
+    }
+
+    @Test
+    fun todoSyncFeatureKeysKeepDefaultLegacyNamesAndScopeNamedLists() {
+        assertEquals("todos", FirebaseSyncRepository.todoFeature("default"))
+        assertEquals("todo_archive_months", FirebaseSyncRepository.todoArchiveMonthsFeature(""))
+        assertEquals("todo_archive_month:2026-05", FirebaseSyncRepository.todoArchiveMonthFeature("default", "2026-05"))
+
+        assertEquals("todo_list:work:todos", FirebaseSyncRepository.todoFeature("Work"))
+        assertEquals("todo_list:work:todo_archive_months", FirebaseSyncRepository.todoArchiveMonthsFeature("Work"))
+        assertEquals("todo_list:work:todo_archive_month:2026-05", FirebaseSyncRepository.todoArchiveMonthFeature("Work", "2026-05"))
+    }
+
+    @Test
+    fun todoDatabasePathsKeepDefaultLegacyBranchAndScopeNamedLists() {
+        assertEquals("workspaces/ws/todos/t1", FirebaseSyncRepository.todoRecordPath("ws", "default", "t1"))
+        assertEquals("workspaces/ws/todo_archive_months", FirebaseSyncRepository.todoArchiveMonthsPath("ws", "default"))
+        assertEquals("workspaces/ws/todo_archives/2026-05", FirebaseSyncRepository.todoArchiveMonthPath("ws", "default", "2026-05"))
+
+        assertEquals("workspaces/ws/todo_lists/work/todos/t1", FirebaseSyncRepository.todoRecordPath("ws", "work", "t1"))
+        assertEquals("workspaces/ws/todo_lists/work/archive_months", FirebaseSyncRepository.todoArchiveMonthsPath("ws", "work"))
+        assertEquals("workspaces/ws/todo_lists/work/archives/2026-05", FirebaseSyncRepository.todoArchiveMonthPath("ws", "work", "2026-05"))
+        assertEquals("workspaces/ws/todo_lists/work/meta", FirebaseSyncRepository.todoListMetaPath("ws", "work"))
+    }
+
+    @Test
+    fun todoListMetadataWriteAllowsOnlyMonotonicOrDeleteTieUpdates() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val remote = todoListMeta("work", "Work", now, rev = 10L)
+        val deletedRemote = remote.copy(deleted = true, deletedAt = now)
+
+        assertTrue(FirebaseSyncRepository.shouldWriteTodoListMeta(remote.copy(rev = 11L), remote))
+        assertFalse(FirebaseSyncRepository.shouldWriteTodoListMeta(remote.copy(rev = 9L), remote))
+        assertFalse(FirebaseSyncRepository.shouldWriteTodoListMeta(remote.copy(name = "Renamed"), remote))
+        assertTrue(FirebaseSyncRepository.shouldWriteTodoListMeta(remote, remote))
+        assertTrue(
+            FirebaseSyncRepository.shouldWriteTodoListMeta(
+                remote.copy(deleted = true, deletedAt = now, updatedAt = now.minusMinutes(1)),
+                remote,
+            ),
+        )
+        assertFalse(FirebaseSyncRepository.shouldWriteTodoListMeta(remote, deletedRemote))
+    }
+
+    @Test
+    fun todoMergePreservesDefaultLocalOnlyItemsWhenRemoteIsEmpty() {
+        val now = OffsetDateTime.of(2026, 9, 5, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoStore(items = listOf(todoItem("default-local", now)))
+
+        val got = FirebaseSyncRepository.mergeTodoRecords(local, emptyList(), replaceLocal = false)
+
+        assertEquals(listOf("default-local"), got.items.map { it.id })
+    }
+
+    @Test
+    fun todoMergePreservesNamedListLocalOnlyItemsWhenRemoteIsEmpty() {
+        val now = OffsetDateTime.of(2026, 9, 5, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoStore(items = listOf(todoItem("named-local", now)))
+
+        val got = FirebaseSyncRepository.mergeTodoRecords(local, emptyList(), replaceLocal = false)
+
+        assertEquals(listOf("named-local"), got.items.map { it.id })
+    }
+
+    @Test
+    fun todoMergeExplicitReplaceDropsLocalOnlyItems() {
+        val now = OffsetDateTime.of(2026, 9, 5, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoStore(
+            items = listOf(todoItem("local-only", now)),
+            archiveMonths = listOf("2026-09"),
+        )
+
+        val got = FirebaseSyncRepository.mergeTodoRecords(local, emptyList(), replaceLocal = true)
+
+        assertEquals(emptyList<String>(), got.items.map { it.id })
+        assertEquals(emptyList<String>(), got.archiveMonths)
+    }
+
+    @Test
+    fun todoMergeExplicitReplaceKeepsRemoteItems() {
+        val now = OffsetDateTime.of(2026, 9, 5, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoStore(items = listOf(todoItem("local-only", now)))
+        val remote = listOf(
+            FirebaseRemoteTodo(
+                item = todoItem("remote", now.plusMinutes(1)),
+                rev = now.plusMinutes(1).toInstant().toEpochMilli(),
+                deleted = false,
+            ),
+        )
+
+        val got = FirebaseSyncRepository.mergeTodoRecords(local, remote, replaceLocal = true)
+
+        assertEquals(listOf("remote"), got.items.map { it.id })
     }
 
     @Test
@@ -274,5 +385,31 @@ class FirebaseSyncRepositoryTest {
 
     private fun readResource(name: String): String {
         return requireNotNull(javaClass.classLoader?.getResource(name)) { "missing resource $name" }.readText()
+    }
+
+    private fun todoListMeta(
+        id: String,
+        name: String,
+        now: OffsetDateTime,
+        rev: Long,
+    ): TodoListMeta {
+        return TodoListMeta(
+            id = id,
+            name = name,
+            rev = rev,
+            createdAt = now,
+            updatedAt = now,
+        )
+    }
+
+    private fun todoItem(id: String, now: OffsetDateTime): TodoItem {
+        return TodoItem(
+            id = id,
+            text = id,
+            status = TodoRepository.STATUS_TODO,
+            order = 0,
+            createdAt = now,
+            updatedAt = now,
+        )
     }
 }

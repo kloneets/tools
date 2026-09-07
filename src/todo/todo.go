@@ -1,6 +1,7 @@
 package todo
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,11 @@ import (
 
 const (
 	SchemaVersion    = 1
+	DefaultListID    = "default"
+	DefaultListName  = "Default"
+	defaultListRev   = 1
+	ListsFile        = "todo_lists.json"
+	NamedListsDir    = "todo-lists"
 	StatusTodo       = "todo"
 	StatusDone       = "done"
 	StatusArchived   = "archived"
@@ -28,6 +34,22 @@ type Store struct {
 	Version       int      `json:"version"`
 	Items         []Item   `json:"items"`
 	ArchiveMonths []string `json:"archive_months,omitempty"`
+}
+
+type ListMeta struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Rev       int64      `json:"rev"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	Deleted   bool       `json:"deleted,omitempty"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+}
+
+type ListsStore struct {
+	Version       int        `json:"version"`
+	CurrentListID string     `json:"current_list_id"`
+	Lists         []ListMeta `json:"lists"`
 }
 
 type Item struct {
@@ -44,8 +66,11 @@ type Item struct {
 }
 
 type Repository struct {
-	path string
-	now  func() time.Time
+	path          string
+	baseDir       string
+	currentListID string
+	now           func() time.Time
+	newID         func() (string, error)
 }
 
 func NewRepository() *Repository {
@@ -53,7 +78,13 @@ func NewRepository() *Repository {
 }
 
 func NewRepositoryAt(path string) *Repository {
-	return &Repository{path: path, now: time.Now}
+	return &Repository{
+		path:          path,
+		baseDir:       filepath.Dir(path),
+		currentListID: DefaultListID,
+		now:           time.Now,
+		newID:         randomListID,
+	}
 }
 
 func DefaultPath() string {
@@ -68,28 +99,274 @@ func (r *Repository) SetNowForTests(now func() time.Time) {
 	r.now = now
 }
 
+func (r *Repository) SetListIDGeneratorForTests(newID func() (string, error)) {
+	if r == nil {
+		return
+	}
+	r.newID = newID
+}
+
 func (r *Repository) Path() string {
 	if r == nil {
 		return ""
 	}
-	return r.path
+	return r.storePath(r.currentListID)
 }
 
-func (r *Repository) Load() (Store, error) {
-	store, err := readStore(r.path)
+func (r *Repository) CurrentListID() string {
+	if r == nil {
+		return DefaultListID
+	}
+	id := NormalizeListID(r.currentListID)
+	if id == "" {
+		return DefaultListID
+	}
+	return id
+}
+
+func (r *Repository) ListsPath() string {
+	if r == nil {
+		return ""
+	}
+	return filepath.Join(r.baseDir, ListsFile)
+}
+
+func (r *Repository) LoadLists() (ListsStore, error) {
+	catalog, err := readListsStore(r.ListsPath(), r.currentTime())
+	if err != nil {
+		return ListsStore{}, err
+	}
+	current := r.CurrentListID()
+	if !hasActiveList(catalog, current) {
+		current = DefaultListID
+	}
+	r.currentListID = current
+	catalog.CurrentListID = current
+	return catalog, nil
+}
+
+func (r *Repository) SaveLists(catalog ListsStore) error {
+	NormalizeLists(&catalog, r.currentTime())
+	current := r.CurrentListID()
+	if !hasActiveList(catalog, current) {
+		current = DefaultListID
+	}
+	catalog.CurrentListID = current
+	data, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal todo lists: %w", err)
+	}
+	if err := os.MkdirAll(r.baseDir, 0o755); err != nil {
+		return fmt.Errorf("create todo directory: %w", err)
+	}
+	if err := os.WriteFile(r.ListsPath(), append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write todo lists: %w", err)
+	}
+	r.currentListID = current
+	return nil
+}
+
+func (r *Repository) SelectList(id string) (ListsStore, error) {
+	id = NormalizeListID(id)
+	catalog, err := r.LoadLists()
+	if err != nil {
+		return ListsStore{}, err
+	}
+	if !hasActiveList(catalog, id) {
+		return catalog, fmt.Errorf("todo list %q does not exist", id)
+	}
+	catalog.CurrentListID = id
+	r.currentListID = id
+	return catalog, nil
+}
+
+func (r *Repository) CycleList(delta int) (ListsStore, error) {
+	catalog, err := r.LoadLists()
+	if err != nil {
+		return ListsStore{}, err
+	}
+	active := ActiveLists(catalog)
+	if len(active) == 0 || delta == 0 {
+		return catalog, nil
+	}
+	index := 0
+	for i, list := range active {
+		if list.ID == catalog.CurrentListID {
+			index = i
+			break
+		}
+	}
+	next := (index + delta) % len(active)
+	if next < 0 {
+		next += len(active)
+	}
+	catalog.CurrentListID = active[next].ID
+	r.currentListID = catalog.CurrentListID
+	return catalog, nil
+}
+
+func (r *Repository) CreateList(name string) (ListsStore, ListMeta, error) {
+	name = NormalizeListName(name)
+	if name == "" {
+		return ListsStore{}, ListMeta{}, errors.New("todo list name is required")
+	}
+	catalog, err := r.LoadLists()
+	if err != nil {
+		return ListsStore{}, ListMeta{}, err
+	}
+	if listNameTaken(catalog, name, "") {
+		return catalog, ListMeta{}, fmt.Errorf("todo list %q already exists", name)
+	}
+	id, err := r.generateListID(catalog)
+	if err != nil {
+		return catalog, ListMeta{}, err
+	}
+	now := r.currentTime()
+	list := ListMeta{ID: id, Name: name, Rev: revForTime(now), CreatedAt: now, UpdatedAt: now}
+	catalog.Lists = append(catalog.Lists, list)
+	catalog.CurrentListID = id
+	r.currentListID = id
+	if err := r.SaveLists(catalog); err != nil {
+		return ListsStore{}, ListMeta{}, err
+	}
+	if err := r.SaveList(id, Store{}); err != nil {
+		return ListsStore{}, ListMeta{}, err
+	}
+	catalog, _ = r.LoadLists()
+	if saved, ok := ListByID(catalog, id); ok {
+		list = saved
+	}
+	return catalog, list, nil
+}
+
+func (r *Repository) RenameList(id string, name string) (ListsStore, error) {
+	id = NormalizeListID(id)
+	name = NormalizeListName(name)
+	if name == "" {
+		return ListsStore{}, errors.New("todo list name is required")
+	}
+	catalog, err := r.LoadLists()
+	if err != nil {
+		return ListsStore{}, err
+	}
+	if listNameTaken(catalog, name, id) {
+		return catalog, fmt.Errorf("todo list %q already exists", name)
+	}
+	now := r.currentTime()
+	found := false
+	for i := range catalog.Lists {
+		if catalog.Lists[i].ID != id || catalog.Lists[i].Deleted {
+			continue
+		}
+		catalog.Lists[i].Name = name
+		catalog.Lists[i].Rev = revForTime(now)
+		catalog.Lists[i].UpdatedAt = now
+		found = true
+		break
+	}
+	if !found {
+		return catalog, fmt.Errorf("todo list %q does not exist", id)
+	}
+	if err := r.SaveLists(catalog); err != nil {
+		return ListsStore{}, err
+	}
+	return r.LoadLists()
+}
+
+func (r *Repository) DeleteCurrentListIfEmpty() (ListsStore, error) {
+	return r.DeleteCurrentList()
+}
+
+func (r *Repository) DeleteCurrentList() (ListsStore, error) {
+	return r.DeleteList(r.CurrentListID())
+}
+
+func (r *Repository) DeleteList(id string) (ListsStore, error) {
+	id = NormalizeListID(id)
+	if id == DefaultListID {
+		catalog, err := r.LoadLists()
+		if err != nil {
+			return ListsStore{}, err
+		}
+		return catalog, errors.New("Default todo list cannot be deleted")
+	}
+	catalog, err := r.LoadLists()
+	if err != nil {
+		return ListsStore{}, err
+	}
+	now := r.currentTime()
+	found := false
+	for i := range catalog.Lists {
+		if catalog.Lists[i].ID != id {
+			continue
+		}
+		catalog.Lists[i].Deleted = true
+		catalog.Lists[i].DeletedAt = &now
+		catalog.Lists[i].UpdatedAt = now
+		catalog.Lists[i].Rev = revForTime(now)
+		found = true
+		break
+	}
+	if !found {
+		return catalog, fmt.Errorf("todo list %q does not exist", id)
+	}
+	if r.CurrentListID() == id {
+		catalog.CurrentListID = DefaultListID
+		r.currentListID = DefaultListID
+	}
+	if err := r.SaveLists(catalog); err != nil {
+		return ListsStore{}, err
+	}
+	if err := os.Remove(r.storePath(id)); err != nil && !os.IsNotExist(err) {
+		return catalog, fmt.Errorf("delete todo list data: %w", err)
+	}
+	catalog, _ = r.LoadLists()
+	return catalog, nil
+}
+
+func (r *Repository) RemoveDeletedListData(catalog ListsStore) error {
+	if r == nil {
+		return nil
+	}
+	for _, list := range catalog.Lists {
+		if !list.Deleted || list.ID == DefaultListID {
+			continue
+		}
+		if err := os.Remove(r.storePath(list.ID)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("delete todo list data: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *Repository) CurrentList() (ListMeta, error) {
+	catalog, err := r.LoadLists()
+	if err != nil {
+		return ListMeta{}, err
+	}
+	for _, list := range catalog.Lists {
+		if list.ID == catalog.CurrentListID && !list.Deleted {
+			return list, nil
+		}
+	}
+	return defaultListMeta(), nil
+}
+
+func (r *Repository) LoadList(id string) (Store, error) {
+	store, err := readStore(r.storePath(id))
 	if err != nil {
 		return Store{}, err
 	}
 	changed := Cleanup(&store, r.currentTime())
 	if changed {
-		if err := r.Save(store); err != nil {
+		if err := r.SaveList(id, store); err != nil {
 			return Store{}, err
 		}
 	}
 	return store, nil
 }
 
-func (r *Repository) Save(store Store) error {
+func (r *Repository) SaveList(id string, store Store) error {
 	store.Version = SchemaVersion
 	Normalize(&store)
 	Cleanup(&store, r.currentTime())
@@ -97,13 +374,22 @@ func (r *Repository) Save(store Store) error {
 	if err != nil {
 		return fmt.Errorf("marshal todos: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
+	path := r.storePath(id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create todo directory: %w", err)
 	}
-	if err := os.WriteFile(r.path, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write todos: %w", err)
 	}
 	return nil
+}
+
+func (r *Repository) Load() (Store, error) {
+	return r.LoadList(r.currentListID)
+}
+
+func (r *Repository) Save(store Store) error {
+	return r.SaveList(r.currentListID, store)
 }
 
 func (r *Repository) Add(text string) (Store, Item, error) {
@@ -223,6 +509,29 @@ func readStore(path string) (Store, error) {
 	return store, nil
 }
 
+func readListsStore(path string, now time.Time) (ListsStore, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			catalog := ListsStore{Version: SchemaVersion, CurrentListID: DefaultListID}
+			NormalizeLists(&catalog, now)
+			return catalog, nil
+		}
+		return ListsStore{}, fmt.Errorf("read todo lists: %w", err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		catalog := ListsStore{Version: SchemaVersion, CurrentListID: DefaultListID}
+		NormalizeLists(&catalog, now)
+		return catalog, nil
+	}
+	var catalog ListsStore
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return ListsStore{}, fmt.Errorf("decode todo lists: %w", err)
+	}
+	NormalizeLists(&catalog, now)
+	return catalog, nil
+}
+
 func Normalize(store *Store) {
 	if store == nil {
 		return
@@ -241,6 +550,201 @@ func Normalize(store *Store) {
 		}
 	}
 	store.ArchiveMonths = normalizeArchiveMonths(append(store.ArchiveMonths, archiveMonthsFromItems(store.Items)...))
+}
+
+func NormalizeLists(catalog *ListsStore, now time.Time) {
+	if catalog == nil {
+		return
+	}
+	catalog.Version = SchemaVersion
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	byID := make(map[string]ListMeta, len(catalog.Lists)+1)
+	for _, list := range catalog.Lists {
+		id := NormalizeListID(list.ID)
+		if id == "" {
+			continue
+		}
+		name := NormalizeListName(list.Name)
+		if name == "" {
+			if id == DefaultListID {
+				name = DefaultListName
+			} else {
+				name = id
+			}
+		}
+		if id == DefaultListID {
+			baseline := implicitDefaultListMeta()
+			if list.CreatedAt.IsZero() {
+				list.CreatedAt = baseline.CreatedAt
+			}
+			if list.UpdatedAt.IsZero() {
+				list.UpdatedAt = baseline.UpdatedAt
+			}
+			if list.Rev <= 0 {
+				list.Rev = baseline.Rev
+			}
+		} else {
+			if list.CreatedAt.IsZero() {
+				list.CreatedAt = now
+			}
+			if list.UpdatedAt.IsZero() {
+				list.UpdatedAt = list.CreatedAt
+			}
+			if list.Rev <= 0 {
+				list.Rev = revForTime(list.UpdatedAt)
+			}
+		}
+		if list.DeletedAt != nil {
+			deletedAt := list.DeletedAt.UTC()
+			list.DeletedAt = &deletedAt
+		}
+		list.ID = id
+		list.Name = name
+		list.CreatedAt = list.CreatedAt.UTC()
+		list.UpdatedAt = list.UpdatedAt.UTC()
+		if existing, ok := byID[id]; ok && listMetaWins(existing, list) {
+			continue
+		}
+		byID[id] = list
+	}
+	defaultMeta, ok := byID[DefaultListID]
+	if !ok {
+		defaultMeta = implicitDefaultListMeta()
+	}
+	baseline := implicitDefaultListMeta()
+	defaultMeta.ID = DefaultListID
+	defaultMeta.Deleted = false
+	defaultMeta.DeletedAt = nil
+	if NormalizeListName(defaultMeta.Name) == "" {
+		defaultMeta.Name = DefaultListName
+	}
+	if defaultMeta.CreatedAt.IsZero() {
+		defaultMeta.CreatedAt = baseline.CreatedAt
+	}
+	if defaultMeta.UpdatedAt.IsZero() {
+		defaultMeta.UpdatedAt = baseline.UpdatedAt
+	}
+	if defaultMeta.Rev <= 0 {
+		defaultMeta.Rev = baseline.Rev
+	}
+	byID[DefaultListID] = defaultMeta
+
+	active := make([]ListMeta, 0, len(byID))
+	tombstones := make([]ListMeta, 0)
+	for _, list := range byID {
+		if list.ID == DefaultListID {
+			continue
+		}
+		if list.Deleted {
+			tombstones = append(tombstones, list)
+			continue
+		}
+		active = append(active, list)
+	}
+	sort.SliceStable(active, func(i, j int) bool {
+		left := strings.ToLower(active[i].Name)
+		right := strings.ToLower(active[j].Name)
+		if left != right {
+			return left < right
+		}
+		if active[i].Name != active[j].Name {
+			return active[i].Name < active[j].Name
+		}
+		return active[i].ID < active[j].ID
+	})
+	sort.SliceStable(tombstones, func(i, j int) bool {
+		if tombstones[i].UpdatedAt.Equal(tombstones[j].UpdatedAt) {
+			return tombstones[i].ID < tombstones[j].ID
+		}
+		return tombstones[i].UpdatedAt.After(tombstones[j].UpdatedAt)
+	})
+	lists := make([]ListMeta, 0, 1+len(active)+len(tombstones))
+	lists = append(lists, byID[DefaultListID])
+	lists = append(lists, active...)
+	lists = append(lists, tombstones...)
+	current := NormalizeListID(catalog.CurrentListID)
+	if current == "" || !hasActiveList(ListsStore{Lists: lists}, current) {
+		current = DefaultListID
+	}
+	catalog.CurrentListID = current
+	catalog.Lists = lists
+}
+
+func NormalizeListName(name string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(name)), " ")
+}
+
+func NormalizeListID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	id = strings.ReplaceAll(id, "_", "-")
+	var b strings.Builder
+	prevDash := false
+	for _, r := range id {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if valid {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func SlugForListName(name string) string {
+	id := NormalizeListID(name)
+	if id == "" {
+		return "list"
+	}
+	return id
+}
+
+func ActiveLists(catalog ListsStore) []ListMeta {
+	NormalizeLists(&catalog, time.Time{})
+	out := make([]ListMeta, 0, len(catalog.Lists))
+	for _, list := range catalog.Lists {
+		if !list.Deleted {
+			out = append(out, list)
+		}
+	}
+	return out
+}
+
+func ListByID(catalog ListsStore, id string) (ListMeta, bool) {
+	id = NormalizeListID(id)
+	for _, list := range catalog.Lists {
+		if list.ID == id {
+			return list, true
+		}
+	}
+	return ListMeta{}, false
+}
+
+func MergeLists(local ListsStore, remote ListsStore, now time.Time) ListsStore {
+	NormalizeLists(&local, now)
+	NormalizeLists(&remote, now)
+	byID := make(map[string]ListMeta, len(local.Lists)+len(remote.Lists))
+	for _, list := range local.Lists {
+		byID[list.ID] = list
+	}
+	for _, list := range remote.Lists {
+		if existing, ok := byID[list.ID]; ok && listMetaWins(existing, list) {
+			continue
+		}
+		byID[list.ID] = list
+	}
+	merged := ListsStore{Version: SchemaVersion, CurrentListID: local.CurrentListID, Lists: make([]ListMeta, 0, len(byID))}
+	for _, list := range byID {
+		merged.Lists = append(merged.Lists, list)
+	}
+	NormalizeLists(&merged, now)
+	return merged
 }
 
 func Cleanup(store *Store, now time.Time) bool {
@@ -542,6 +1046,133 @@ func normalizeTerm(term string) string {
 	default:
 		return TermShort
 	}
+}
+
+func (r *Repository) storePath(id string) string {
+	if r == nil {
+		return ""
+	}
+	id = NormalizeListID(id)
+	if id == "" || id == DefaultListID {
+		return r.path
+	}
+	return filepath.Join(r.baseDir, NamedListsDir, id+".json")
+}
+
+func defaultListMeta() ListMeta {
+	return implicitDefaultListMeta()
+}
+
+func implicitDefaultListMeta() ListMeta {
+	createdAt := defaultListBaselineTime()
+	return ListMeta{
+		ID:        DefaultListID,
+		Name:      DefaultListName,
+		Rev:       defaultListRev,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+}
+
+func defaultListBaselineTime() time.Time {
+	return time.UnixMilli(defaultListRev).UTC()
+}
+
+func hasList(catalog ListsStore, id string) bool {
+	id = NormalizeListID(id)
+	for _, list := range catalog.Lists {
+		if list.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasActiveList(catalog ListsStore, id string) bool {
+	id = NormalizeListID(id)
+	for _, list := range catalog.Lists {
+		if list.ID == id && !list.Deleted {
+			return true
+		}
+	}
+	return false
+}
+
+func listNameTaken(catalog ListsStore, name string, exceptID string) bool {
+	name = strings.ToLower(NormalizeListName(name))
+	exceptID = NormalizeListID(exceptID)
+	for _, list := range catalog.Lists {
+		if list.Deleted || list.ID == exceptID {
+			continue
+		}
+		if strings.ToLower(NormalizeListName(list.Name)) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func listMetaWins(current ListMeta, candidate ListMeta) bool {
+	currentRev := listMetaRevision(current)
+	candidateRev := listMetaRevision(candidate)
+	if currentRev != candidateRev {
+		return currentRev > candidateRev
+	}
+	if current.Deleted != candidate.Deleted {
+		return current.Deleted
+	}
+	if !current.UpdatedAt.Equal(candidate.UpdatedAt) {
+		return current.UpdatedAt.After(candidate.UpdatedAt)
+	}
+	return current.ID <= candidate.ID
+}
+
+func listMetaRevision(meta ListMeta) int64 {
+	if meta.Rev > 0 {
+		return meta.Rev
+	}
+	return revForTime(meta.UpdatedAt)
+}
+
+func revForTime(t time.Time) int64 {
+	if t.IsZero() {
+		t = time.Now().UTC()
+	}
+	return t.UTC().UnixMilli()
+}
+
+func (r *Repository) generateListID(catalog ListsStore) (string, error) {
+	generate := randomListID
+	if r != nil && r.newID != nil {
+		generate = r.newID
+	}
+	for i := 0; i < 32; i++ {
+		id, err := generate()
+		if err != nil {
+			return "", err
+		}
+		id = NormalizeListID(id)
+		if id != "" && id != DefaultListID && !hasList(catalog, id) {
+			return id, nil
+		}
+	}
+	return "", errors.New("could not allocate unique todo list id")
+}
+
+func randomListID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate todo list id: %w", err)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4],
+		b[4:6],
+		b[6:8],
+		b[8:10],
+		b[10:16],
+	), nil
 }
 
 func filterItems(items []Item, keep func(Item) bool) []Item {

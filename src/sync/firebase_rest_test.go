@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -332,6 +333,134 @@ func TestPushMutationETagConflictBlocksStaleNoteOverwrite(t *testing.T) {
 	}
 	if historyWrites != 1 {
 		t.Fatalf("history writes = %d, want recovery point before guarded overwrite", historyWrites)
+	}
+}
+
+func TestPushTodoListMetaUsesConditionalWrite(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path != "/workspaces/ws/todo_lists/work/meta.json" {
+				t.Fatalf("GET path = %s", r.URL.Path)
+			}
+			if r.Header.Get("X-Firebase-ETag") != "true" {
+				t.Fatalf("X-Firebase-ETag = %q, want true", r.Header.Get("X-Firebase-ETag"))
+			}
+			w.Header().Set("ETag", `"meta-etag-1"`)
+			_, _ = w.Write([]byte(`null`))
+		case http.MethodPut:
+			if r.URL.Path != "/workspaces/ws/todo_lists/work/meta.json" {
+				t.Fatalf("PUT path = %s", r.URL.Path)
+			}
+			if got := r.Header.Get("If-Match"); got != `"meta-etag-1"` {
+				t.Fatalf("If-Match = %q, want meta etag", got)
+			}
+			var got todo.ListMeta
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ID != "work" || got.Name != "Work" || got.Rev != 10 {
+				t.Fatalf("pushed meta = %#v, want Work rev 10", got)
+			}
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewFirebaseRESTProvider("api-key", server.URL)
+	err := provider.PushTodoListMeta(context.Background(), "ws", todo.ListMeta{
+		ID:        "work",
+		Name:      "Work",
+		Rev:       10,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("PushTodoListMeta() error = %v", err)
+	}
+	wantRequests := []string{
+		"GET /workspaces/ws/todo_lists/work/meta.json",
+		"PUT /workspaces/ws/todo_lists/work/meta.json",
+	}
+	if strings.Join(requests, "\n") != strings.Join(wantRequests, "\n") {
+		t.Fatalf("requests = %#v, want %#v", requests, wantRequests)
+	}
+}
+
+func TestPushTodoListMetaReturnsStaleWithoutOverwritingNewerRemote(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	var putCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("ETag", `"meta-etag-2"`)
+			_ = json.NewEncoder(w).Encode(todo.ListMeta{
+				ID:        "work",
+				Name:      "Remote",
+				Rev:       20,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		case http.MethodPut:
+			putCount++
+			t.Fatalf("unexpected stale PUT to %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewFirebaseRESTProvider("api-key", server.URL)
+	err := provider.PushTodoListMeta(context.Background(), "ws", todo.ListMeta{
+		ID:        "work",
+		Name:      "Local",
+		Rev:       10,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	if !errors.Is(err, ErrStaleTodoListMeta) {
+		t.Fatalf("PushTodoListMeta() error = %v, want ErrStaleTodoListMeta", err)
+	}
+	if putCount != 0 {
+		t.Fatalf("PUT count = %d, want 0", putCount)
+	}
+}
+
+func TestPushTodoListMetaTreatsETagConflictAsStale(t *testing.T) {
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("ETag", `"meta-etag-2"`)
+			_ = json.NewEncoder(w).Encode(todo.ListMeta{
+				ID:        "work",
+				Name:      "Work",
+				Rev:       10,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		case http.MethodPut:
+			http.Error(w, "etag mismatch", http.StatusPreconditionFailed)
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewFirebaseRESTProvider("api-key", server.URL)
+	err := provider.PushTodoListMeta(context.Background(), "ws", todo.ListMeta{
+		ID:        "work",
+		Name:      "Work",
+		Rev:       10,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	if !errors.Is(err, ErrStaleTodoListMeta) {
+		t.Fatalf("PushTodoListMeta() error = %v, want ErrStaleTodoListMeta", err)
 	}
 }
 

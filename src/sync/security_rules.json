@@ -52,6 +52,32 @@
             }
           }
         },
+        "todo_lists": {
+          ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",
+            "$list": {
+            "meta": {
+              ".validate": "newData.hasChildren(['id', 'name', 'rev', 'created_at', 'updated_at']) && newData.child('id').val() == $list && newData.child('name').isString() && newData.child('rev').isNumber() && newData.child('created_at').isString() && newData.child('updated_at').isString() && (!newData.child('deleted').exists() || newData.child('deleted').isBoolean()) && (!newData.child('deleted_at').exists() || newData.child('deleted_at').isString()) && (!data.exists() || newData.child('rev').val() > data.child('rev').val() || (newData.child('rev').val() == data.child('rev').val() && ((newData.child('deleted').val() == true && data.child('deleted').val() != true) || ((newData.child('deleted').val() == data.child('deleted').val() || (newData.child('deleted').val() != true && data.child('deleted').val() != true)) && newData.child('name').val() == data.child('name').val()))))"
+            },
+            "todos": {
+              "$todo": {
+                ".validate": "newData.hasChildren(['item', 'rev', 'updated_by', 'deleted']) && newData.child('item').hasChildren(['id', 'text', 'status']) && newData.child('item').child('id').isString() && newData.child('item').child('text').isString() && newData.child('item').child('status').isString() && newData.child('rev').isNumber() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
+              }
+            },
+            "archive_months": {
+              ".validate": true
+            },
+            "archives": {
+              "$month": {
+                "$todo": {
+                  ".validate": "newData.hasChildren(['item', 'rev', 'updated_by', 'deleted']) && newData.child('item').hasChildren(['id', 'text', 'status']) && newData.child('item').child('id').isString() && newData.child('item').child('text').isString() && newData.child('item').child('status').isString() && newData.child('rev').isNumber() && newData.child('updated_by').val() == auth.uid && newData.child('deleted').isBoolean()"
+                }
+              }
+            },
+            "$other": {
+              ".write": false
+            }
+          }
+        },
         "settings": {
           "shared": {
             ".write": "auth != null && (root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'owner' || root.child('workspaces').child($workspace).child('members').child(auth.uid).child('role').val() == 'editor')",

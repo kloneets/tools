@@ -137,6 +137,99 @@ class TodoRepositoryTest {
     }
 
     @Test
+    fun normalizeListsAddsDefaultAndSortsActiveBeforeTombstones() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val deletedAt = now.plusMinutes(1)
+        val catalog = TodoListsStore(
+            currentListId = "beta",
+            lists = listOf(
+                listMeta("beta", "Beta", now),
+                listMeta("alpha", "alpha", now),
+                listMeta("old", "Old", now, deleted = true, deletedAt = deletedAt),
+            ),
+        )
+
+        val got = TodoRepository.normalizeLists(catalog, now)
+
+        assertEquals(listOf("Default", "alpha", "Beta", "Old"), got.lists.map { it.name })
+        assertEquals(listOf("default", "alpha", "beta"), TodoRepository.activeLists(got).map { it.id })
+        assertEquals("beta", got.currentListId)
+        assertEquals(true, got.lists.last().deleted)
+    }
+
+    @Test
+    fun listNamesAreUniqueCaseInsensitivelyAcrossActiveLists() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val catalog = TodoRepository.normalizeLists(
+            TodoListsStore(lists = listOf(listMeta("work", "Work", now))),
+            now,
+        )
+
+        assertEquals(true, TodoRepository.listNameTaken(catalog, " work ", ""))
+        assertEquals(false, TodoRepository.listNameTaken(catalog, "work", "work"))
+    }
+
+    @Test
+    fun mergeListsKeepsNewerRemoteTombstone() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val later = now.plusMinutes(5)
+        val local = TodoListsStore(
+            currentListId = "work",
+            lists = listOf(listMeta("work", "Work", now, rev = 1L)),
+        )
+        val remote = TodoListsStore(
+            lists = listOf(listMeta("work", "Work", later, rev = 2L, deleted = true, deletedAt = later)),
+        )
+
+        val got = TodoRepository.mergeLists(local, remote, later)
+
+        val work = requireNotNull(TodoRepository.listById(got, "work"))
+        assertEquals(true, work.deleted)
+        assertEquals("default", got.currentListId)
+    }
+
+    @Test
+    fun mergeListsRemoteDefaultRenameWinsAgainstFreshLocalCatalog() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val remoteUpdated = now.minusHours(1)
+        val remote = TodoListsStore(
+            lists = listOf(listMeta(TodoRepository.DEFAULT_LIST_ID, "Inbox", remoteUpdated)),
+        )
+
+        val got = TodoRepository.mergeLists(TodoListsStore(), remote, now)
+
+        val default = requireNotNull(TodoRepository.listById(got, TodoRepository.DEFAULT_LIST_ID))
+        assertEquals("Inbox", default.name)
+        assertEquals(remoteUpdated.toInstant().toEpochMilli(), default.rev)
+    }
+
+    @Test
+    fun mergeListsDeletionWinsWhenRevisionsTie() {
+        val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
+        val local = TodoListsStore(
+            lists = listOf(listMeta("work", "Work", now, rev = 42L)),
+        )
+        val remote = TodoListsStore(
+            lists = listOf(
+                listMeta(
+                    "work",
+                    "Work",
+                    now,
+                    rev = 42L,
+                    updatedAt = now.minusMinutes(1),
+                    deleted = true,
+                    deletedAt = now,
+                ),
+            ),
+        )
+
+        val got = TodoRepository.mergeLists(local, remote, now)
+
+        val work = requireNotNull(TodoRepository.listById(got, "work"))
+        assertEquals(true, work.deleted)
+    }
+
+    @Test
     fun reorderActiveUncheckedStaysWithinTerm() {
         val now = OffsetDateTime.of(2026, 5, 20, 10, 0, 0, 0, ZoneOffset.UTC)
         val store = TodoStore(
@@ -185,6 +278,26 @@ class TodoRepositoryTest {
             createdAt = now,
             updatedAt = now,
             archivedAt = archivedAt,
+        )
+    }
+
+    private fun listMeta(
+        id: String,
+        name: String,
+        now: OffsetDateTime,
+        rev: Long = now.toInstant().toEpochMilli(),
+        updatedAt: OffsetDateTime = now,
+        deleted: Boolean = false,
+        deletedAt: OffsetDateTime? = null,
+    ): TodoListMeta {
+        return TodoListMeta(
+            id = id,
+            name = name,
+            rev = rev,
+            createdAt = now,
+            updatedAt = updatedAt,
+            deleted = deleted,
+            deletedAt = deletedAt,
         )
     }
 }

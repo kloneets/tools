@@ -38,6 +38,22 @@ type TodoArchiveMonthPushProvider interface {
 	PushTodoArchiveMonths(ctx context.Context, workspaceID string, months []string) error
 }
 
+type TodoListPullProvider interface {
+	PullTodosForList(ctx context.Context, workspaceID string, listID string) (map[string]TodoRecord, error)
+	PullTodoArchiveMonthsForList(ctx context.Context, workspaceID string, listID string) ([]string, error)
+	PullTodoArchiveMonthForList(ctx context.Context, workspaceID string, listID string, month string) (map[string]TodoRecord, error)
+}
+
+type TodoListArchiveMonthPushProvider interface {
+	PushTodoArchiveMonthsForList(ctx context.Context, workspaceID string, listID string, months []string) error
+}
+
+type TodoListMetaProvider interface {
+	PullTodoLists(ctx context.Context, workspaceID string) (map[string]todo.ListMeta, error)
+	PushTodoListMeta(ctx context.Context, workspaceID string, meta todo.ListMeta) error
+	DeleteTodoListData(ctx context.Context, workspaceID string, listID string) error
+}
+
 type NotePullProvider interface {
 	PullNotes(ctx context.Context, workspaceID string) (map[string]NoteRecord, error)
 }
@@ -105,22 +121,31 @@ type SharedSettingsRecord struct {
 	UpdatedBy string         `json:"updated_by"`
 }
 
+type TodoListSnapshot struct {
+	Meta          todo.ListMeta                    `json:"meta"`
+	Todos         map[string]TodoRecord            `json:"todos"`
+	ArchiveMonths []string                         `json:"archive_months"`
+	Archives      map[string]map[string]TodoRecord `json:"archives"`
+}
+
 type Snapshot struct {
-	Meta     WorkspaceMeta         `json:"meta"`
-	Members  map[string]Member     `json:"members"`
-	Notes    map[string]NoteRecord `json:"notes"`
-	Todos    map[string]TodoRecord `json:"todos"`
-	Settings map[string]any        `json:"settings"`
+	Meta      WorkspaceMeta               `json:"meta"`
+	Members   map[string]Member           `json:"members"`
+	Notes     map[string]NoteRecord       `json:"notes"`
+	Todos     map[string]TodoRecord       `json:"todos"`
+	TodoLists map[string]TodoListSnapshot `json:"todo_lists"`
+	Settings  map[string]any              `json:"settings"`
 }
 
 type Mutation struct {
-	EventID   string                `json:"event_id"`
-	DeviceID  string                `json:"device_id"`
-	Kind      string                `json:"kind"`
-	Note      *NoteRecord           `json:"note,omitempty"`
-	Todo      *TodoRecord           `json:"todo,omitempty"`
-	Settings  *SharedSettingsRecord `json:"settings,omitempty"`
-	CreatedAt time.Time             `json:"created_at"`
+	EventID    string                `json:"event_id"`
+	DeviceID   string                `json:"device_id"`
+	Kind       string                `json:"kind"`
+	TodoListID string                `json:"todo_list_id,omitempty"`
+	Note       *NoteRecord           `json:"note,omitempty"`
+	Todo       *TodoRecord           `json:"todo,omitempty"`
+	Settings   *SharedSettingsRecord `json:"settings,omitempty"`
+	CreatedAt  time.Time             `json:"created_at"`
 }
 
 type Change struct {

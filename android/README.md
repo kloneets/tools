@@ -17,8 +17,8 @@ Command-line tasks from this directory:
 
 ```sh
 ./gradlew :app:assembleDebug
-./gradlew :app:testDebugUnitTest
-./gradlew :app:connectedDebugAndroidTest
+./gradlew :app:testIsolatedUnitTest
+./gradlew :app:connectedIsolatedAndroidTest
 ```
 
 This repository does not require the Android app to be built when building the Go desktop app.
@@ -31,8 +31,8 @@ The project currently uses:
 - min SDK: 26
 - compile SDK: 36
 - target SDK: 36
-- version code: 4
-- version name: 0.1.3
+- version code: 5
+- version name: 0.1.4
 
 If your installed Android SDK differs, install API 36 with Android Studio SDK Manager or adjust `compileSdk` and `targetSdk` in `app/build.gradle.kts`.
 
@@ -42,7 +42,9 @@ Android stores data in the app-private files directory:
 
 - notes root: `filesDir/notes/`
 - settings: `filesDir/settings.json`
-- todos: `filesDir/todos.json`
+- default todos: `filesDir/todos.json`
+- todo list catalog: `filesDir/todo_lists.json`
+- named todo lists: `filesDir/todo-lists/<list-id>.json`
 
 Notes are plain `.md` files. Nested notes use slash-relative paths such as `books/current.md`.
 
@@ -51,6 +53,7 @@ The settings JSON keeps the desktop-compatible subset used by the Android app:
 - `pages_app.first_book`
 - `pages_app.second_book`
 - `pages_app.read_pages`
+- `todo_app.current_list_id`
 - `notes_app.current_note_path`
 - `notes_app.preview_hidden`
 - `notes_app.spell_check_enabled`

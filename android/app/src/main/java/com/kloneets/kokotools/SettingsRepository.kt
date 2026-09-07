@@ -4,6 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URI
 
 class SettingsRepository(private val context: Context) {
     private val settingsFile: File
@@ -34,6 +35,7 @@ class SettingsRepository(private val context: Context) {
         ): AppSettings {
             val root = JSONObject(raw)
             val pages = root.optJSONObject("pages_app") ?: JSONObject()
+            val todo = root.optJSONObject("todo_app") ?: JSONObject()
             val notes = root.optJSONObject("notes_app") ?: JSONObject()
             val android = root.optJSONObject("android_app") ?: JSONObject()
             val firebase = root.optJSONObject("firebase") ?: JSONObject()
@@ -43,6 +45,9 @@ class SettingsRepository(private val context: Context) {
                     firstBook = pages.optInt("first_book", 0),
                     secondBook = pages.optInt("second_book", 0),
                     readPages = pages.optInt("read_pages", 0),
+                ),
+                todoApp = TodoSettings(
+                    currentListId = TodoRepository.normalizeCurrentListId(todo.optString("current_list_id", TodoRepository.DEFAULT_LIST_ID)),
                 ),
                 notesApp = NotesSettings(
                     currentNotePath = notes.optString("current_note_path", ""),
@@ -84,6 +89,9 @@ class SettingsRepository(private val context: Context) {
             pages.put("first_book", settings.pagesApp.firstBook)
             pages.put("second_book", settings.pagesApp.secondBook)
             pages.put("read_pages", settings.pagesApp.readPages)
+
+            val todo = root.objectOrPut("todo_app")
+            todo.put("current_list_id", TodoRepository.normalizeCurrentListId(settings.todoApp.currentListId))
 
             val notes = root.objectOrPut("notes_app")
             notes.put("current_note_path", settings.notesApp.currentNotePath)
@@ -200,6 +208,11 @@ class SettingsRepository(private val context: Context) {
                         .put("read_pages", 0),
                 )
                 .put(
+                    "todo_app",
+                    JSONObject()
+                        .put("current_list_id", TodoRepository.DEFAULT_LIST_ID),
+                )
+                .put(
                     "notes_app",
                     JSONObject()
                         .put("tab_spaces", 4)
@@ -278,7 +291,7 @@ data class FirebaseBundledDefaults(
     val projectId: String = "",
 ) {
     val ready: Boolean
-        get() = apiKey.isNotBlank() && databaseUrl.isNotBlank()
+        get() = apiKey.isNotBlank() && FirebaseConfigValidator.validDatabaseUrl(databaseUrl)
 }
 
 object FirebaseDefaults {
@@ -298,6 +311,17 @@ object FirebaseDefaults {
             databaseUrl = settings.databaseUrl.ifBlank { defaults.databaseUrl },
             projectId = settings.projectId.ifBlank { defaults.projectId },
         )
+    }
+}
+
+object FirebaseConfigValidator {
+    fun validDatabaseUrl(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return false
+        return runCatching {
+            val uri = URI(trimmed)
+            uri.scheme == "https" && !uri.host.isNullOrBlank()
+        }.getOrDefault(false)
     }
 }
 

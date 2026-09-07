@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/kloneets/tools/src/todo"
 )
 
 type FirebaseRESTProvider struct {
@@ -293,7 +295,7 @@ func (p *FirebaseRESTProvider) PushMutation(ctx context.Context, workspaceID str
 		if mutation.Todo.Item.Status == "archived" && !mutation.Todo.Deleted {
 			return nil
 		}
-		path := fmt.Sprintf("workspaces/%s/todos/%s", url.PathEscape(workspaceID), url.PathEscape(mutation.Todo.Item.ID))
+		path := todoRecordPath(workspaceID, mutation.TodoListID, mutation.Todo.Item.ID)
 		if err := p.putRTDB(ctx, path, mutation.Todo, nil); err != nil {
 			return err
 		}
@@ -322,9 +324,33 @@ func (p *FirebaseRESTProvider) PullTodos(ctx context.Context, workspaceID string
 	return records, err
 }
 
+func (p *FirebaseRESTProvider) PullTodosForList(ctx context.Context, workspaceID string, listID string) (map[string]TodoRecord, error) {
+	if normalizeTodoListIDForPath(listID) == "default" {
+		return p.PullTodos(ctx, workspaceID)
+	}
+	var records map[string]TodoRecord
+	err := p.getRTDB(ctx, todoListChildPath(workspaceID, listID, "todos"), &records)
+	if records == nil {
+		records = map[string]TodoRecord{}
+	}
+	return records, err
+}
+
 func (p *FirebaseRESTProvider) PullTodoArchiveMonth(ctx context.Context, workspaceID string, month string) (map[string]TodoRecord, error) {
 	var records map[string]TodoRecord
 	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archives/%s", url.PathEscape(workspaceID), url.PathEscape(month)), &records)
+	if records == nil {
+		records = map[string]TodoRecord{}
+	}
+	return records, err
+}
+
+func (p *FirebaseRESTProvider) PullTodoArchiveMonthForList(ctx context.Context, workspaceID string, listID string, month string) (map[string]TodoRecord, error) {
+	if normalizeTodoListIDForPath(listID) == "default" {
+		return p.PullTodoArchiveMonth(ctx, workspaceID, month)
+	}
+	var records map[string]TodoRecord
+	err := p.getRTDB(ctx, todoListChildPath(workspaceID, listID, "archives/"+url.PathEscape(month)), &records)
 	if records == nil {
 		records = map[string]TodoRecord{}
 	}
@@ -340,11 +366,87 @@ func (p *FirebaseRESTProvider) PullTodoArchiveMonths(ctx context.Context, worksp
 	return months, err
 }
 
+func (p *FirebaseRESTProvider) PullTodoArchiveMonthsForList(ctx context.Context, workspaceID string, listID string) ([]string, error) {
+	if normalizeTodoListIDForPath(listID) == "default" {
+		return p.PullTodoArchiveMonths(ctx, workspaceID)
+	}
+	var months []string
+	err := p.getRTDB(ctx, todoListChildPath(workspaceID, listID, "archive_months"), &months)
+	if months == nil {
+		months = []string{}
+	}
+	return months, err
+}
+
 func (p *FirebaseRESTProvider) PushTodoArchiveMonths(ctx context.Context, workspaceID string, months []string) error {
 	if err := p.putRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_archive_months", url.PathEscape(workspaceID)), months, nil); err != nil {
 		return err
 	}
 	pushSyncHashBestEffort(ctx, p, workspaceID, SyncFeatureTodoArchiveMonths, TodoArchiveMonthsHash(months), time.Now().UTC(), p.session.UID)
+	return nil
+}
+
+func (p *FirebaseRESTProvider) PushTodoArchiveMonthsForList(ctx context.Context, workspaceID string, listID string, months []string) error {
+	if normalizeTodoListIDForPath(listID) == "default" {
+		return p.PushTodoArchiveMonths(ctx, workspaceID, months)
+	}
+	if err := p.putRTDB(ctx, todoListChildPath(workspaceID, listID, "archive_months"), months, nil); err != nil {
+		return err
+	}
+	pushSyncHashBestEffort(ctx, p, workspaceID, todoArchiveMonthsFeature(listID), TodoArchiveMonthsHash(months), time.Now().UTC(), p.session.UID)
+	return nil
+}
+
+func (p *FirebaseRESTProvider) PullTodoLists(ctx context.Context, workspaceID string) (map[string]todo.ListMeta, error) {
+	var records map[string]TodoListSnapshot
+	err := p.getRTDB(ctx, fmt.Sprintf("workspaces/%s/todo_lists", url.PathEscape(workspaceID)), &records)
+	out := map[string]todo.ListMeta{}
+	for id, record := range records {
+		meta := record.Meta
+		if meta.ID == "" {
+			meta.ID = id
+		}
+		out[meta.ID] = meta
+	}
+	return out, err
+}
+
+func (p *FirebaseRESTProvider) PushTodoListMeta(ctx context.Context, workspaceID string, meta todo.ListMeta) error {
+	catalog := todo.ListsStore{Lists: []todo.ListMeta{meta}}
+	todo.NormalizeLists(&catalog, time.Now().UTC())
+	if normalized, ok := todo.ListByID(catalog, meta.ID); ok {
+		meta = normalized
+	}
+	if meta.ID == "" {
+		return nil
+	}
+	path := todoListChildPath(workspaceID, meta.ID, "meta")
+	existing, etag, err := p.pullTodoListMetaForMutation(ctx, path)
+	if err != nil {
+		return err
+	}
+	if existing != nil && !todoListMetaCanReplaceRemote(meta, *existing) {
+		return ErrStaleTodoListMeta
+	}
+	if err := p.putRTDBIfMatch(ctx, path, meta, etag); err != nil {
+		if strings.Contains(err.Error(), "412") || strings.Contains(err.Error(), "Precondition Failed") {
+			return ErrStaleTodoListMeta
+		}
+		return err
+	}
+	return nil
+}
+
+func (p *FirebaseRESTProvider) DeleteTodoListData(ctx context.Context, workspaceID string, listID string) error {
+	if normalizeTodoListIDForPath(listID) == "default" {
+		return nil
+	}
+	base := todoListChildPath(workspaceID, listID, "")
+	for _, child := range []string{"todos", "archive_months", "archives"} {
+		if err := p.deleteRTDB(ctx, strings.TrimRight(base, "/")+"/"+child); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -462,6 +564,28 @@ func (p *FirebaseRESTProvider) pullNoteForMutation(ctx context.Context, path str
 	return record, etag, nil
 }
 
+func (p *FirebaseRESTProvider) pullTodoListMetaForMutation(ctx context.Context, path string) (*todo.ListMeta, string, error) {
+	var record *todo.ListMeta
+	headers, err := p.doJSONRequest(ctx, http.MethodGet, p.rtdbURL(path), nil, &record, map[string]string{
+		"X-Firebase-ETag": "true",
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("firebase GET %s failed: %w", path, err)
+	}
+	etag := headers.Get("ETag")
+	if etag == "" {
+		return nil, "", fmt.Errorf("firebase GET %s did not return an ETag", path)
+	}
+	if record != nil {
+		catalog := todo.ListsStore{Lists: []todo.ListMeta{*record}}
+		todo.NormalizeLists(&catalog, time.Now().UTC())
+		if normalized, ok := todo.ListByID(catalog, record.ID); ok {
+			record = &normalized
+		}
+	}
+	return record, etag, nil
+}
+
 func (p *FirebaseRESTProvider) putRTDB(ctx context.Context, path string, in any, out any) error {
 	if err := p.doJSON(ctx, http.MethodPut, p.rtdbURL(path), in, out); err != nil {
 		return fmt.Errorf("firebase PUT %s failed: %w", path, err)
@@ -475,6 +599,13 @@ func (p *FirebaseRESTProvider) putRTDBIfMatch(ctx context.Context, path string, 
 	})
 	if err != nil {
 		return fmt.Errorf("firebase conditional PUT %s failed: %w", path, err)
+	}
+	return nil
+}
+
+func (p *FirebaseRESTProvider) deleteRTDB(ctx context.Context, path string) error {
+	if err := p.doJSON(ctx, http.MethodDelete, p.rtdbURL(path), nil, nil); err != nil {
+		return fmt.Errorf("firebase DELETE %s failed: %w", path, err)
 	}
 	return nil
 }
@@ -565,4 +696,44 @@ func (p *FirebaseRESTProvider) rtdbURL(path string) string {
 		return base + "/" + strings.TrimLeft(path, "/") + ".json"
 	}
 	return base + "/" + strings.TrimLeft(path, "/") + ".json?auth=" + url.QueryEscape(token)
+}
+
+func todoRecordPath(workspaceID string, listID string, todoID string) string {
+	if normalizeTodoListIDForPath(listID) == "default" {
+		return fmt.Sprintf("workspaces/%s/todos/%s", url.PathEscape(workspaceID), url.PathEscape(todoID))
+	}
+	return todoListChildPath(workspaceID, listID, "todos/"+url.PathEscape(todoID))
+}
+
+func todoListChildPath(workspaceID string, listID string, child string) string {
+	path := fmt.Sprintf("workspaces/%s/todo_lists/%s", url.PathEscape(workspaceID), url.PathEscape(normalizeTodoListIDForPath(listID)))
+	child = strings.Trim(child, "/")
+	if child == "" {
+		return path
+	}
+	return path + "/" + child
+}
+
+func normalizeTodoListIDForPath(listID string) string {
+	id := strings.ToLower(strings.TrimSpace(listID))
+	id = strings.ReplaceAll(id, "_", "-")
+	var b strings.Builder
+	prevDash := false
+	for _, r := range id {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if valid {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	id = strings.Trim(b.String(), "-")
+	if id == "" {
+		return "default"
+	}
+	return id
 }

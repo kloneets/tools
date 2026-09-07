@@ -67,7 +67,7 @@ If this is a new personal developer account, complete the required closed test w
 Run:
 
 ```sh
-./gradlew :app:testDebugUnitTest
+./gradlew :app:testIsolatedUnitTest
 ./gradlew :app:assembleDebug
 ./gradlew :app:bundleRelease
 ```

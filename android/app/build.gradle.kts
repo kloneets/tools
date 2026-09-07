@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import java.net.URI
 import java.util.Properties
 
 plugins {
@@ -8,6 +9,7 @@ plugins {
 android {
     namespace = "com.kloneets.kokotools"
     compileSdk = 36
+    testBuildType = "isolated"
 
     val keystorePropertiesFile = rootProject.file("keystore.properties")
     val keystoreProperties = Properties()
@@ -38,18 +40,46 @@ android {
 
     val googleServicesConfig = googleServicesConfig()
 
-    fun firebaseBuildConfigValue(name: String): String {
+    fun rawFirebaseConfigValue(name: String): String {
         return providers.gradleProperty(name).orElse(googleServicesConfig[name].orEmpty()).get()
+    }
+
+    fun firebaseBuildConfigValue(name: String): String {
+        return rawFirebaseConfigValue(name)
             .replace("\\", "\\\\")
             .replace("\"", "\\\"")
+    }
+
+    fun validHttpsDatabaseUrl(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return false
+        return runCatching {
+            val uri = URI(trimmed)
+            uri.scheme == "https" && !uri.host.isNullOrBlank()
+        }.getOrDefault(false)
+    }
+
+    tasks.register("verifyReleaseFirebaseConfig") {
+        group = "verification"
+        description = "Checks that the shipped release Firebase defaults are populated and safe."
+        doLast {
+            val apiKey = rawFirebaseConfigValue("KOKO_FIREBASE_API_KEY")
+            val databaseUrl = rawFirebaseConfigValue("KOKO_FIREBASE_DATABASE_URL")
+            val projectId = rawFirebaseConfigValue("KOKO_FIREBASE_PROJECT_ID")
+            val webClientId = rawFirebaseConfigValue("KOKO_GOOGLE_WEB_CLIENT_ID")
+            require(apiKey.isNotBlank()) { "Release Firebase API key is missing" }
+            require(validHttpsDatabaseUrl(databaseUrl)) { "Release Firebase database URL must be an absolute https URL with a host" }
+            require(projectId.isNotBlank()) { "Release Firebase project ID is missing" }
+            require(webClientId.isNotBlank()) { "Release Google web client ID is missing" }
+        }
     }
 
     defaultConfig {
         applicationId = "com.kloneets.kokotools"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FIREBASE_API_KEY", "\"${firebaseBuildConfigValue("KOKO_FIREBASE_API_KEY")}\"")
@@ -82,6 +112,16 @@ android {
             }
             isMinifyEnabled = false
         }
+        create("isolated") {
+            initWith(getByName("debug"))
+            matchingFallbacks += listOf("debug")
+            applicationIdSuffix = ".testhost"
+            versionNameSuffix = "-testhost"
+            buildConfigField("String", "FIREBASE_API_KEY", "\"\"")
+            buildConfigField("String", "FIREBASE_DATABASE_URL", "\"\"")
+            buildConfigField("String", "FIREBASE_PROJECT_ID", "\"\"")
+            buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"\"")
+        }
     }
 
     buildFeatures {
@@ -107,6 +147,12 @@ android {
     }
 }
 
+tasks.configureEach {
+    if (name == "preReleaseBuild") {
+        dependsOn("verifyReleaseFirebaseConfig")
+    }
+}
+
 fun Any?.orEmptyString(): String = (this as? String).orEmpty()
 
 dependencies {
@@ -123,6 +169,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    testImplementation("androidx.test:core:1.6.1")
 
     androidTestImplementation("androidx.test:core:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

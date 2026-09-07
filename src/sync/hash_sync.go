@@ -15,14 +15,35 @@ import (
 const (
 	SyncFeatureTodos             = "todos"
 	SyncFeatureTodoArchiveMonths = "todo_archive_months"
+	SyncFeatureTodoLists         = "todo_lists"
 	SyncFeatureNotes             = "notes"
 	SyncFeatureSettings          = "settings"
 
 	hashFullValidationInterval = 24 * time.Hour
 )
 
-func archiveMonthFeature(month string) string {
-	return "todo_archive_month:" + strings.TrimSpace(month)
+func todoFeature(listID string) string {
+	listID = todo.NormalizeListID(listID)
+	if listID == "" || listID == todo.DefaultListID {
+		return SyncFeatureTodos
+	}
+	return "todo_list:" + listID + ":todos"
+}
+
+func todoArchiveMonthsFeature(listID string) string {
+	listID = todo.NormalizeListID(listID)
+	if listID == "" || listID == todo.DefaultListID {
+		return SyncFeatureTodoArchiveMonths
+	}
+	return "todo_list:" + listID + ":todo_archive_months"
+}
+
+func archiveMonthFeature(listID string, month string) string {
+	listID = todo.NormalizeListID(listID)
+	if listID == "" || listID == todo.DefaultListID {
+		return "todo_archive_month:" + strings.TrimSpace(month)
+	}
+	return "todo_list:" + listID + ":todo_archive_month:" + strings.TrimSpace(month)
 }
 
 func pullSyncHashes(ctx context.Context, provider Provider, workspaceID string) (map[string]SyncHashRecord, bool) {
@@ -137,6 +158,27 @@ func TodoArchiveMonthHash(records map[string]TodoRecord) string {
 			record.Item.ID = id
 		}
 		items = append(items, metadata{ID: record.Item.ID, Rev: record.Rev, Deleted: record.Deleted})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	return hashCanonical(items)
+}
+
+func TodoListsHash(catalog todo.ListsStore) string {
+	type metadata struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Rev     int64  `json:"rev"`
+		Deleted bool   `json:"deleted"`
+	}
+	todo.NormalizeLists(&catalog, time.Time{})
+	items := make([]metadata, 0, len(catalog.Lists))
+	for _, list := range catalog.Lists {
+		items = append(items, metadata{
+			ID:      list.ID,
+			Name:    list.Name,
+			Rev:     list.Rev,
+			Deleted: list.Deleted,
+		})
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	return hashCanonical(items)

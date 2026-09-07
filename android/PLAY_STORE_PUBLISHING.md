@@ -188,8 +188,8 @@ If Play Console says production is locked:
 1. Go to `Production`.
 2. Create a release.
 3. Upload the final signed AAB.
-4. Add release notes from `android/play-store/release-notes/4-en-US.txt`.
-5. Set rollout status to full Production release for this version. Do not configure a staged rollout fraction for release 0.1.3.
+4. Add release notes from the newest `android/play-store/release-notes/<version-code>-en-US.txt`.
+5. Set rollout status to full Production release for this version unless the task record explicitly calls for a staged rollout.
 6. Watch:
    - Pre-launch report
    - Crashes and ANRs

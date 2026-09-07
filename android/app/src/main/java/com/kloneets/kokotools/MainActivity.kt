@@ -60,6 +60,7 @@ class MainActivity : ComponentActivity() {
 
     private var settings = AppSettings()
     private var todoStore = TodoStore()
+    private var todoLists = TodoListsStore()
     private var currentNotePath = ""
     private var noteList: List<NoteFile> = emptyList()
     private var firebaseSession: FirebaseSession? = null
@@ -75,9 +76,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var syncProblemBadge: ImageView
     private lateinit var drawerScrim: View
     private lateinit var drawerPanel: LinearLayout
-    private val drawerBackCallback = object : OnBackPressedCallback(false) {
+    private val drawerBackCallback = object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
-            hideNavigationDrawer()
+            if (::drawerPanel.isInitialized && drawerPanel.visibility == View.VISIBLE) {
+                hideNavigationDrawer()
+            } else {
+                finish()
+            }
         }
     }
     private lateinit var content: LinearLayout
@@ -92,6 +97,7 @@ class MainActivity : ComponentActivity() {
     private var pendingNoteAutosave: Runnable? = null
     private var suppressNoteAutosave = false
     private val notePickerExpandedFolders = mutableSetOf<String>()
+    private var notePickerDialog: AlertDialog? = null
 
     private var firstInput: EditText? = null
     private var readInput: EditText? = null
@@ -126,6 +132,8 @@ class MainActivity : ComponentActivity() {
         firebaseSyncRepository = FirebaseSyncRepository(this)
         notesRepository.cleanupManagedAssetDirs()
         settings = settingsRepository.load()
+        todoLists = todoRepository.selectList(settings.todoApp.currentListId)
+        persistTodoListSelectionIfChanged(todoRepository.currentListId())
         todoStore = todoRepository.load()
         palette = resolvePalette()
         applySystemBars()
@@ -375,13 +383,11 @@ class MainActivity : ComponentActivity() {
     private fun showNavigationDrawer() {
         drawerScrim.visibility = View.VISIBLE
         drawerPanel.visibility = View.VISIBLE
-        drawerBackCallback.isEnabled = true
         drawerScrim.animate().alpha(1f).setDuration(DRAWER_ANIMATION_MS).start()
         drawerPanel.animate().translationX(0f).setDuration(DRAWER_ANIMATION_MS).start()
     }
 
     private fun hideNavigationDrawer() {
-        drawerBackCallback.isEnabled = false
         drawerScrim.animate().alpha(0f).setDuration(DRAWER_ANIMATION_MS).withEndAction {
             drawerScrim.visibility = View.GONE
         }.start()
@@ -751,6 +757,8 @@ class MainActivity : ComponentActivity() {
             .setView(pickerLayout)
             .setNegativeButton("Cancel", null)
             .create()
+        notePickerDialog = dialog
+        dialog.setOnDismissListener { notePickerDialog = null }
         dialog.setOnShowListener { refreshPickerRows() }
         dialog.show()
     }
@@ -1004,7 +1012,9 @@ class MainActivity : ComponentActivity() {
 
     private fun showTodo() {
         showScreen(Screen.Todo)
-        setScreenHeader("Todo", if (todoMoveMode) "Move tasks" else "Tasks and archive")
+        refreshTodoLists()
+        val currentListName = currentTodoListName()
+        setScreenHeader("Todo", if (todoMoveMode) "$currentListName - Move tasks" else currentListName)
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
         content.setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -1092,7 +1102,7 @@ class MainActivity : ComponentActivity() {
     private fun todoArchiveMonthRow(month: String, cachedCount: Int): TextView {
         return TextView(this).apply {
             val expanded = expandedTodoArchiveMonths.contains(month)
-            val loading = loadingTodoArchiveMonths.contains(month)
+            val loading = loadingTodoArchiveMonths.contains(todoArchiveLoadingKey(todoRepository.currentListId(), month))
             text = when {
                 loading -> "$month - loading"
                 expanded -> "$month - $cachedCount archived"
@@ -1113,6 +1123,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openTodoArchiveMonth(month: String) {
+        val listId = todoRepository.currentListId()
         if (expandedTodoArchiveMonths.contains(month)) {
             expandedTodoArchiveMonths.remove(month)
             showTodoPreservingScroll()
@@ -1123,39 +1134,51 @@ class MainActivity : ComponentActivity() {
             showTodoPreservingScroll()
             return
         }
-        if (!loadingTodoArchiveMonths.add(month)) return
+        val loadingKey = todoArchiveLoadingKey(listId, month)
+        if (!loadingTodoArchiveMonths.add(loadingKey)) return
         showTodoPreservingScroll()
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
                 runOnUiThread {
-                    loadingTodoArchiveMonths.remove(month)
+                    loadingTodoArchiveMonths.remove(loadingKey)
                     setSyncError("Firebase login required")
-                    showTodoPreservingScroll()
+                    if (todoRepository.currentListId() == listId) showTodoPreservingScroll()
                 }
                 return@Thread
             }
             runCatching {
-                val remoteItems = firebaseSyncRepository.pullTodoArchiveMonth(settings.firebase, month, session)
-                val local = todoRepository.load()
+                val remoteItems = firebaseSyncRepository.pullTodoArchiveMonth(
+                    settings.firebase,
+                    month,
+                    session,
+                    listId = listId,
+                )
+                val local = todoRepository.loadList(listId)
                 TodoRepository.mergeArchiveMonth(local, month, remoteItems)
             }.onSuccess { merged ->
-                todoRepository.save(merged)
+                todoRepository.saveList(listId, merged)
                 runOnUiThread {
-                    todoStore = merged
-                    loadingTodoArchiveMonths.remove(month)
-                    expandedTodoArchiveMonths.add(month)
+                    loadingTodoArchiveMonths.remove(loadingKey)
                     setSyncSuccess("Firebase todo archive loaded: $month")
-                    showTodoPreservingScroll()
+                    if (todoRepository.currentListId() == listId) {
+                        todoStore = merged
+                        expandedTodoArchiveMonths.add(month)
+                        showTodoPreservingScroll()
+                    }
                 }
             }.onFailure { error ->
                 runOnUiThread {
-                    loadingTodoArchiveMonths.remove(month)
+                    loadingTodoArchiveMonths.remove(loadingKey)
                     setSyncError("Firebase todo archive load failed: ${error.message}")
-                    showTodoPreservingScroll()
+                    if (todoRepository.currentListId() == listId) showTodoPreservingScroll()
                 }
             }
         }.start()
+    }
+
+    private fun todoArchiveLoadingKey(listId: String, month: String): String {
+        return "${TodoRepository.normalizeCurrentListId(listId)}:${month.trim()}"
     }
 
     private fun showTodoPreservingScroll() {
@@ -1363,6 +1386,24 @@ class MainActivity : ComponentActivity() {
 
     private fun showTodoActionsMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
+            menu.add("Open list").setOnMenuItemClickListener {
+                showTodoListPicker()
+                true
+            }
+            menu.add("New list").setOnMenuItemClickListener {
+                promptNewTodoList()
+                true
+            }
+            menu.add("Rename list").setOnMenuItemClickListener {
+                promptRenameCurrentTodoList()
+                true
+            }
+            if (todoRepository.currentListId() != TodoRepository.DEFAULT_LIST_ID) {
+                menu.add("Delete list").setOnMenuItemClickListener {
+                    confirmDeleteCurrentTodoList()
+                    true
+                }
+            }
             menu.add(if (todoMoveMode) "Done moving" else "Move").setOnMenuItemClickListener {
                 todoMoveMode = !todoMoveMode
                 showTodo()
@@ -1374,6 +1415,120 @@ class MainActivity : ComponentActivity() {
             }
             show()
         }
+    }
+
+    private fun refreshTodoLists() {
+        todoLists = todoRepository.loadLists()
+        persistTodoListSelectionIfChanged(todoRepository.currentListId())
+    }
+
+    private fun currentTodoListName(): String {
+        return TodoRepository.activeLists(todoLists)
+            .firstOrNull { it.id == todoRepository.currentListId() }
+            ?.name
+            ?: TodoRepository.DEFAULT_LIST_NAME
+    }
+
+    private fun showTodoListPicker() {
+        refreshTodoLists()
+        val lists = TodoRepository.activeLists(todoLists)
+        val labels = lists.map { it.name }.toTypedArray()
+        val selectedIndex = lists.indexOfFirst { it.id == todoRepository.currentListId() }.coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("Open todo list")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                selectTodoList(lists[which].id)
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun selectTodoList(id: String) {
+        todoLists = todoRepository.selectList(id)
+        todoStore = todoRepository.load()
+        expandedTodoArchiveMonths.clear()
+        loadingTodoArchiveMonths.clear()
+        todoMoveMode = false
+        todoDraftText = ""
+        persistTodoListSelectionIfChanged(todoRepository.currentListId())
+        showTodo()
+    }
+
+    private fun promptNewTodoList() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            hint = "List name"
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("New todo list")
+            .setView(input)
+            .setPositiveButton("Create") { _, _ ->
+                runCatching {
+                    val result = todoRepository.createList(input.text.toString())
+                    todoLists = result.first
+                    todoStore = todoRepository.load()
+                    persistTodoListSelectionIfChanged(todoRepository.currentListId())
+                    pushTodosToFirebase()
+                    showTodo()
+                }.onFailure { error ->
+                    Toast.makeText(this, error.message ?: "Todo list create failed", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promptRenameCurrentTodoList() {
+        refreshTodoLists()
+        val current = TodoRepository.listById(todoLists, todoRepository.currentListId()) ?: return
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(current.name)
+            setSingleLine(true)
+            selectAll()
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Rename todo list")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                runCatching {
+                    todoLists = todoRepository.renameList(current.id, input.text.toString())
+                    pushTodosToFirebase()
+                    showTodo()
+                }.onFailure { error ->
+                    Toast.makeText(this, error.message ?: "Todo list rename failed", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun confirmDeleteCurrentTodoList() {
+        refreshTodoLists()
+        val current = TodoRepository.listById(todoLists, todoRepository.currentListId()) ?: return
+        if (current.id == TodoRepository.DEFAULT_LIST_ID) return
+        val count = todoRepository.todoCount(current.id)
+        AlertDialog.Builder(this)
+            .setTitle("Delete todo list")
+            .setMessage("Delete ${current.name} and its $count todo item(s)? This cannot be undone.")
+            .setPositiveButton("Delete") { _, _ ->
+                runCatching {
+                    todoLists = todoRepository.deleteList(current.id)
+                    todoStore = todoRepository.load()
+                    expandedTodoArchiveMonths.clear()
+                    loadingTodoArchiveMonths.clear()
+                    todoMoveMode = false
+                    persistTodoListSelectionIfChanged(todoRepository.currentListId())
+                    pushTodosToFirebase()
+                    showTodo()
+                }.onFailure { error ->
+                    Toast.makeText(this, error.message ?: "Todo list delete failed", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun scheduleTodoBoundaryRefresh() {
@@ -1683,6 +1838,12 @@ class MainActivity : ComponentActivity() {
         updateSyncProblemIndicator()
     }
 
+    private fun persistTodoListSelectionIfChanged(listId: String) {
+        val normalized = TodoRepository.normalizeCurrentListId(listId)
+        if (settings.todoApp.currentListId == normalized) return
+        persistLocalSettings(settings.copy(todoApp = settings.todoApp.copy(currentListId = normalized)))
+    }
+
     private fun startFirebaseRealtimeIfEnabled() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
         Thread {
@@ -1760,18 +1921,121 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private data class TodoFirebaseSyncResult(
+        val pullResult: FirebasePullResult,
+        val catalog: TodoListsStore,
+        val currentListId: String,
+    )
+
+    private fun reconcileTodoListsWithFirebase(
+        session: FirebaseSession,
+        localCatalog: TodoListsStore = todoRepository.loadLists(),
+    ): TodoListsStore {
+        val mergedCatalog = TodoRepository.mergeLists(
+            localCatalog,
+            firebaseSyncRepository.pullTodoLists(settings.firebase, session),
+        )
+        if (mergedCatalog != localCatalog) {
+            todoRepository.saveLists(mergedCatalog)
+            todoRepository.removeDeletedListData(mergedCatalog)
+        }
+        return todoRepository.loadLists()
+    }
+
+    private fun syncAllTodoListsWithFirebase(
+        session: FirebaseSession,
+        forceFull: Boolean = false,
+        replaceLocal: Boolean = false,
+    ): TodoFirebaseSyncResult {
+        val localCatalog = todoRepository.loadLists()
+        var catalog = if (replaceLocal) {
+            firebaseSyncRepository.pullTodoLists(settings.firebase, session)
+                .also {
+                    todoRepository.saveLists(it)
+                    todoRepository.removeDeletedListData(it)
+                }
+        } else {
+            reconcileTodoListsWithFirebase(session, localCatalog)
+        }
+        var todoChanged = catalog != localCatalog
+        if (!replaceLocal && !firebaseSyncRepository.pushTodoLists(settings.firebase, catalog, session)) {
+            val refreshedCatalog = reconcileTodoListsWithFirebase(session, catalog)
+            todoChanged = todoChanged || refreshedCatalog != catalog
+            catalog = refreshedCatalog
+        }
+        var currentStore = todoRepository.load()
+        var totalTodos = 0
+        TodoRepository.activeLists(catalog).forEach { list ->
+            val local = todoRepository.loadList(list.id)
+            val merged = firebaseSyncRepository.pullTodos(
+                settings.firebase,
+                local,
+                session,
+                forceFull = forceFull,
+                listId = list.id,
+                replaceLocal = replaceLocal,
+            )
+            val changed = merged != local
+            if (changed) {
+                todoRepository.saveList(list.id, merged)
+                todoChanged = true
+            }
+            val saved = todoRepository.loadList(list.id)
+            if (!replaceLocal) {
+                firebaseSyncRepository.pushTodos(settings.firebase, saved, session, listId = list.id)
+            }
+            totalTodos += saved.items.size
+            if (list.id == todoRepository.currentListId()) {
+                currentStore = saved
+            }
+        }
+        catalog = todoRepository.loadLists()
+        if (!replaceLocal && !firebaseSyncRepository.pushTodoLists(settings.firebase, catalog, session)) {
+            val refreshedCatalog = reconcileTodoListsWithFirebase(session, catalog)
+            todoChanged = todoChanged || refreshedCatalog != catalog
+            catalog = refreshedCatalog
+        }
+        return TodoFirebaseSyncResult(
+            pullResult = FirebasePullResult(
+                todos = currentStore,
+                todoChanged = todoChanged,
+                remoteNotes = emptyList(),
+                remoteTodoCount = totalTodos,
+                remoteNoteCount = 0,
+            ),
+            catalog = catalog,
+            currentListId = todoRepository.currentListId(),
+        )
+    }
+
+    private fun pushAllTodoListsToFirebase(session: FirebaseSession) {
+        var catalog = reconcileTodoListsWithFirebase(session)
+        if (!firebaseSyncRepository.pushTodoLists(settings.firebase, catalog, session)) {
+            catalog = reconcileTodoListsWithFirebase(session, catalog)
+        }
+        TodoRepository.activeLists(catalog).forEach { list ->
+            firebaseSyncRepository.pushTodos(
+                settings.firebase,
+                todoRepository.loadList(list.id),
+                session,
+                listId = list.id,
+            )
+        }
+    }
+
+    private fun applyTodoFirebaseSyncResult(result: TodoFirebaseSyncResult) {
+        todoLists = result.catalog
+        todoStore = result.pullResult.todos
+        persistTodoListSelectionIfChanged(result.currentListId)
+    }
+
     private fun syncTodoView(session: FirebaseSession) {
         runCatching {
-            val local = todoRepository.load()
-            val merged = firebaseSyncRepository.pullTodos(settings.firebase, local, session)
-            val changed = merged != local
-            if (changed) todoRepository.save(merged)
-            firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
-            changed to merged
-        }.onSuccess { (changed, merged) ->
+            syncAllTodoListsWithFirebase(session)
+        }.onSuccess { result ->
             runOnUiThread {
-                todoStore = merged
-                if (currentScreen == Screen.Todo && changed && canRebuildTodoAfterRemotePull()) {
+                applyTodoFirebaseSyncResult(result)
+                if (currentScreen == Screen.Todo && result.pullResult.todoChanged && canRebuildTodoAfterRemotePull()) {
                     showTodoPreservingScroll()
                 }
                 setSyncSuccess("Firebase todo view synced", transient = true)
@@ -1999,6 +2263,7 @@ class MainActivity : ComponentActivity() {
 
     private fun pushTodosToFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
+        val previousListId = todoRepository.currentListId()
         Thread {
             val session = freshFirebaseSession()
             if (session == null) {
@@ -2006,9 +2271,27 @@ class MainActivity : ComponentActivity() {
                 return@Thread
             }
             runCatching {
-                firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
+                pushAllTodoListsToFirebase(session)
             }.onSuccess {
-                runOnUiThread { setSyncSuccess("Firebase todos pushed") }
+                runOnUiThread {
+                    refreshTodoLists()
+                    val selectionChanged = todoRepository.currentListId() != previousListId
+                    if (selectionChanged) {
+                        expandedTodoArchiveMonths.clear()
+                        loadingTodoArchiveMonths.clear()
+                        todoMoveMode = false
+                        todoDraftText = ""
+                    }
+                    todoStore = todoRepository.load()
+                    if (currentScreen == Screen.Todo) {
+                        if (selectionChanged) {
+                            showTodo()
+                        } else {
+                            showTodoPreservingScroll()
+                        }
+                    }
+                    setSyncSuccess("Firebase todos pushed")
+                }
             }.onFailure { error ->
                 runOnUiThread { setSyncError("Firebase push failed: ${error.message}") }
             }
@@ -2146,25 +2429,20 @@ class MainActivity : ComponentActivity() {
                 return@Thread
             }
             runCatching {
-                val local = todoRepository.load()
-                val merged = firebaseSyncRepository.pullTodos(settings.firebase, local, session)
-                val todoChanged = merged != local
-                if (todoChanged) {
-                    todoRepository.save(merged)
-                }
+                val todoSync = syncAllTodoListsWithFirebase(session)
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
                 firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
-                FirebasePullResult(
-                    todos = merged,
-                    todoChanged = todoChanged,
-                    remoteNotes = remoteNotes,
-                    remoteTodoCount = merged.items.size,
-                    remoteNoteCount = remoteNotes.count { !it.deleted },
+                todoSync.copy(
+                    pullResult = todoSync.pullResult.copy(
+                        remoteNotes = remoteNotes,
+                        remoteNoteCount = remoteNotes.count { !it.deleted },
+                    ),
                 ) to shared
             }.onSuccess { result ->
                 runOnUiThread {
-                    val pullResult = result.first
+                    val todoSync = result.first
+                    val pullResult = todoSync.pullResult
                     val shared = result.second
                     val localEditActive = hasActiveLocalEdit()
                     if (shared != null && localEditActive) {
@@ -2179,7 +2457,7 @@ class MainActivity : ComponentActivity() {
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
                     applyRemoteNotes(pullResult.remoteNotes)
-                    todoStore = pullResult.todos
+                    applyTodoFirebaseSyncResult(todoSync)
                     if (SyncUiState.shouldRebuildTodoAfterPull(
                             todoChanged = pullResult.todoChanged,
                             showingTodo = currentScreen == Screen.Todo,
@@ -2202,9 +2480,9 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
-	private fun syncToFirebase() {
-		if (!firebaseSyncRepository.configured(settings.firebase)) return
-		setSyncStatus("Firebase sync started", transient = true)
+    private fun syncToFirebase() {
+        if (!firebaseSyncRepository.configured(settings.firebase)) return
+        setSyncStatus("Firebase sync started", transient = true)
         saveCurrentNoteSilently()
         Thread {
             val session = freshFirebaseSession()
@@ -2213,28 +2491,23 @@ class MainActivity : ComponentActivity() {
                 return@Thread
             }
             runCatching {
-                val localTodos = todoRepository.load()
-                val mergedTodos = firebaseSyncRepository.pullTodos(settings.firebase, localTodos, session, forceFull = true)
-                val todoChanged = mergedTodos != localTodos
-                if (todoChanged) {
-                    todoRepository.save(mergedTodos)
-                }
+                val todoSync = syncAllTodoListsWithFirebase(session, forceFull = true)
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
                 firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
                 Pair(
-                    FirebasePullResult(
-                        todos = mergedTodos,
-                        todoChanged = todoChanged,
-                        remoteNotes = remoteNotes,
-                        remoteTodoCount = mergedTodos.items.size,
-                        remoteNoteCount = remoteNotes.count { !it.deleted },
+                    todoSync.copy(
+                        pullResult = todoSync.pullResult.copy(
+                            remoteNotes = remoteNotes,
+                            remoteNoteCount = remoteNotes.count { !it.deleted },
+                        ),
                     ),
                     shared,
                 )
             }.onSuccess { result ->
                 runOnUiThread {
-                    val pullResult = result.first
+                    val todoSync = result.first
+                    val pullResult = todoSync.pullResult
                     val shared = result.second
                     val localEditActive = hasActiveLocalEdit()
                     if (shared != null && localEditActive) {
@@ -2249,7 +2522,7 @@ class MainActivity : ComponentActivity() {
                         firebaseSyncRepository.markSharedSettingsSynced(settings.firebase, shared.values)
                     }
                     applyRemoteNotes(pullResult.remoteNotes)
-                    todoStore = pullResult.todos
+                    applyTodoFirebaseSyncResult(todoSync)
                     if (SyncUiState.shouldRebuildTodoAfterPull(
                             todoChanged = pullResult.todoChanged,
                             showingTodo = currentScreen == Screen.Todo,
@@ -2261,11 +2534,11 @@ class MainActivity : ComponentActivity() {
                     if (currentScreen == Screen.Pages && !localEditActive) showPages()
                     pushLocalStateAfterManualFirebasePull(pullResult, shared)
                 }
-			}.onFailure { error ->
-				runOnUiThread { setSyncError("Firebase sync failed: ${error.message}", transient = true) }
-			}
-		}.start()
-	}
+            }.onFailure { error ->
+                runOnUiThread { setSyncError("Firebase sync failed: ${error.message}", transient = true) }
+            }
+        }.start()
+    }
 
     private fun pushLocalStateAfterManualFirebasePull(
         pullResult: FirebasePullResult,
@@ -2278,7 +2551,7 @@ class MainActivity : ComponentActivity() {
                 return@Thread
             }
             runCatching {
-                firebaseSyncRepository.pushTodos(settings.firebase, todoRepository.load(), session)
+                pushAllTodoListsToFirebase(session)
                 val settingsPushed = firebaseSyncRepository.pushSharedSettings(settings.firebase, settings, session)
                 firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
                 settingsPushed
@@ -2287,16 +2560,16 @@ class MainActivity : ComponentActivity() {
                     val deferredNoteCount = pendingRemoteNotes.size
                     val sharedStatus = if (shared != null || settingsPushed) ", shared settings synced" else ""
                     val deferredStatus = if (deferredNoteCount > 0) ", $deferredNoteCount note(s) deferred for local edits" else ""
-					setSyncSuccess(
-						"Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
-						transient = true,
-					)
-				}
-			}.onFailure { error ->
-				runOnUiThread { setSyncError("Firebase sync failed: ${error.message}", transient = true) }
-			}
-		}.start()
-	}
+                    setSyncSuccess(
+                        "Firebase sync: ${pullResult.remoteTodoCount} todo(s), ${pullResult.remoteNoteCount} note(s)$sharedStatus$deferredStatus in ${settings.firebase.workspaceId}",
+                        transient = true,
+                    )
+                }
+            }.onFailure { error ->
+                runOnUiThread { setSyncError("Firebase sync failed: ${error.message}", transient = true) }
+            }
+        }.start()
+    }
 
     private fun replaceLocalFromFirebase() {
         if (!firebaseSyncRepository.configured(settings.firebase)) return
@@ -2311,18 +2584,17 @@ class MainActivity : ComponentActivity() {
                 return@Thread
             }
             runCatching {
-                val remoteTodos = firebaseSyncRepository.pullRemoteTodoStore(settings.firebase, session)
+                val todoSync = syncAllTodoListsWithFirebase(session, forceFull = true, replaceLocal = true)
                 val remoteNotes = firebaseSyncRepository.pullNotes(settings.firebase, session)
                 val shared = firebaseSyncRepository.pullSharedSettings(settings.firebase, session)
                 firebaseSyncRepository.deleteLegacyAssetsBestEffort(settings.firebase, session)
-                Pair(Pair(remoteTodos, remoteNotes), shared)
+                Pair(Pair(todoSync, remoteNotes), shared)
             }.onSuccess { result ->
                 runOnUiThread {
-                    val remoteTodos = result.first.first
+                    val todoSync = result.first.first
                     val remoteNotes = result.first.second
                     val shared = result.second
-                    todoRepository.save(remoteTodos)
-                    todoStore = remoteTodos
+                    applyTodoFirebaseSyncResult(todoSync)
                     notesRepository.clearAll()
                     shared?.let {
                         settings = SettingsRepository.applySharedSettings(settings, it.values)
@@ -2341,7 +2613,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (currentScreen == Screen.Pages) showPages()
                     setSyncSuccess(
-                        "Firebase replaced local data: ${remoteTodos.items.size} todo(s), ${remoteNotes.count { !it.deleted }} note(s)",
+                        "Firebase replaced local data: ${todoSync.pullResult.remoteTodoCount} todo(s), ${remoteNotes.count { !it.deleted }} note(s)",
                     )
                 }
             }.onFailure { error ->

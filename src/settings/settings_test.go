@@ -81,6 +81,19 @@ func TestNormalizeSettings(t *testing.T) {
 	}
 }
 
+func TestTodoSettingsNormalizeCurrentListAndSidebar(t *testing.T) {
+	cfg := &UserSettings{TodoApp: TodoAppSettings{CurrentListID: " Work_List ", SidebarVisible: true}}
+
+	normalizeSettings(cfg)
+
+	if cfg.TodoApp.CurrentListID != "work-list" {
+		t.Fatalf("CurrentListID = %q, want work-list", cfg.TodoApp.CurrentListID)
+	}
+	if !cfg.TodoApp.SidebarVisible {
+		t.Fatal("SidebarVisible = false, want true")
+	}
+}
+
 func TestNormalizeTabOrderRepairsUnknownDuplicatesAndMissing(t *testing.T) {
 	got := NormalizeTabOrder([]string{" sync ", "notes", "bogus", "sync", "todo"})
 	want := []string{"sync", "notes", "todo", "pages", "password", "settings"}

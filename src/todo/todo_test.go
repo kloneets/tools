@@ -2,6 +2,7 @@ package todo
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,6 +59,161 @@ func TestRepositoryToggleUnchecksDoneToActive(t *testing.T) {
 	item := got.Items[0]
 	if item.Status != StatusTodo || item.CheckedAt != nil || item.DoneAt != nil || item.ArchivedAt != nil {
 		t.Fatalf("item after toggle = %#v, want active unchecked todo", item)
+	}
+}
+
+func TestLoadListsMissingCatalogKeepsLegacyDefaultStoreWithoutRewrite(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	repo := NewRepositoryAt(filepath.Join(dir, "todos.json"))
+	repo.SetNowForTests(func() time.Time { return now })
+	if err := repo.Save(Store{Items: []Item{newItem("legacy", "legacy", now)}}); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, err := repo.LoadLists()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := repo.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(repo.ListsPath()); !os.IsNotExist(err) {
+		t.Fatalf("LoadLists rewrote catalog, stat err = %v", err)
+	}
+	if catalog.CurrentListID != DefaultListID || len(catalog.Lists) != 1 || catalog.Lists[0].ID != DefaultListID {
+		t.Fatalf("catalog = %#v, want only active default list", catalog)
+	}
+	if len(store.Items) != 1 || store.Items[0].ID != "legacy" {
+		t.Fatalf("default store = %#v, want legacy todos.json item", store.Items)
+	}
+}
+
+func TestRepositoryCreateRenameDeleteTodoListsWithTombstone(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	repo := NewRepositoryAt(filepath.Join(dir, "todos.json"))
+	repo.SetNowForTests(func() time.Time { return now })
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "11111111-1111-4111-8111-111111111111", nil })
+
+	catalog, meta, err := repo.CreateList(" Work ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ID == DefaultListID || meta.Name != "Work" || meta.Rev == 0 {
+		t.Fatalf("created list = %#v, want named UUID metadata", meta)
+	}
+	if catalog.CurrentListID != meta.ID || repo.CurrentListID() != meta.ID {
+		t.Fatalf("current list = catalog %q repo %q, want %q", catalog.CurrentListID, repo.CurrentListID(), meta.ID)
+	}
+	if !strings.Contains(filepath.ToSlash(repo.Path()), "todo-lists/"+meta.ID+".json") {
+		t.Fatalf("repo.Path() = %q, want named todo-lists path", repo.Path())
+	}
+	if _, _, err := repo.CreateList("work"); err == nil {
+		t.Fatal("CreateList duplicate case-insensitive name error = nil")
+	}
+
+	now = now.Add(time.Minute)
+	catalog, err = repo.RenameList(meta.ID, "Errands")
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed, ok := ListByID(catalog, meta.ID)
+	if !ok || renamed.Name != "Errands" || renamed.Rev <= meta.Rev {
+		t.Fatalf("renamed list = %#v ok=%t, want newer Errands metadata", renamed, ok)
+	}
+	if _, err := repo.RenameList(DefaultListID, "Inbox"); err != nil {
+		t.Fatalf("RenameList(default) error = %v, want allowed", err)
+	}
+	if _, err := repo.RenameList(meta.ID, "inbox"); err == nil {
+		t.Fatal("RenameList duplicate default name error = nil")
+	}
+
+	if _, _, err := repo.Add("named item"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(repo.Path()); err != nil {
+		t.Fatalf("named store missing before delete: %v", err)
+	}
+	catalog, err = repo.DeleteList(meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, ok := ListByID(catalog, meta.ID)
+	if !ok || !deleted.Deleted || deleted.DeletedAt == nil {
+		t.Fatalf("deleted metadata = %#v ok=%t, want tombstone", deleted, ok)
+	}
+	if active := ActiveLists(catalog); len(active) != 1 || active[0].ID != DefaultListID {
+		t.Fatalf("active lists = %#v, want only default", active)
+	}
+	if _, err := os.Stat(filepath.Join(dir, NamedListsDir, meta.ID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("named store stat err = %v, want deleted data file", err)
+	}
+}
+
+func TestNormalizeListsSortsDefaultFirstAndNamedAlphabetically(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	catalog := ListsStore{Lists: []ListMeta{
+		{ID: "b", Name: "Beta", CreatedAt: now, UpdatedAt: now},
+		{ID: "a", Name: "alpha", CreatedAt: now, UpdatedAt: now},
+	}}
+
+	NormalizeLists(&catalog, now)
+
+	got := []string{catalog.Lists[0].Name, catalog.Lists[1].Name, catalog.Lists[2].Name}
+	want := []string{DefaultListName, "alpha", "Beta"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("list order = %v, want %v", got, want)
+	}
+}
+
+func TestMergeListsRemoteDefaultRenameWinsAgainstFreshLocalCatalog(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	remoteUpdated := now.Add(-time.Hour)
+	remote := ListsStore{Lists: []ListMeta{{
+		ID:        DefaultListID,
+		Name:      "Inbox",
+		Rev:       revForTime(remoteUpdated),
+		CreatedAt: remoteUpdated,
+		UpdatedAt: remoteUpdated,
+	}}}
+
+	got := MergeLists(ListsStore{}, remote, now)
+
+	if got.Lists[0].Name != "Inbox" {
+		t.Fatalf("default list name = %q, want remote rename Inbox", got.Lists[0].Name)
+	}
+	if got.Lists[0].Rev != revForTime(remoteUpdated) {
+		t.Fatalf("default list rev = %d, want remote rev", got.Lists[0].Rev)
+	}
+}
+
+func TestMergeListsDeletionWinsWhenRevisionsTie(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	local := ListsStore{Lists: []ListMeta{{
+		ID:        "work",
+		Name:      "Work",
+		Rev:       42,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}}
+	remote := ListsStore{Lists: []ListMeta{{
+		ID:        "work",
+		Name:      "Work",
+		Rev:       42,
+		CreatedAt: now,
+		UpdatedAt: now.Add(-time.Minute),
+		Deleted:   true,
+		DeletedAt: ptr(now),
+	}}}
+
+	got := MergeLists(local, remote, now)
+
+	work, ok := ListByID(got, "work")
+	if !ok || !work.Deleted {
+		t.Fatalf("work metadata = %#v ok=%t, want deletion to win tied revision", work, ok)
 	}
 }
 

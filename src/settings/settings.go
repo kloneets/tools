@@ -18,6 +18,7 @@ import (
 type UserSettings struct {
 	PasswordApp PasswordAppSettings `json:"password_app"`
 	PagesApp    PagesAppSettings    `json:"pages_app"`
+	TodoApp     TodoAppSettings     `json:"todo_app,omitempty"`
 	NotesApp    NotesAppSettings    `json:"notes_app"`
 	AppWindow   AppWindowSettings   `json:"app_window"`
 	UI          *UISettings         `json:"ui"`
@@ -34,6 +35,11 @@ type PagesAppSettings struct {
 	FirstBookPages  int `json:"first_book"`
 	SecondBookPages int `json:"second_book"`
 	ReadPages       int `json:"read_pages"`
+}
+
+type TodoAppSettings struct {
+	CurrentListID  string `json:"current_list_id,omitempty"`
+	SidebarVisible bool   `json:"sidebar_visible,omitempty"`
 }
 
 type PasswordAppSettings struct {
@@ -383,6 +389,7 @@ func normalizeSettings(s *UserSettings) {
 	if s.AppWindow.Height <= 0 {
 		s.AppWindow.Height = 300
 	}
+	s.TodoApp.CurrentListID = normalizeTodoListID(s.TodoApp.CurrentListID)
 	if s.NotesApp.TabSpaces <= 0 {
 		s.NotesApp.TabSpaces = 4
 	}
@@ -425,6 +432,71 @@ func normalizeSettings(s *UserSettings) {
 	if s.NotesApp.TabSpaces == 4 && !s.NotesApp.VimMode && s.NotesApp.EditorWidth == 0 && !s.NotesApp.SidebarVisible {
 		s.NotesApp.SidebarVisible = true
 	}
+}
+
+func SaveTodoCurrentListID(id string) {
+	if settingsInstance == nil {
+		return
+	}
+	id = normalizeTodoListID(id)
+	if settingsInstance.TodoApp.CurrentListID == id {
+		return
+	}
+	settingsInstance.TodoApp.CurrentListID = id
+	writeSettingsToDisk(false)
+}
+
+func SaveTodoSidebarVisible(visible bool) {
+	if settingsInstance == nil {
+		return
+	}
+	if settingsInstance.TodoApp.SidebarVisible == visible {
+		return
+	}
+	settingsInstance.TodoApp.SidebarVisible = visible
+	writeSettingsToDisk(false)
+}
+
+func CurrentTodoListID() string {
+	if settingsInstance == nil {
+		return "default"
+	}
+	settingsInstance.TodoApp.CurrentListID = normalizeTodoListID(settingsInstance.TodoApp.CurrentListID)
+	return settingsInstance.TodoApp.CurrentListID
+}
+
+func TodoSidebarVisible() bool {
+	if settingsInstance == nil {
+		return false
+	}
+	return settingsInstance.TodoApp.SidebarVisible
+}
+
+func normalizeTodoListID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	id = strings.ReplaceAll(id, "_", "-")
+	if id == "" {
+		return "default"
+	}
+	var b strings.Builder
+	prevDash := false
+	for _, r := range id {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if valid {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	id = strings.Trim(b.String(), "-")
+	if id == "" {
+		return "default"
+	}
+	return id
 }
 
 func CurrentTheme() string {

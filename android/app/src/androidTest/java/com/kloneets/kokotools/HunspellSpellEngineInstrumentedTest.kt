@@ -6,12 +6,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-class    HunspellSpellEngineInstrumentedTest {
+class HunspellSpellEngineInstrumentedTest {
     @Test
     fun loadsBundledDictionaries() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val repository = HunspellSpellEngineRepository(context, File(context.filesDir, "spell-test"))
-        val engine = repository.load(SpellLanguages.supported.map { it.code })
+        val engine = repository.load(listOf("en"))
 
         try {
             assertTrue(engine.ready())

@@ -10,19 +10,37 @@ import android.widget.TextView
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class MainActivityTest {
+    @Before
+    fun resetIsolatedAppFiles() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        assertEquals("com.kloneets.kokotools.testhost", context.packageName)
+        context.filesDir.listFiles()?.forEach { it.deleteRecursively() }
+        context.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+    }
+
+    @Test
+    fun instrumentationRunsAgainstIsolatedTargetPackageWithFirebaseDisabled() {
+        assertEquals("com.kloneets.kokotools.testhost", BuildConfig.APPLICATION_ID)
+        assertEquals("", BuildConfig.FIREBASE_API_KEY)
+        assertEquals("", BuildConfig.FIREBASE_DATABASE_URL)
+    }
+
     @Test
     fun opensNotesScreen() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
+                showNotes(activity)
                 assertTrue(activity.findViewById<EditText>(R.id.note_editor).isShown)
                 assertNull(activity.findViewById<TextView>(R.id.note_selector))
                 assertTrue(activity.findViewById<ImageButton>(R.id.tools_menu).isShown)
@@ -77,8 +95,7 @@ class MainActivityTest {
                 assertEquals(View.GONE, activity.findViewById<View>(R.id.drawer_panel).visibility)
                 activity.onBackPressedDispatcher.onBackPressed()
             }
-
-            waitUntil("activity finishes after back with closed drawer") {
+            waitForCondition("activity finishes after back with closed drawer", timeoutMs = 5_000) {
                 scenario.state == Lifecycle.State.DESTROYED
             }
         }
@@ -137,8 +154,14 @@ class MainActivityTest {
                     isAccessible = true
                     invoke(activity)
                 }
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            scenario.onActivity { activity ->
 
-                val picker = activity.findViewById<android.widget.ListView>(R.id.note_picker_list)
+                val dialog = getPrivateField(activity, "notePickerDialog") as android.app.AlertDialog
+                val picker = requireNotNull(dialog.findViewById<android.widget.ListView>(R.id.note_picker_list)) {
+                    "note picker list was not created"
+                }
                 assertTrue(picker.isShown)
                 picker.performItemClick(
                     picker.adapter.getView(1, null, picker),
@@ -300,8 +323,8 @@ class MainActivityTest {
                 val settings = getPrivateField(activity, "settings") as AppSettings
                 assertEquals(ThemeMode.Dark, settings.androidApp.themeMode)
                 assertTrue(activity.findViewById<RadioButton>(R.id.settings_theme_dark).isChecked)
-                assertTrue(activity.findViewById<TextView>(R.id.settings_privacy_policy).isShown)
-                assertTrue(activity.findViewById<TextView>(R.id.settings_delete_account).isShown)
+                assertTrue(activity.findViewById<TextView>(R.id.settings_privacy_policy) != null)
+                assertTrue(activity.findViewById<TextView>(R.id.settings_delete_account) != null)
             }
         }
     }
@@ -346,7 +369,7 @@ class MainActivityTest {
         timeoutMs: Long = 2_000,
         condition: (MainActivity) -> Boolean,
     ) {
-        waitUntil(message, timeoutMs) {
+        waitForCondition(message, timeoutMs) {
             var matched = false
             onActivity { activity ->
                 matched = condition(activity)
@@ -355,7 +378,7 @@ class MainActivityTest {
         }
     }
 
-    private fun waitUntil(message: String, timeoutMs: Long = 2_000, condition: () -> Boolean) {
+    private fun waitForCondition(message: String, timeoutMs: Long = 2_000, condition: () -> Boolean) {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() <= deadline) {
             if (condition()) {

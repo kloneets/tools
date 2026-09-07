@@ -89,7 +89,8 @@ func TestSharedWorkspaceSettingsKeepsUILocal(t *testing.T) {
 			"open_note_paths":     []any{"private.md"},
 			"spell_check_enabled": true,
 		},
-		"ui": map[string]any{"theme": "gruvbox"},
+		"todo_app": map[string]any{"current_list_id": "work", "sidebar_visible": true},
+		"ui":       map[string]any{"theme": "gruvbox"},
 	})
 
 	if _, ok := got["pages_app"]; !ok {
@@ -111,12 +112,16 @@ func TestSharedWorkspaceSettingsKeepsUILocal(t *testing.T) {
 	if _, ok := got["ui"]; ok {
 		t.Fatal("ui should stay local")
 	}
+	if _, ok := got["todo_app"]; ok {
+		t.Fatal("todo_app should stay local")
+	}
 }
 
 func TestApplySharedWorkspaceSettingsPreservesNotesLocalOnlyState(t *testing.T) {
 	got := ApplySharedWorkspaceSettings(
 		map[string]any{
 			"pages_app": map[string]any{"first_book": 1},
+			"todo_app":  map[string]any{"current_list_id": "work", "sidebar_visible": true},
 			"notes_app": map[string]any{
 				"current_note_path": "local.md",
 				"preview_hidden":    false,
@@ -141,6 +146,10 @@ func TestApplySharedWorkspaceSettingsPreservesNotesLocalOnlyState(t *testing.T) 
 	}
 	if notes["spell_check_enabled"] != true {
 		t.Fatalf("spell_check_enabled = %v, want remote shared setting applied", notes["spell_check_enabled"])
+	}
+	todo := got["todo_app"].(map[string]any)
+	if todo["current_list_id"] != "work" || todo["sidebar_visible"] != true {
+		t.Fatalf("todo_app = %#v, want preserved local todo selection/sidebar", todo)
 	}
 	if _, ok := got["firebase"]; !ok {
 		t.Fatal("firebase config should stay local")

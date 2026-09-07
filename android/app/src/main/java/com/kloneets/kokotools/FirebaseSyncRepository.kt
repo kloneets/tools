@@ -88,6 +88,15 @@ internal data class FirebaseVersionedNote(
     }
 }
 
+internal data class FirebaseVersionedTodoListMeta(
+    val record: TodoListMeta?,
+    val etag: String,
+) {
+    init {
+        require(etag.isNotBlank()) { "Firebase todo list ETag is required" }
+    }
+}
+
 internal fun requireFirebaseNoteEtag(etag: String?): String {
     return etag?.takeIf { it.isNotBlank() }
         ?: throw IllegalStateException("Firebase note GET response did not include an ETag")
@@ -101,10 +110,7 @@ class FirebaseSyncRepository(private val context: Context) {
         get() = context.getSharedPreferences(SYNC_STATE_PREFERENCES, Context.MODE_PRIVATE)
 
     fun backendConfigured(settings: FirebaseSettings): Boolean {
-        return settings.enabled &&
-            settings.realtime &&
-            settings.apiKey.isNotBlank() &&
-            settings.databaseUrl.isNotBlank()
+        return backendConfigReady(settings)
     }
 
     fun configured(settings: FirebaseSettings): Boolean {
@@ -214,7 +220,13 @@ class FirebaseSyncRepository(private val context: Context) {
         }
     }
 
-    fun pushTodos(settings: FirebaseSettings, store: TodoStore, session: FirebaseSession) {
+    fun pushTodos(
+        settings: FirebaseSettings,
+        store: TodoStore,
+        session: FirebaseSession,
+        listId: String = TodoRepository.DEFAULT_LIST_ID,
+    ) {
+        val normalizedListId = normalizeTodoListIdForSync(listId)
         store.items.forEach { item ->
             val rev = item.updatedAt.toInstant().toEpochMilli()
             if (item.status == TodoRepository.STATUS_ARCHIVED) {
@@ -223,7 +235,7 @@ class FirebaseSyncRepository(private val context: Context) {
                     .put("rev", rev)
                     .put("updated_by", session.uid)
                     .put("deleted", true)
-                putDatabase(settings, "workspaces/${settings.workspaceId}/todos/${item.id}", record, session.idToken)
+                putDatabase(settings, todoRecordPath(settings.workspaceId, normalizedListId, item.id), record, session.idToken)
                 return@forEach
             }
             val record = JSONObject()
@@ -231,19 +243,21 @@ class FirebaseSyncRepository(private val context: Context) {
                 .put("rev", rev)
                 .put("updated_by", session.uid)
                 .put("deleted", false)
-            putDatabase(settings, "workspaces/${settings.workspaceId}/todos/${item.id}", record, session.idToken)
+            putDatabase(settings, todoRecordPath(settings.workspaceId, normalizedListId, item.id), record, session.idToken)
         }
         runCatching {
             putDatabaseBestEffort(
                 settings,
-                "workspaces/${settings.workspaceId}/todo_archive_months",
+                todoArchiveMonthsPath(settings.workspaceId, normalizedListId),
                 org.json.JSONArray().apply { TodoRepository.archiveMonths(store).forEach { put(it) } }.toString(),
                 session.idToken,
             )
         }
         val now = TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC))
-        writeSyncHashBestEffort(settings, SYNC_FEATURE_TODOS, todoStoreHash(store), now, session)
-        writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, todoArchiveMonthsHash(TodoRepository.archiveMonths(store)), now, session)
+        val todosFeature = todoFeature(normalizedListId)
+        val monthsFeature = todoArchiveMonthsFeature(normalizedListId)
+        writeSyncHashBestEffort(settings, todosFeature, todoStoreHash(store), now, session)
+        writeSyncHashBestEffort(settings, monthsFeature, todoArchiveMonthsHash(TodoRepository.archiveMonths(store)), now, session)
     }
 
     @Synchronized
@@ -283,57 +297,49 @@ class FirebaseSyncRepository(private val context: Context) {
         return parseRemoteNotes(remote)
     }
 
-    fun pullTodos(settings: FirebaseSettings, local: TodoStore, session: FirebaseSession, forceFull: Boolean = false): TodoStore {
+    fun pullTodos(
+        settings: FirebaseSettings,
+        local: TodoStore,
+        session: FirebaseSession,
+        forceFull: Boolean = false,
+        listId: String = TodoRepository.DEFAULT_LIST_ID,
+        replaceLocal: Boolean = false,
+    ): TodoStore {
+        val normalizedListId = normalizeTodoListIdForSync(listId)
         val hashes = syncHashes(settings, session)
-        val skipTodos = !forceFull && hashes[SYNC_FEATURE_TODOS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODOS, it) } == true
-        val skipMonths = !forceFull && hashes[SYNC_FEATURE_TODO_ARCHIVE_MONTHS]?.let { shouldSkipFeature(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, it) } == true
+        val todosFeature = todoFeature(normalizedListId)
+        val monthsFeature = todoArchiveMonthsFeature(normalizedListId)
+        val skipTodos = !forceFull && !replaceLocal && hashes[todosFeature]?.let { shouldSkipFeature(settings, todosFeature, it) } == true
+        val skipMonths = !forceFull && !replaceLocal && hashes[monthsFeature]?.let { shouldSkipFeature(settings, monthsFeature, it) } == true
         val remoteItems = if (skipTodos) emptyList() else {
-            pullRemoteTodos(settings, session)
+            pullRemoteTodos(settings, session, normalizedListId)
                 .filter { it.deleted || it.item.status != TodoRepository.STATUS_ARCHIVED }
         }
-        val remoteArchiveMonths = if (skipMonths) emptyList() else pullTodoArchiveMonths(settings, session)
-        val byId = if (forceFull && !skipTodos) {
-            mutableMapOf()
-        } else {
-            TodoRepository.nonArchivedStore(local).items.associateBy { it.id }.toMutableMap()
-        }
-        val localArchivedById = local.items
-            .filter { it.status == TodoRepository.STATUS_ARCHIVED }
-            .associateBy { it.id }
-        remoteItems.forEach { record ->
-            val item = record.item
-            if (record.deleted) {
-                byId.remove(item.id)
-                return@forEach
-            }
-            val archivedLocal = localArchivedById[item.id]
-            if (archivedLocal != null && !archivedLocal.updatedAt.isBefore(item.updatedAt)) {
-                return@forEach
-            }
-            val localItem = byId[item.id]
-            if (localItem == null || !item.updatedAt.isBefore(localItem.updatedAt)) {
-                byId[item.id] = item
-            }
-        }
-        val merged = TodoRepository.preserveArchived(local, local.copy(items = sortedTodos(byId.values)))
-        val normalized = TodoRepository.normalize(merged.copy(archiveMonths = merged.archiveMonths + remoteArchiveMonths))
+        val remoteArchiveMonths = if (skipMonths) emptyList() else pullTodoArchiveMonths(settings, session, normalizedListId)
+        val merged = mergeTodoRecords(local, remoteItems, replaceLocal = replaceLocal)
+        val archiveMonths = if (replaceLocal && !skipMonths) remoteArchiveMonths else merged.archiveMonths + remoteArchiveMonths
+        val normalized = TodoRepository.normalize(merged.copy(archiveMonths = archiveMonths))
         if (!skipTodos) {
             val hash = remoteTodoHash(remoteItems)
-            markFeaturePulled(settings, SYNC_FEATURE_TODOS, hash)
-            writeSyncHashBestEffort(settings, SYNC_FEATURE_TODOS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+            markFeaturePulled(settings, todosFeature, hash)
+            writeSyncHashBestEffort(settings, todosFeature, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
         }
         if (!skipMonths) {
             val hash = todoArchiveMonthsHash(remoteArchiveMonths)
-            markFeaturePulled(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, hash)
-            writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_ARCHIVE_MONTHS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+            markFeaturePulled(settings, monthsFeature, hash)
+            writeSyncHashBestEffort(settings, monthsFeature, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
         }
         return normalized
     }
 
-    fun pullRemoteTodoStore(settings: FirebaseSettings, session: FirebaseSession): TodoStore {
+    fun pullRemoteTodoStore(
+        settings: FirebaseSettings,
+        session: FirebaseSession,
+        listId: String = TodoRepository.DEFAULT_LIST_ID,
+    ): TodoStore {
         return TodoStore(
             items = sortedTodos(
-                pullRemoteTodos(settings, session)
+                pullRemoteTodos(settings, session, listId)
                     .filterNot { it.deleted }
                     .map { it.item }
                     .filter { it.status != TodoRepository.STATUS_ARCHIVED },
@@ -341,12 +347,18 @@ class FirebaseSyncRepository(private val context: Context) {
         )
     }
 
-    fun pullTodoArchiveMonth(settings: FirebaseSettings, month: String, session: FirebaseSession): List<TodoItem> {
-        val feature = "$SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX$month"
+    fun pullTodoArchiveMonth(
+        settings: FirebaseSettings,
+        month: String,
+        session: FirebaseSession,
+        listId: String = TodoRepository.DEFAULT_LIST_ID,
+    ): List<TodoItem> {
+        val normalizedListId = normalizeTodoListIdForSync(listId)
+        val feature = todoArchiveMonthFeature(normalizedListId, month)
         syncHashes(settings, session)[feature]?.let { remote ->
             if (shouldSkipFeature(settings, feature, remote)) return emptyList()
         }
-        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todo_archives/$month", session.idToken)
+        val remote = getDatabase(settings, todoArchiveMonthPath(settings.workspaceId, normalizedListId, month), session.idToken)
         val records = mutableListOf<TodoItem>()
         if (remote != null) {
             remote.keys().forEach { id ->
@@ -369,12 +381,80 @@ class FirebaseSyncRepository(private val context: Context) {
         return sorted
     }
 
-    fun pullTodoArchiveMonths(settings: FirebaseSettings, session: FirebaseSession): List<String> {
-        val response = request("GET", databaseUrl(settings, "workspaces/${settings.workspaceId}/todo_archive_months", session.idToken), null, null)
+    fun pullTodoArchiveMonths(
+        settings: FirebaseSettings,
+        session: FirebaseSession,
+        listId: String = TodoRepository.DEFAULT_LIST_ID,
+    ): List<String> {
+        val response = request("GET", databaseUrl(settings, todoArchiveMonthsPath(settings.workspaceId, normalizeTodoListIdForSync(listId)), session.idToken), null, null)
         if (response.isBlank() || response == "null") return emptyList()
         val values = org.json.JSONArray(response)
         return (0 until values.length()).mapNotNull { index ->
             values.optString(index).takeIf { it.isNotBlank() }
+        }
+    }
+
+    fun pullTodoLists(settings: FirebaseSettings, session: FirebaseSession): TodoListsStore {
+        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todo_lists", session.idToken)
+        val lists = mutableListOf<TodoListMeta>()
+        remote?.keys()?.forEach { fallbackId ->
+            val meta = remote.optJSONObject(fallbackId)?.optJSONObject("meta") ?: return@forEach
+            val parsed = TodoRepository.parseListMeta(meta)
+            lists += if (parsed.id.isBlank()) parsed.copy(id = fallbackId) else parsed
+        }
+        val catalog = TodoRepository.normalizeLists(TodoListsStore(lists = lists))
+        val now = TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC))
+        val hash = todoListsHash(catalog)
+        markFeaturePulled(settings, SYNC_FEATURE_TODO_LISTS, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_LISTS, hash, now, session)
+        return catalog
+    }
+
+    fun pushTodoLists(settings: FirebaseSettings, catalog: TodoListsStore, session: FirebaseSession): Boolean {
+        val normalized = TodoRepository.normalizeLists(catalog)
+        var stale = false
+        normalized.lists.forEach { meta ->
+            val wrote = putTodoListMetaIfCurrent(settings, meta, session)
+            if (!wrote) {
+                stale = true
+                return@forEach
+            }
+            if (meta.deleted && meta.id != TodoRepository.DEFAULT_LIST_ID) {
+                deleteTodoListDataBestEffort(settings, meta.id, session)
+            }
+        }
+        if (stale) return false
+        val hash = todoListsHash(normalized)
+        markFeaturePulled(settings, SYNC_FEATURE_TODO_LISTS, hash)
+        writeSyncHashBestEffort(settings, SYNC_FEATURE_TODO_LISTS, hash, TodoRepository.formatTime(OffsetDateTime.now(ZoneOffset.UTC)), session)
+        return true
+    }
+
+    fun deleteTodoListDataBestEffort(settings: FirebaseSettings, listId: String, session: FirebaseSession) {
+        val normalizedListId = normalizeTodoListIdForSync(listId)
+        if (normalizedListId == TodoRepository.DEFAULT_LIST_ID) return
+        listOf("todos", "archive_months", "archives").forEach { child ->
+            runCatching {
+                request("DELETE", databaseUrl(settings, todoListChildPath(settings.workspaceId, normalizedListId, child), session.idToken), null, null)
+            }
+        }
+    }
+
+    private fun putTodoListMetaIfCurrent(
+        settings: FirebaseSettings,
+        meta: TodoListMeta,
+        session: FirebaseSession,
+    ): Boolean {
+        val path = todoListMetaPath(settings.workspaceId, meta.id)
+        val versioned = getVersionedTodoListMeta(settings, path, session.idToken)
+        if (versioned.record != null && !shouldWriteTodoListMeta(meta, versioned.record)) {
+            return false
+        }
+        return runCatching {
+            putDatabaseIfMatch(settings, path, TodoRepository.listMetaJson(meta), session.idToken, versioned.etag)
+            true
+        }.getOrElse { error ->
+            if (isFirebasePreconditionFailure(error)) false else throw error
         }
     }
 
@@ -431,8 +511,12 @@ class FirebaseSyncRepository(private val context: Context) {
         }
     }
 
-    private fun pullRemoteTodos(settings: FirebaseSettings, session: FirebaseSession): List<FirebaseRemoteTodo> {
-        val remote = getDatabase(settings, "workspaces/${settings.workspaceId}/todos", session.idToken)
+    private fun pullRemoteTodos(
+        settings: FirebaseSettings,
+        session: FirebaseSession,
+        listId: String = TodoRepository.DEFAULT_LIST_ID,
+    ): List<FirebaseRemoteTodo> {
+        val remote = getDatabase(settings, todoTodosPath(settings.workspaceId, normalizeTodoListIdForSync(listId)), session.idToken)
         val records = mutableListOf<FirebaseRemoteTodo>()
         if (remote != null) {
             remote.keys().forEach { id ->
@@ -509,6 +593,28 @@ class FirebaseSyncRepository(private val context: Context) {
         return FirebaseVersionedNote(record = record, etag = requireFirebaseNoteEtag(response.etag))
     }
 
+    private fun getVersionedTodoListMeta(
+        settings: FirebaseSettings,
+        path: String,
+        idToken: String,
+    ): FirebaseVersionedTodoListMeta {
+        val response = runCatching {
+            requestWithMetadata(
+                method = "GET",
+                url = databaseUrl(settings, path, idToken),
+                body = null,
+                contentType = null,
+                headers = mapOf("X-Firebase-ETag" to "true"),
+            )
+        }.getOrElse { error ->
+            throw IllegalStateException("Firebase GET $path failed: ${error.message}", error)
+        }
+        val record = response.body
+            .takeUnless { it.isBlank() || it == "null" }
+            ?.let { TodoRepository.parseListMeta(JSONObject(it)) }
+        return FirebaseVersionedTodoListMeta(record = record, etag = requireFirebaseNoteEtag(response.etag))
+    }
+
     private fun putDatabaseIfMatch(
         settings: FirebaseSettings,
         path: String,
@@ -527,6 +633,11 @@ class FirebaseSyncRepository(private val context: Context) {
         }.getOrElse { error ->
             throw IllegalStateException("Firebase conditional PUT $path failed: ${error.message}", error)
         }
+    }
+
+    private fun isFirebasePreconditionFailure(error: Throwable): Boolean {
+        return error.message?.contains("412") == true ||
+            error.message?.contains("Precondition Failed", ignoreCase = true) == true
     }
 
     private fun getDatabase(settings: FirebaseSettings, path: String, idToken: String): JSONObject? {
@@ -638,7 +749,9 @@ class FirebaseSyncRepository(private val context: Context) {
     private data class FirebaseHttpResponse(val body: String, val etag: String?)
 
     private fun databaseUrl(settings: FirebaseSettings, path: String, idToken: String): String {
-        return settings.databaseUrl.trimEnd('/') + "/" + path.trim('/') + ".json?auth=${encode(idToken)}"
+        val baseUrl = settings.databaseUrl.trim()
+        require(FirebaseConfigValidator.validDatabaseUrl(baseUrl)) { "Firebase database_url must be an absolute https URL with a host" }
+        return baseUrl.trimEnd('/') + "/" + path.trim('/') + ".json?auth=${encode(idToken)}"
     }
 
     private fun encode(value: String): String {
@@ -659,11 +772,62 @@ class FirebaseSyncRepository(private val context: Context) {
         private const val SYNC_STATE_PREFERENCES = "firebase_sync_state"
         private const val SYNC_FEATURE_TODOS = "todos"
         private const val SYNC_FEATURE_TODO_ARCHIVE_MONTHS = "todo_archive_months"
+        private const val SYNC_FEATURE_TODO_LISTS = "todo_lists"
         private const val SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX = "todo_archive_month:"
         private const val SYNC_FEATURE_SETTINGS = "settings"
         private const val SYNC_HASH_FULL_VALIDATION_MS = 24L * 60L * 60L * 1000L
 
         fun personalWorkspaceId(uid: String): String = "user_$uid"
+
+        fun backendConfigReady(settings: FirebaseSettings): Boolean {
+            return settings.enabled &&
+                settings.realtime &&
+                settings.apiKey.isNotBlank() &&
+                FirebaseConfigValidator.validDatabaseUrl(settings.databaseUrl)
+        }
+
+        fun mergeTodoRecords(
+            local: TodoStore,
+            remoteItems: List<FirebaseRemoteTodo>,
+            replaceLocal: Boolean = false,
+        ): TodoStore {
+            val byId = if (replaceLocal) {
+                mutableMapOf()
+            } else {
+                TodoRepository.nonArchivedStore(local).items.associateBy { it.id }.toMutableMap()
+            }
+            val localArchivedById = if (replaceLocal) {
+                emptyMap()
+            } else {
+                local.items
+                    .filter { it.status == TodoRepository.STATUS_ARCHIVED }
+                    .associateBy { it.id }
+            }
+            remoteItems.forEach { record ->
+                val item = record.item
+                if (record.deleted) {
+                    byId.remove(item.id)
+                    return@forEach
+                }
+                val archivedLocal = localArchivedById[item.id]
+                if (archivedLocal != null && !archivedLocal.updatedAt.isBefore(item.updatedAt)) {
+                    return@forEach
+                }
+                val localItem = byId[item.id]
+                if (localItem == null || !item.updatedAt.isBefore(localItem.updatedAt)) {
+                    byId[item.id] = item
+                }
+            }
+            val merged = local.copy(
+                items = byId.values.sortedWith(compareBy<TodoItem> { it.status }.thenBy { it.order }.thenBy { it.createdAt }),
+                archiveMonths = if (replaceLocal) emptyList() else local.archiveMonths,
+            )
+            return if (replaceLocal) {
+                TodoRepository.normalize(merged)
+            } else {
+                TodoRepository.preserveArchived(local, merged)
+            }
+        }
 
         fun googleSignInPostBody(googleIdToken: String): String {
             return "id_token=${encodeQueryComponent(googleIdToken)}&providerId=${encodeQueryComponent("google.com")}"
@@ -676,6 +840,56 @@ class FirebaseSyncRepository(private val context: Context) {
 
         fun todoArchiveMonthsHash(months: List<String>): String {
             return sha256String(org.json.JSONArray().apply { months.sorted().forEach { put(it) } }.toString())
+        }
+
+        fun todoFeature(listId: String): String {
+            val normalized = normalizeTodoListIdForSync(listId)
+            return if (normalized == TodoRepository.DEFAULT_LIST_ID) {
+                SYNC_FEATURE_TODOS
+            } else {
+                "todo_list:$normalized:todos"
+            }
+        }
+
+        fun todoArchiveMonthsFeature(listId: String): String {
+            val normalized = normalizeTodoListIdForSync(listId)
+            return if (normalized == TodoRepository.DEFAULT_LIST_ID) {
+                SYNC_FEATURE_TODO_ARCHIVE_MONTHS
+            } else {
+                "todo_list:$normalized:todo_archive_months"
+            }
+        }
+
+        fun todoArchiveMonthFeature(listId: String, month: String): String {
+            val normalized = normalizeTodoListIdForSync(listId)
+            val normalizedMonth = month.trim()
+            return if (normalized == TodoRepository.DEFAULT_LIST_ID) {
+                "$SYNC_FEATURE_TODO_ARCHIVE_MONTH_PREFIX$normalizedMonth"
+            } else {
+                "todo_list:$normalized:todo_archive_month:$normalizedMonth"
+            }
+        }
+
+        fun todoListsHash(catalog: TodoListsStore): String {
+            val normalized = TodoRepository.normalizeLists(catalog)
+            val values = normalized.lists.sortedBy { it.id }.joinToString(separator = ",", prefix = "[", postfix = "]") { meta ->
+                """{"id":${JSONObject.quote(meta.id)},"name":${JSONObject.quote(meta.name)},"rev":${meta.rev},"deleted":${meta.deleted}}"""
+            }
+            return sha256String(values)
+        }
+
+        fun shouldWriteTodoListMeta(candidate: TodoListMeta, remote: TodoListMeta?): Boolean {
+            if (remote == null) return true
+            val candidateRev = todoListMetaRevision(candidate)
+            val remoteRev = todoListMetaRevision(remote)
+            if (remoteRev <= 0L) return true
+            if (candidateRev != remoteRev) return candidateRev > remoteRev
+            if (candidate.deleted != remote.deleted) return candidate.deleted
+            return candidate.name == remote.name && candidate.deleted == remote.deleted
+        }
+
+        private fun todoListMetaRevision(meta: TodoListMeta): Long {
+            return meta.rev.takeIf { it > 0L } ?: meta.updatedAt.toInstant().toEpochMilli()
         }
 
         fun todoStoreHash(store: TodoStore): String {
@@ -746,6 +960,51 @@ class FirebaseSyncRepository(private val context: Context) {
         private fun sha256String(value: String): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
             return digest.joinToString("") { "%02x".format(it) }
+        }
+
+        fun todoTodosPath(workspaceId: String, listId: String): String {
+            val normalized = normalizeTodoListIdForSync(listId)
+            return if (normalized == TodoRepository.DEFAULT_LIST_ID) {
+                "workspaces/$workspaceId/todos"
+            } else {
+                todoListChildPath(workspaceId, normalized, "todos")
+            }
+        }
+
+        fun todoRecordPath(workspaceId: String, listId: String, todoId: String): String {
+            return "${todoTodosPath(workspaceId, listId)}/$todoId"
+        }
+
+        fun todoArchiveMonthsPath(workspaceId: String, listId: String): String {
+            val normalized = normalizeTodoListIdForSync(listId)
+            return if (normalized == TodoRepository.DEFAULT_LIST_ID) {
+                "workspaces/$workspaceId/todo_archive_months"
+            } else {
+                todoListChildPath(workspaceId, normalized, "archive_months")
+            }
+        }
+
+        fun todoArchiveMonthPath(workspaceId: String, listId: String, month: String): String {
+            val normalized = normalizeTodoListIdForSync(listId)
+            return if (normalized == TodoRepository.DEFAULT_LIST_ID) {
+                "workspaces/$workspaceId/todo_archives/${month.trim()}"
+            } else {
+                todoListChildPath(workspaceId, normalized, "archives/${month.trim()}")
+            }
+        }
+
+        fun todoListMetaPath(workspaceId: String, listId: String): String {
+            return todoListChildPath(workspaceId, normalizeTodoListIdForSync(listId), "meta")
+        }
+
+        fun todoListChildPath(workspaceId: String, listId: String, child: String): String {
+            val suffix = child.trim('/')
+            val base = "workspaces/$workspaceId/todo_lists/${normalizeTodoListIdForSync(listId)}"
+            return if (suffix.isBlank()) base else "$base/$suffix"
+        }
+
+        fun normalizeTodoListIdForSync(listId: String): String {
+            return TodoRepository.normalizeCurrentListId(listId)
         }
 
     }

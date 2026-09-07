@@ -22,6 +22,7 @@ import (
 	"github.com/kloneets/tools/src/settings"
 	kokosync "github.com/kloneets/tools/src/sync"
 	"github.com/kloneets/tools/src/todo"
+	"github.com/mattn/go-runewidth"
 	"github.com/rivo/tview"
 )
 
@@ -112,26 +113,26 @@ func TestApplyPulledNotesBacksUpRemoteDelete(t *testing.T) {
 
 func TestHelpTextForSettings(t *testing.T) {
 	app := &terminalApp{view: viewSettings}
-	got := app.helpText()
+	got := app.currentHelpLine()
 	if !strings.Contains(got, "enter change option") {
-		t.Fatalf("helpText() = %q, want settings instructions", got)
+		t.Fatalf("currentHelpLine() = %q, want settings instructions", got)
 	}
 }
 
 func TestHelpTextForSettingsEditMode(t *testing.T) {
 	app := &terminalApp{view: viewSettings, settingsEditMode: true}
-	got := app.helpText()
+	got := app.currentHelpLine()
 	if !strings.Contains(got, "digits edit") {
-		t.Fatalf("helpText() = %q, want numeric edit instructions", got)
+		t.Fatalf("currentHelpLine() = %q, want numeric edit instructions", got)
 	}
 }
 
 func TestHelpTextForPagesEditMode(t *testing.T) {
 	app := &terminalApp{view: viewPages, pages: &pages.Model{Editing: true}}
-	got := app.helpText()
+	got := app.currentHelpLine()
 	for _, want := range []string{"tab/shift+tab field", "left/right cursor", "enter apply"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("helpText() = %q, want %q", got, want)
+			t.Fatalf("currentHelpLine() = %q, want %q", got, want)
 		}
 	}
 }
@@ -1063,6 +1064,9 @@ func TestRenderTodoShowsSections(t *testing.T) {
 	if strings.Contains(got, "~old~") {
 		t.Fatalf("renderTodo() = %q, should hide archived item text before month is opened", got)
 	}
+	if strings.Contains(got, "ctrl+a lists/tasks") {
+		t.Fatalf("renderTodo() = %q, want todo shortcuts moved to bottom help line", got)
+	}
 }
 
 func TestRenderTodoShowsExpandedArchiveMonthFromLocalCache(t *testing.T) {
@@ -1108,6 +1112,74 @@ func TestHandleGlobalKeyTodoArchiveMonthExpandsLocalCacheWithoutFirebase(t *test
 	}
 	if !app.todoArchiveExpanded["2026-05"] {
 		t.Fatal("todoArchiveExpanded[2026-05] = false, want true")
+	}
+}
+
+func TestPullTodoArchiveMonthUsesCapturedListStore(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	archivedAt := now
+	dir := t.TempDir()
+	repo := todo.NewRepositoryAt(filepath.Join(dir, "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	defaultStore := todo.Store{Items: []todo.Item{
+		{ID: "default-active", Text: "default", Status: todo.StatusTodo, CreatedAt: now, UpdatedAt: now},
+	}}
+	if err := repo.SaveList(todo.DefaultListID, defaultStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repo.CreateList("Work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	provider := &archivePullProviderForTest{
+		records: map[string]map[string]map[string]kokosync.TodoRecord{
+			"work": {
+				"2026-05": {
+					"remote-old": {Item: todo.Item{ID: "remote-old", Text: "remote", Status: todo.StatusArchived, CreatedAt: now, UpdatedAt: now, ArchivedAt: &archivedAt}},
+				},
+			},
+		},
+	}
+	session := kokosync.Session{IDToken: "token", UID: "uid", ExpiresAt: time.Now().Add(time.Hour)}
+	app := &terminalApp{
+		view:                   viewTodo,
+		todos:                  repo,
+		todoStore:              defaultStore,
+		firebaseTodoSyncer:     &kokosync.TodoSyncer{Provider: provider, WorkspaceID: "ws", StatePath: filepath.Join(t.TempDir(), "state.json"), Session: session},
+		firebaseNoteSyncer:     &kokosync.NoteSyncer{Provider: provider, WorkspaceID: "ws", Session: session},
+		firebaseSettingsSyncer: &kokosync.SettingsSyncer{Provider: provider, WorkspaceID: "ws", Session: session},
+	}
+
+	if err := app.pullTodoArchiveMonthFromFirebaseForList(context.Background(), "work", "2026-05"); err != nil {
+		t.Fatalf("pullTodoArchiveMonthFromFirebaseForList() error = %v", err)
+	}
+
+	defaultAfter, err := repo.LoadList(todo.DefaultListID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workAfter, err := repo.LoadList("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.pulledListID != "work" {
+		t.Fatalf("pulled list id = %q, want work", provider.pulledListID)
+	}
+	if len(todo.ArchiveGroups(defaultAfter)["2026-05"]) != 0 {
+		t.Fatalf("default archive = %#v, want untouched", todo.ArchiveGroups(defaultAfter)["2026-05"])
+	}
+	if items := todo.ArchiveGroups(workAfter)["2026-05"]; len(items) != 1 || items[0].ID != "remote-old" {
+		t.Fatalf("work archive = %#v, want remote-old", items)
+	}
+	if repo.CurrentListID() != todo.DefaultListID {
+		t.Fatalf("current list = %q, want default", repo.CurrentListID())
+	}
+	if len(todo.ArchiveGroups(app.todoStore)["2026-05"]) != 0 {
+		t.Fatalf("visible todoStore archive = %#v, want untouched default store", todo.ArchiveGroups(app.todoStore)["2026-05"])
 	}
 }
 
@@ -1194,17 +1266,30 @@ func TestHandleGlobalKeyTodoMoveSection(t *testing.T) {
 	}
 }
 
-func TestTodoInputCursorPointsToEditBufferEnd(t *testing.T) {
-	app := &terminalApp{view: viewTodo, todoInputMode: "edit", todoInputBuffer: "alpha"}
-	app.todoInputCursorOffset = len([]rune(app.todoInputBuffer))
-
-	row, col := app.todoInputCursor()
-
-	if row != 2 {
-		t.Fatalf("row = %d, want 2", row)
+func TestTodoInputCursorPointsToRenderedBufferEnd(t *testing.T) {
+	tests := []struct {
+		mode   string
+		prefix string
+	}{
+		{mode: "new", prefix: "new: "},
+		{mode: "edit", prefix: "edit: "},
+		{mode: "new-list", prefix: "new list: "},
+		{mode: "rename-list", prefix: "rename list: "},
 	}
-	if col != len([]rune("edit: alpha")) {
-		t.Fatalf("col = %d, want edit buffer end", col)
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			app := &terminalApp{view: viewTodo, todoInputMode: tt.mode, todoInputBuffer: "alpha"}
+			app.todoInputCursorOffset = len([]rune(app.todoInputBuffer))
+
+			row, col := app.todoInputCursor()
+
+			if row != 1 {
+				t.Fatalf("row = %d, want rendered input row 1", row)
+			}
+			if want := len([]rune(tt.prefix + app.todoInputBuffer)); col != want {
+				t.Fatalf("col = %d, want rendered buffer end %d", col, want)
+			}
+		})
 	}
 }
 
@@ -1260,6 +1345,162 @@ func TestTodoInputCursorMovesAndDeletesInEditTodo(t *testing.T) {
 
 	if got := todo.ActiveItems(app.todoStore); len(got) != 1 || got[0].Text != "abcd" {
 		t.Fatalf("active todos = %#v, want abcd", got)
+	}
+}
+
+func TestHandleGlobalKeyTodoCtrlAShowsThenHidesListSidebar(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	app := &terminalApp{view: viewTodo, todos: repo}
+
+	if !app.handleGlobalKey(notes.Key{Name: "a", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+a) = false, want true")
+	}
+	if !settings.TodoSidebarVisible() || !app.todoListFocus {
+		t.Fatalf("todo sidebar visible/focus = %t/%t, want true/true", settings.TodoSidebarVisible(), app.todoListFocus)
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "a", Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+a second) = false, want true")
+	}
+	if settings.TodoSidebarVisible() || app.todoListFocus {
+		t.Fatalf("todo sidebar visible/focus = %t/%t, want false/false", settings.TodoSidebarVisible(), app.todoListFocus)
+	}
+}
+
+func TestTodoListMouseClickOpensVisibleList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	catalog, _, err := repo.CreateList("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog, err = repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	settings.SaveTodoSidebarVisible(true)
+	sidebar := tview.NewTextView()
+	sidebar.SetBorder(true)
+	sidebar.SetRect(0, 0, 24, 6)
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog, sidebar: sidebar}
+	sx, sy, _, _ := sidebar.GetInnerRect()
+
+	if !app.handleTodoListMouse(tcell.NewEventMouse(sx, sy+1, tcell.Button1, 0), tview.MouseLeftClick) {
+		t.Fatal("todo list click was not consumed")
+	}
+	if got := repo.CurrentListID(); got != "work" {
+		t.Fatalf("CurrentListID() = %q, want work", got)
+	}
+	if !app.todoListFocus || app.todoListIndex != 1 {
+		t.Fatalf("todo list focus/index = %t/%d, want true/1", app.todoListFocus, app.todoListIndex)
+	}
+}
+
+func TestTodoListSidebarCursorUsesScrolledVisibleRow(t *testing.T) {
+	catalog := todo.ListsStore{Lists: []todo.ListMeta{
+		{ID: todo.DefaultListID, Name: todo.DefaultListName},
+		{ID: "a", Name: "A"},
+		{ID: "b", Name: "B"},
+		{ID: "c", Name: "C"},
+		{ID: "d", Name: "D"},
+		{ID: "e", Name: "E"},
+	}}
+	app := &terminalApp{view: viewTodo, todoLists: catalog, todoListIndex: 5, todoListFocus: true}
+
+	row, ok := app.todoListSidebarCursorRow(3)
+
+	if !ok || row != 2 {
+		t.Fatalf("todoListSidebarCursorRow(3) = %d, %t; want visible row 2", row, ok)
+	}
+}
+
+func TestHandleGlobalKeyTodoSidebarCreatesAndSelectsList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work-list", nil })
+	catalog, err := repo.LoadLists()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog}
+
+	for _, key := range []notes.Key{
+		{Name: "a", Ctrl: true},
+		{Name: "n", Rune: 'n'},
+		{Name: "W", Rune: 'W'},
+		{Name: "o", Rune: 'o'},
+		{Name: "r", Rune: 'r'},
+		{Name: "k", Rune: 'k'},
+		{Name: "enter"},
+	} {
+		if !app.handleGlobalKey(key) {
+			t.Fatalf("handleGlobalKey(%#v) = false, want true", key)
+		}
+	}
+
+	if got := repo.CurrentListID(); got != "work-list" {
+		t.Fatalf("CurrentListID() = %q, want work-list", got)
+	}
+	if got := settings.CurrentTodoListID(); got != "work-list" {
+		t.Fatalf("CurrentTodoListID() = %q, want work-list", got)
+	}
+	if list, ok := app.currentTodoList(); !ok || list.Name != "Work" {
+		t.Fatalf("currentTodoList() = %#v, %t; want Work", list, ok)
+	}
+}
+
+func TestHandleGlobalKeyTodoSidebarEnterOpensSelectedList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	if _, _, err := repo.CreateList("Work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := repo.LoadLists()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog, todoListIndex: 1, todoListFocus: true}
+	settings.SaveTodoSidebarVisible(true)
+
+	if !app.handleGlobalKey(notes.Key{Name: "enter"}) {
+		t.Fatal("handleGlobalKey(enter) = false, want true")
+	}
+	if got := repo.CurrentListID(); got != "work" {
+		t.Fatalf("CurrentListID() = %q, want work", got)
+	}
+}
+
+func TestTodoSidebarDeleteShowsConfirmationForNamedList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	_, meta, err := repo.CreateList("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &terminalApp{view: viewTodo, todos: repo}
+	app.initWidgets()
+	app.todoLists, err = repo.LoadLists()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app.showDeleteTodoListModal(meta)
+
+	if app.deleteTodoListID != "work" || app.deleteTodoListLabel != "Work" {
+		t.Fatalf("delete target id=%q label=%q, want Work list", app.deleteTodoListID, app.deleteTodoListLabel)
+	}
+	if front, _ := app.pagesRoot.GetFrontPage(); front != "delete-todo-list" {
+		t.Fatalf("front page = %q, want delete-todo-list", front)
 	}
 }
 
@@ -1350,6 +1591,17 @@ func TestRenderPagesHighlightsSelectedEditValue(t *testing.T) {
 	got := app.renderPages(6)
 	if !strings.Contains(got, helpers.ANSIRoleSelection+"100") {
 		t.Fatalf("renderPages() = %q, want selected first book value highlighted", got)
+	}
+	if strings.Contains(got, "j/k move | e/enter edit") {
+		t.Fatalf("renderPages() = %q, want page shortcuts moved to bottom help line", got)
+	}
+}
+
+func TestRenderPasswordOmitsInlineShortcutRow(t *testing.T) {
+	app := &terminalApp{password: password.NewModel()}
+	got := app.renderPassword(8)
+	if strings.Contains(got, "g generate | l letters | n numbers | s symbols | +/- length") {
+		t.Fatalf("renderPassword() = %q, want password shortcuts moved to bottom help line", got)
 	}
 }
 
@@ -1644,6 +1896,323 @@ func TestTodoMouseClickDoesNotCopy(t *testing.T) {
 	}
 }
 
+func TestTodoMouseDownUpSelectsInlineTodoListLabel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	catalog, _, err := repo.CreateList("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog, err = repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	single := tview.NewTextView()
+	single.SetBorder(true)
+	single.SetRect(0, 0, 80, 20)
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog, single: single, todoListFocus: true}
+	app.singleLinkText = helpers.StripANSI(app.renderTodo(18))
+	var defaultRegion todoListClickRegion
+	var workRegion todoListClickRegion
+	foundDefault := false
+	foundWork := false
+	for _, region := range app.todoListClickRegions {
+		switch region.id {
+		case todo.DefaultListID:
+			defaultRegion = region
+			foundDefault = true
+		case "work":
+			workRegion = region
+			foundWork = true
+		}
+	}
+	if !foundDefault || !foundWork {
+		t.Fatalf("inline list click regions = %#v, want default and Work", app.todoListClickRegions)
+	}
+
+	sx, sy, _, _ := single.GetInnerRect()
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+defaultRegion.start, sy+defaultRegion.row, tcell.Button1, 0), tview.MouseLeftDown) {
+		t.Fatal("current inline todo list label mouse-down was not consumed")
+	}
+	if !app.todoSelection.selecting {
+		t.Fatal("current inline todo list label mouse-down did not start normal text selection")
+	}
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+defaultRegion.start, sy+defaultRegion.row, tcell.Button1, 0), tview.MouseLeftUp) {
+		t.Fatal("current inline todo list label mouse-up was not consumed")
+	}
+	if got := repo.CurrentListID(); got != todo.DefaultListID {
+		t.Fatalf("CurrentListID() after default click = %q, want default", got)
+	}
+	app.todoListFocus = true
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+workRegion.start, sy+workRegion.row, tcell.Button1, 0), tview.MouseLeftDown) {
+		t.Fatal("inline todo list label mouse-down was not consumed")
+	}
+	if got := repo.CurrentListID(); got != todo.DefaultListID {
+		t.Fatalf("CurrentListID() after work mouse-down = %q, want default until mouse-up", got)
+	}
+	if !app.todoSelection.selecting {
+		t.Fatal("inline todo list label mouse-down did not start normal text selection")
+	}
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+workRegion.start, sy+workRegion.row, tcell.Button1, 0), tview.MouseLeftUp) {
+		t.Fatal("inline todo list label mouse-up was not consumed")
+	}
+	if got := repo.CurrentListID(); got != "work" {
+		t.Fatalf("CurrentListID() after work mouse-up = %q, want work", got)
+	}
+	if got := settings.CurrentTodoListID(); got != "work" {
+		t.Fatalf("CurrentTodoListID() = %q, want work", got)
+	}
+	if app.todoListFocus {
+		t.Fatal("todo list sidebar focus remained active after clicking inline list label")
+	}
+	if app.todoListIndex != 1 {
+		t.Fatalf("todoListIndex = %d, want 1", app.todoListIndex)
+	}
+}
+
+func TestTodoMouseDragStartingOnInlineTodoListLabelCopiesWithoutSwitching(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	copied := []string{}
+	restore := helpers.SetClipboardWriterForTesting(func(text string) error {
+		copied = append(copied, text)
+		return nil
+	})
+	defer restore()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	catalog, _, err := repo.CreateList("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog, err = repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	single := tview.NewTextView()
+	single.SetBorder(true)
+	single.SetRect(0, 0, 80, 20)
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog, single: single}
+	app.singleLinkText = helpers.StripANSI(app.renderTodo(18))
+	workRegion := mustTodoListClickRegion(t, app, "work")
+	sx, sy, _, _ := single.GetInnerRect()
+
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+workRegion.start, sy+workRegion.row, tcell.Button1, 0), tview.MouseLeftDown) {
+		t.Fatal("inline todo list label mouse-down was not consumed")
+	}
+	app.handleTodoMouse(tcell.NewEventMouse(sx+workRegion.end, sy+workRegion.row, tcell.ButtonNone, 0), tview.MouseMove)
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+workRegion.end, sy+workRegion.row, tcell.Button1, 0), tview.MouseLeftUp) {
+		t.Fatal("inline todo list label drag mouse-up was not consumed")
+	}
+	if got := repo.CurrentListID(); got != todo.DefaultListID {
+		t.Fatalf("CurrentListID() after label drag = %q, want default", got)
+	}
+	if len(copied) != 1 || copied[0] != "Work" {
+		t.Fatalf("copied = %#v, want Work", copied)
+	}
+	if !app.todoSelection.visible {
+		t.Fatal("drag selection was not left visible for feedback")
+	}
+
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+workRegion.start, sy+workRegion.row, tcell.Button1, 0), tview.MouseLeftClick) {
+		t.Fatal("post-drag synthesized click was not consumed")
+	}
+	if got := repo.CurrentListID(); got != todo.DefaultListID {
+		t.Fatalf("CurrentListID() after post-drag click = %q, want default", got)
+	}
+	if app.todoSelection.visible {
+		t.Fatal("post-drag synthesized click did not clear visible selection")
+	}
+}
+
+func TestTodoMouseInlineTodoListLabelHitTargetsExcludeInertText(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "work", nil })
+	catalog, _, err := repo.CreateList("Work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog, err = repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	single := tview.NewTextView()
+	single.SetBorder(true)
+	single.SetRect(0, 0, 80, 20)
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog, single: single}
+	app.singleLinkText = helpers.StripANSI(app.renderTodo(18))
+	defaultRegion := mustTodoListClickRegion(t, app, todo.DefaultListID)
+	workRegion := mustTodoListClickRegion(t, app, "work")
+	sx, sy, _, _ := single.GetInnerRect()
+	clickOnly := func(col int) bool {
+		return app.handleTodoMouse(tcell.NewEventMouse(sx+col, sy+defaultRegion.row, tcell.Button1, 0), tview.MouseLeftClick)
+	}
+
+	if clickOnly(defaultRegion.start - 1) {
+		t.Fatal("space before current bracket was clickable")
+	}
+	if !clickOnly(defaultRegion.start) {
+		t.Fatal("opening current bracket was not clickable")
+	}
+	if !clickOnly(defaultRegion.end - 1) {
+		t.Fatal("closing current bracket was not clickable")
+	}
+	if clickOnly(defaultRegion.end) {
+		t.Fatal("separator after current bracket was clickable")
+	}
+	if clickOnly(workRegion.start - 1) {
+		t.Fatal("space before second list label was clickable")
+	}
+	if clickOnly(workRegion.end) {
+		t.Fatal("trailing whitespace after second list label was clickable")
+	}
+}
+
+func TestTodoMouseInlineTodoListLabelWideUnicodeCoordinates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	repo.SetListIDGeneratorForTests(func() (string, error) { return "wide", nil })
+	catalog, _, err := repo.CreateList("界Todo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog, err = repo.SelectList(todo.DefaultListID); err != nil {
+		t.Fatal(err)
+	}
+	single := tview.NewTextView()
+	single.SetBorder(true)
+	single.SetRect(0, 0, 80, 20)
+	app := &terminalApp{view: viewTodo, todos: repo, todoLists: catalog, single: single}
+	app.singleLinkText = helpers.StripANSI(app.renderTodo(18))
+	wideRegion := mustTodoListClickRegion(t, app, "wide")
+	if got, want := wideRegion.end-wideRegion.start, runewidth.StringWidth("界Todo"); got != want {
+		t.Fatalf("wide label region width = %d, want %d", got, want)
+	}
+	sx, sy, _, _ := single.GetInnerRect()
+
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+wideRegion.start+1, sy+wideRegion.row, tcell.Button1, 0), tview.MouseLeftDown) {
+		t.Fatal("wide inline todo list label mouse-down was not consumed")
+	}
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+wideRegion.start+1, sy+wideRegion.row, tcell.Button1, 0), tview.MouseLeftUp) {
+		t.Fatal("wide inline todo list label mouse-up was not consumed")
+	}
+	if got := repo.CurrentListID(); got != "wide" {
+		t.Fatalf("CurrentListID() after wide label click = %q, want wide", got)
+	}
+}
+
+func TestRenderTodoClearsInlineTodoListClickRegionsWhenHidden(t *testing.T) {
+	app := &terminalApp{
+		view: viewTodo,
+		todoLists: todo.ListsStore{Lists: []todo.ListMeta{
+			{ID: todo.DefaultListID, Name: todo.DefaultListName},
+			{ID: "work", Name: "Work"},
+		}},
+	}
+	_ = app.renderTodo(2)
+	if len(app.todoListClickRegions) == 0 {
+		t.Fatal("renderTodo(2) did not record visible inline list click regions")
+	}
+
+	_ = app.renderTodo(1)
+	if len(app.todoListClickRegions) != 0 {
+		t.Fatalf("todoListClickRegions after hidden list row = %#v, want none", app.todoListClickRegions)
+	}
+
+	app.todoInputMode = "new-list"
+	_ = app.renderTodo(2)
+	if len(app.todoListClickRegions) != 0 {
+		t.Fatalf("todoListClickRegions during list input = %#v, want none", app.todoListClickRegions)
+	}
+}
+
+func mustTodoListClickRegion(t *testing.T, app *terminalApp, id string) todoListClickRegion {
+	t.Helper()
+	id = todo.NormalizeListID(id)
+	for _, region := range app.todoListClickRegions {
+		if todo.NormalizeListID(region.id) == id {
+			return region
+		}
+	}
+	t.Fatalf("todo list %q did not receive an inline click region: %#v", id, app.todoListClickRegions)
+	return todoListClickRegion{}
+}
+
+func TestTodoMouseClickSelectsTodoTitle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	store := todo.Store{Items: []todo.Item{
+		{ID: "first", Text: "First", Status: todo.StatusTodo, Term: todo.TermShort, Order: 0},
+		{ID: "second", Text: "Second", Status: todo.StatusTodo, Term: todo.TermShort, Order: 1},
+	}}
+	if err := repo.Save(store); err != nil {
+		t.Fatal(err)
+	}
+	single := tview.NewTextView()
+	single.SetBorder(true)
+	single.SetRect(0, 0, 80, 20)
+	app := &terminalApp{view: viewTodo, todos: repo, todoStore: store, single: single, todoListFocus: true}
+	app.singleLinkText = helpers.StripANSI(app.renderTodo(18))
+	sx, sy, _, _ := single.GetInnerRect()
+	clickedRow := -1
+	for row, index := range app.todoClickRows {
+		if index == 1 {
+			clickedRow = row
+			break
+		}
+	}
+	if clickedRow < 0 {
+		t.Fatal("second todo did not receive a clickable row")
+	}
+
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+5, sy+clickedRow, tcell.Button1, 0), tview.MouseLeftClick) {
+		t.Fatal("todo title click was not consumed")
+	}
+	if item, ok := app.selectedTodoItem(); !ok || item.ID != "second" {
+		t.Fatalf("selectedTodoItem() = %#v, %t; want second", item, ok)
+	}
+	if app.todoListFocus {
+		t.Fatal("todo list focus remained active after clicking the task pane")
+	}
+}
+
+func TestTodoMouseClickSelectsArchiveMonthTitle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	repo := todo.NewRepositoryAt(filepath.Join(t.TempDir(), "todos.json"))
+	store := todo.Store{ArchiveMonths: []string{"2026-08", "2026-07"}}
+	if err := repo.Save(store); err != nil {
+		t.Fatal(err)
+	}
+	single := tview.NewTextView()
+	single.SetBorder(true)
+	single.SetRect(0, 0, 80, 24)
+	app := &terminalApp{view: viewTodo, todos: repo, todoStore: store, single: single}
+	app.singleLinkText = helpers.StripANSI(app.renderTodo(22))
+	sx, sy, _, _ := single.GetInnerRect()
+	clickedRow := -1
+	for row, index := range app.todoClickRows {
+		if index == 1 {
+			clickedRow = row
+			break
+		}
+	}
+	if clickedRow < 0 {
+		t.Fatal("archive month did not receive a clickable row")
+	}
+
+	if !app.handleTodoMouse(tcell.NewEventMouse(sx+5, sy+clickedRow, tcell.Button1, 0), tview.MouseLeftClick) {
+		t.Fatal("archive month title click was not consumed")
+	}
+	if row, ok := app.selectedTodoRow(); !ok || row.archiveMonth != "2026-07" {
+		t.Fatalf("selectedTodoRow() = %#v, %t; want 2026-07", row, ok)
+	}
+}
+
 func TestTodoMouseDragOverLinkCopiesWithoutOpening(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	helpers.InitStatusBar()
@@ -1890,8 +2459,40 @@ func TestRefreshNotesBodyShowsCommandBar(t *testing.T) {
 	if got := app.commandBar.GetText(false); !strings.Contains(got, "/alpha") {
 		t.Fatalf("command bar = %q, want active command text", got)
 	}
-	if app.notes.EditorHeight != 28 {
-		t.Fatalf("EditorHeight = %d, want 28 for height 40 layout", app.notes.EditorHeight)
+	if app.notes.EditorHeight != 25 {
+		t.Fatalf("EditorHeight = %d, want 25 for height 40 layout with bottom help bar", app.notes.EditorHeight)
+	}
+}
+
+func TestRefreshUpdatesBottomHelpLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	helpers.InitStatusBar()
+	settings.Init()
+	app := &terminalApp{
+		view:          viewTodo,
+		todoListFocus: true,
+		header:        tview.NewTextView(),
+		help:          tview.NewTextView(),
+		statusBar:     tview.NewTextView(),
+		body:          tview.NewFlex(),
+		pagesRoot:     tview.NewPages(),
+		helpOverlay:   tview.NewTextView(),
+		sidebar:       tview.NewTextView(),
+		single:        tview.NewTextView(),
+	}
+	app.pagesRoot.AddPage("main", app.body, true, true)
+	app.pagesRoot.AddPage("help", app.helpOverlay, true, false)
+	app.refresh()
+	if got := app.help.GetText(false); !strings.Contains(got, "todo lists | j/k move | enter open | n new | r rename | d delete | ctrl+a tasks") {
+		t.Fatalf("help text = %q", got)
+	}
+}
+
+func TestCurrentHelpLineUsesContextualTodoInputLabel(t *testing.T) {
+	app := &terminalApp{view: viewTodo, todoInputMode: "rename-list"}
+	got := app.currentHelpLine()
+	if want := "todo lists rename | text input | enter save | esc cancel"; got != want {
+		t.Fatalf("currentHelpLine() = %q, want %q", got, want)
 	}
 }
 
@@ -2724,4 +3325,53 @@ func TestStartSyncOperationTimesOutAndClearsProgress(t *testing.T) {
 	default:
 		t.Fatal("expected timeout callback error")
 	}
+}
+
+type archivePullProviderForTest struct {
+	records      map[string]map[string]map[string]kokosync.TodoRecord
+	pulledListID string
+}
+
+func (p *archivePullProviderForTest) Login(context.Context, string, string) (kokosync.Session, error) {
+	return kokosync.Session{}, nil
+}
+
+func (p *archivePullProviderForTest) WatchWorkspace(context.Context, string, string, func(kokosync.Change) error) error {
+	return nil
+}
+
+func (p *archivePullProviderForTest) PushMutation(context.Context, string, kokosync.Mutation) error {
+	return nil
+}
+
+func (p *archivePullProviderForTest) PullSnapshot(context.Context, string) (kokosync.Snapshot, error) {
+	return kokosync.Snapshot{}, nil
+}
+
+func (p *archivePullProviderForTest) CreateWorkspace(context.Context, string) (kokosync.WorkspaceMeta, error) {
+	return kokosync.WorkspaceMeta{}, nil
+}
+
+func (p *archivePullProviderForTest) GrantMember(context.Context, string, string, string) error {
+	return nil
+}
+
+func (p *archivePullProviderForTest) RevokeMember(context.Context, string, string) error {
+	return nil
+}
+
+func (p *archivePullProviderForTest) PullTodosForList(context.Context, string, string) (map[string]kokosync.TodoRecord, error) {
+	return nil, nil
+}
+
+func (p *archivePullProviderForTest) PullTodoArchiveMonthsForList(context.Context, string, string) ([]string, error) {
+	return nil, nil
+}
+
+func (p *archivePullProviderForTest) PullTodoArchiveMonthForList(_ context.Context, _ string, listID string, month string) (map[string]kokosync.TodoRecord, error) {
+	p.pulledListID = todo.NormalizeListID(listID)
+	if p.records == nil || p.records[p.pulledListID] == nil {
+		return nil, nil
+	}
+	return p.records[p.pulledListID][month], nil
 }

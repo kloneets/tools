@@ -12,6 +12,7 @@ class SettingsRepositoryTest {
             """
             {
               "pages_app": {"first_book": 100, "second_book": 320, "read_pages": 25},
+              "todo_app": {"current_list_id": "Work_List"},
               "notes_app": {
                 "current_note_path": "books/current.md",
                 "preview_hidden": true,
@@ -33,6 +34,7 @@ class SettingsRepositoryTest {
         assertEquals(100, settings.pagesApp.firstBook)
         assertEquals(320, settings.pagesApp.secondBook)
         assertEquals(25, settings.pagesApp.readPages)
+        assertEquals("work-list", settings.todoApp.currentListId)
         assertEquals("books/current.md", settings.notesApp.currentNotePath)
         assertEquals(true, settings.notesApp.previewHidden)
         assertEquals(true, settings.notesApp.spellCheckEnabled)
@@ -66,6 +68,7 @@ class SettingsRepositoryTest {
         val json = SettingsRepository.toJson(
             AppSettings(
                 pagesApp = PagesSettings(firstBook = 10, secondBook = 20, readPages = 2),
+                todoApp = TodoSettings(currentListId = "work"),
                 notesApp = NotesSettings(
                     currentNotePath = "a.md",
                     previewHidden = true,
@@ -84,6 +87,7 @@ class SettingsRepositoryTest {
         )
 
         assertEquals(10, json.getJSONObject("pages_app").getInt("first_book"))
+        assertEquals("work", json.getJSONObject("todo_app").getString("current_list_id"))
         assertEquals(20, json.getJSONObject("pages_app").getInt("second_book"))
         assertEquals(2, json.getJSONObject("pages_app").getInt("read_pages"))
         assertEquals("a.md", json.getJSONObject("notes_app").getString("current_note_path"))
@@ -116,6 +120,36 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun bundledFirebaseDefaultsRequireAbsoluteHttpsDatabaseUrlWithHost() {
+        listOf("", "database.firebaseio.com", "http://database.firebaseio.com", "https://").forEach { invalid ->
+            assertFalse(FirebaseBundledDefaults(apiKey = "key", databaseUrl = invalid, projectId = "project").ready)
+        }
+
+        assertTrue(
+            FirebaseBundledDefaults(
+                apiKey = "key",
+                databaseUrl = "https://database.firebaseio.com",
+                projectId = "project",
+            ).ready,
+        )
+    }
+
+    @Test
+    fun invalidCustomFirebaseDatabaseUrlIsPreservedButNotReady() {
+        val settings = SettingsRepository.parse(
+            """{"firebase": {"enabled": true, "realtime": true, "api_key": "custom", "database_url": "legacy-host"}}""",
+            FirebaseBundledDefaults(
+                apiKey = "bundled-key",
+                databaseUrl = "https://bundled.firebaseio.com",
+                projectId = "bundled-project",
+            ),
+        )
+
+        assertEquals("legacy-host", settings.firebase.databaseUrl)
+        assertFalse(FirebaseSyncRepository.backendConfigReady(settings.firebase))
+    }
+
+    @Test
     fun customFirebaseConfigIsPreservedOverBundledDefaults() {
         val settings = SettingsRepository.parse(
             """
@@ -141,6 +175,11 @@ class SettingsRepositoryTest {
 
     @Test
     fun bundledFirebaseDefaultsArePresentInBuild() {
+        if (BuildConfig.APPLICATION_ID.endsWith(".testhost")) {
+            assertFalse(FirebaseDefaults.bundled.ready)
+            assertEquals("", FirebaseDefaults.bundled.projectId)
+            return
+        }
         assertTrue(FirebaseDefaults.bundled.ready)
         assertEquals("koko-tools", FirebaseDefaults.bundled.projectId)
     }
@@ -263,6 +302,7 @@ class SettingsRepositoryTest {
                 "spell_check_enabled": true,
                 "spell_dictionaries": ["en"]
               },
+              "todo_app": {"current_list_id": "work"},
               "android_app": {"theme_mode": "dark"},
               "firebase": {"workspace_id": "user_1"}
             }
@@ -274,6 +314,7 @@ class SettingsRepositoryTest {
         assertEquals(10, shared.getJSONObject("pages_app").getInt("first_book"))
         assertEquals(12, shared.getJSONObject("password_app").getInt("symbol_count"))
         assertFalse(shared.getJSONObject("notes_app").has("preview_hidden"))
+        assertFalse(shared.has("todo_app"))
         assertFalse(shared.getJSONObject("notes_app").has("current_note_path"))
         assertFalse(shared.getJSONObject("notes_app").has("open_note_paths"))
         assertFalse(shared.has("android_app"))
@@ -286,6 +327,7 @@ class SettingsRepositoryTest {
             """
             {
               "pages_app": {"first_book": 1, "second_book": 2, "read_pages": 3},
+              "todo_app": {"current_list_id": "work"},
               "notes_app": {"current_note_path": "local.md", "preview_hidden": false},
               "android_app": {"theme_mode": "dark"}
             }
@@ -303,6 +345,7 @@ class SettingsRepositoryTest {
         val applied = SettingsRepository.applySharedSettings(local, shared)
 
         assertEquals(99, applied.pagesApp.firstBook)
+        assertEquals("work", applied.todoApp.currentListId)
         assertEquals("local.md", applied.notesApp.currentNotePath)
         assertEquals(false, applied.notesApp.previewHidden)
         assertEquals(true, applied.notesApp.spellCheckEnabled)
@@ -316,6 +359,7 @@ class SettingsRepositoryTest {
             {
               "pages_app": {"first_book": 10, "second_book": 20, "read_pages": 3},
               "notes_app": {"current_note_path": "a.md", "preview_hidden": true, "spell_check_enabled": true},
+              "todo_app": {"current_list_id": "work"},
               "android_app": {"theme_mode": "dark"},
               "firebase": {"enabled": true, "workspace_id": "user_1"}
             }
@@ -326,6 +370,7 @@ class SettingsRepositoryTest {
             {
               "pages_app": {"first_book": 10, "second_book": 20, "read_pages": 3},
               "notes_app": {"current_note_path": "b.md", "preview_hidden": false, "spell_check_enabled": true},
+              "todo_app": {"current_list_id": "home"},
               "android_app": {"theme_mode": "light"},
               "firebase": {"enabled": false, "workspace_id": "user_2"}
             }

@@ -2,6 +2,7 @@ package com.kloneets.kokotools
 
 data class AppSettings(
     val pagesApp: PagesSettings = PagesSettings(),
+    val todoApp: TodoSettings = TodoSettings(),
     val notesApp: NotesSettings = NotesSettings(),
     val androidApp: AndroidSettings = AndroidSettings(),
     val firebase: FirebaseSettings = FirebaseSettings(),
@@ -12,6 +13,10 @@ data class PagesSettings(
     val firstBook: Int = 0,
     val secondBook: Int = 0,
     val readPages: Int = 0,
+)
+
+data class TodoSettings(
+    val currentListId: String = TodoRepository.DEFAULT_LIST_ID,
 )
 
 data class NotesSettings(

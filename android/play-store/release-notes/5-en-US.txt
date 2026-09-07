@@ -1,0 +1,2 @@
+Added support for multiple todo lists across Android and terminal clients.
+Improved todo-list selection, sync compatibility, and Android release-test isolation.

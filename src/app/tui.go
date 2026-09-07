@@ -61,7 +61,10 @@ type terminalApp struct {
 	password               *password.Model
 	todos                  *todo.Repository
 	todoStore              todo.Store
+	todoLists              todo.ListsStore
 	todoIndex              int
+	todoListIndex          int
+	todoListFocus          bool
 	todoInputMode          string
 	todoInputBuffer        string
 	todoInputCursorOffset  int
@@ -69,6 +72,8 @@ type terminalApp struct {
 	todoDirty              bool
 	todoArchiveExpanded    map[string]bool
 	todoSelection          todoMouseSelection
+	todoClickRows          map[int]int
+	todoListClickRegions   []todoListClickRegion
 	status                 string
 	width                  int
 	height                 int
@@ -88,6 +93,7 @@ type terminalApp struct {
 	helpOverlay            *tview.TextView
 	quitModal              *tview.Modal
 	deleteNoteModal        *tview.Modal
+	deleteTodoListModal    *tview.Modal
 	deleteNoteFolder       bool
 	openLinksModal         *tview.Modal
 	root                   *tview.Flex
@@ -123,6 +129,8 @@ type terminalApp struct {
 	singleLinkText         string
 	deleteNotePath         string
 	deleteNoteLabel        string
+	deleteTodoListID       string
+	deleteTodoListLabel    string
 	recorderVisible        bool
 	recorderCapturing      bool
 	recorderStartedAt      time.Time
@@ -149,6 +157,14 @@ type appTab struct {
 type todoSelectableRow struct {
 	item         *todo.Item
 	archiveMonth string
+}
+
+type todoListClickRegion struct {
+	row   int
+	start int
+	end   int
+	index int
+	id    string
 }
 
 type todoMouseSelection struct {
@@ -205,6 +221,15 @@ func newTerminalApp() (*terminalApp, error) {
 	}
 	applyGlobalBackgroundStyle()
 	todoRepo := todo.NewRepository()
+	todoLists, err := todoRepo.LoadLists()
+	if err != nil {
+		return nil, err
+	}
+	if settingsID := settings.CurrentTodoListID(); settingsID != todo.DefaultListID && todoListExists(todoLists, settingsID) {
+		todoLists, _ = todoRepo.SelectList(settingsID)
+	} else {
+		settings.SaveTodoCurrentListID(todo.DefaultListID)
+	}
 	todoStore, err := todoRepo.Load()
 	if err != nil {
 		return nil, err
@@ -216,11 +241,13 @@ func newTerminalApp() (*terminalApp, error) {
 		password:            password.NewModel(),
 		todos:               todoRepo,
 		todoStore:           todoStore,
+		todoLists:           todoLists,
 		todoArchiveExpanded: map[string]bool{},
 		width:               120,
 		height:              36,
 		syncTimeout:         manualSyncTimeout,
 	}
+	app.syncTodoListIndexToCurrent()
 	app.initWidgets()
 	notes.SetSpellRefreshHook(func() {
 		if app.tui == nil {
@@ -327,6 +354,38 @@ func (a *terminalApp) initWidgets() {
 		}
 	})
 	a.pagesRoot.AddPage("delete-note", a.deleteNoteModal, true, false)
+	a.deleteTodoListModal = tview.NewModal().
+		AddButtons([]string{"Delete", "Cancel"})
+	a.deleteTodoListModal.SetDoneFunc(func(_ int, label string) {
+		if label == "Delete" && a.todos != nil && a.deleteTodoListID != "" {
+			target := a.deleteTodoListLabel
+			if target == "" {
+				target = a.deleteTodoListID
+			}
+			catalog, err := a.todos.DeleteList(a.deleteTodoListID)
+			if err == nil {
+				a.todoLists = catalog
+				settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+				store, loadErr := a.todos.Load()
+				if loadErr == nil {
+					a.todoStore = store
+				}
+				a.todoArchiveExpanded = map[string]bool{}
+				a.syncTodoListIndexToCurrent()
+				a.clampTodoIndex()
+				a.markTodoChanged()
+				helpers.StatusBarInst().UpdateStatusBar("Deleted todo list: " + target)
+			} else {
+				helpers.StatusBarInst().UpdateStatusBar("Todo list delete failed: " + err.Error())
+			}
+		}
+		a.deleteTodoListID = ""
+		a.deleteTodoListLabel = ""
+		if a.pagesRoot != nil {
+			a.pagesRoot.HidePage("delete-todo-list")
+		}
+	})
+	a.pagesRoot.AddPage("delete-todo-list", a.deleteTodoListModal, true, false)
 	a.openLinksModal = tview.NewModal().
 		AddButtons([]string{"Open all", "Cancel"})
 	a.openLinksModal.SetDoneFunc(func(_ int, label string) {
@@ -343,6 +402,7 @@ func (a *terminalApp) initWidgets() {
 	a.root = tview.NewFlex().SetDirection(tview.FlexRow)
 	a.root.AddItem(a.header, 3, 0, false)
 	a.root.AddItem(a.pagesRoot, 0, 1, false)
+	a.root.AddItem(a.help, 3, 0, false)
 	a.root.AddItem(a.statusBar, 3, 0, false)
 	a.applyWidgetBackgroundStyle()
 }
@@ -429,7 +489,7 @@ func (a *terminalApp) applyWidgetBackgroundStyle() {
 			box.SetBackgroundColor(background)
 		}
 	}
-	for _, modal := range []*tview.Modal{a.quitModal, a.deleteNoteModal, a.openLinksModal} {
+	for _, modal := range []*tview.Modal{a.quitModal, a.deleteTodoListModal, a.deleteNoteModal, a.openLinksModal} {
 		if modal != nil {
 			modal.SetBackgroundColor(background)
 			modal.SetTextColor(themeColor(theme.Primary))
@@ -525,6 +585,14 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 	if a.pagesRoot != nil && a.pagesRoot.HasPage("delete-note") {
 		if front, _ := a.pagesRoot.GetFrontPage(); front == "delete-note" && a.deleteNoteModal != nil {
 			if handler := a.deleteNoteModal.InputHandler(); handler != nil {
+				handler(event, func(tview.Primitive) {})
+			}
+			return nil
+		}
+	}
+	if a.pagesRoot != nil && a.pagesRoot.HasPage("delete-todo-list") {
+		if front, _ := a.pagesRoot.GetFrontPage(); front == "delete-todo-list" && a.deleteTodoListModal != nil {
+			if handler := a.deleteTodoListModal.InputHandler(); handler != nil {
 				handler(event, func(tview.Primitive) {})
 			}
 			return nil
@@ -636,6 +704,9 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 		}
 	}
 	if a.handleTodoMouse(event, action) {
+		return nil, action
+	}
+	if a.handleTodoListMouse(event, action) {
 		return nil, action
 	}
 	if action == tview.MouseLeftClick && !a.showHelp && a.view != viewNotes && a.single != nil {
@@ -956,6 +1027,10 @@ func (a *terminalApp) handleTodoMouse(event *tcell.EventMouse, action tview.Mous
 		if a.todoSelection.visible {
 			a.copyTodoMouseSelection()
 			a.scheduleTodoSelectionClear()
+		} else if region, ok := a.todoListClickRegionAt(y-sy, x-sx); ok {
+			a.todoListIndex = region.index
+			a.todoListFocus = false
+			a.selectTodoList(region.id)
 		}
 		a.refresh()
 		return true
@@ -963,10 +1038,59 @@ func (a *terminalApp) handleTodoMouse(event *tcell.EventMouse, action tview.Mous
 		if a.todoSelection.visible {
 			a.clearTodoMouseSelection()
 			a.refresh()
+			return true
+		}
+		if region, ok := a.todoListClickRegionAt(y-sy, x-sx); ok {
+			a.todoListIndex = region.index
+			a.todoListFocus = false
+			a.selectTodoList(region.id)
+			a.refresh()
+			return true
+		}
+		if todoIndex, ok := a.todoClickRows[y-sy]; ok {
+			a.todoIndex = todoIndex
+			a.todoListFocus = false
+			a.refresh()
+			return true
 		}
 		return false
 	}
 	return false
+}
+
+func (a *terminalApp) todoListClickRegionAt(row int, col int) (todoListClickRegion, bool) {
+	if a == nil || row < 0 || col < 0 {
+		return todoListClickRegion{}, false
+	}
+	for _, region := range a.todoListClickRegions {
+		if region.row == row && col >= region.start && col < region.end {
+			return region, true
+		}
+	}
+	return todoListClickRegion{}, false
+}
+
+func (a *terminalApp) handleTodoListMouse(event *tcell.EventMouse, action tview.MouseAction) bool {
+	if a == nil || event == nil || action != tview.MouseLeftClick || a.view != viewTodo || a.showHelp ||
+		a.sidebar == nil || !settings.TodoSidebarVisible() {
+		return false
+	}
+	x, y := event.Position()
+	sx, sy, sw, sh := a.sidebar.GetInnerRect()
+	if !pointInRect(x, y, sx, sy, sw, sh) {
+		return false
+	}
+	start, end := a.todoListSidebarVisibleRange(sh)
+	index := start + y - sy
+	active := a.activeTodoLists()
+	if index < start || index >= end || index >= len(active) {
+		return true
+	}
+	a.todoListIndex = index
+	a.todoListFocus = true
+	a.selectTodoList(active[index].ID)
+	a.refresh()
+	return true
 }
 
 func (a *terminalApp) updateTodoMouseSelection(offset int) {
@@ -1601,16 +1725,33 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		case "enter":
 			text := strings.TrimSpace(a.todoInputBuffer)
 			if text == "" {
-				a.todoInputMode = ""
-				a.todoInputBuffer = ""
-				a.todoInputCursorOffset = 0
-				a.todoEditID = ""
+				a.clearTodoInput()
 				return true
 			}
 			var err error
-			if a.todoInputMode == "edit" {
+			switch a.todoInputMode {
+			case "edit":
 				a.todoStore, err = a.todos.Edit(a.todoEditID, text)
-			} else {
+			case "new-list":
+				a.todoLists, _, err = a.todos.CreateList(text)
+				if err == nil {
+					settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+					a.todoStore, err = a.todos.Load()
+					a.todoArchiveExpanded = map[string]bool{}
+					a.todoIndex = 0
+					a.syncTodoListIndexToCurrent()
+				}
+			case "rename-list":
+				id := a.todoEditID
+				if id == "" {
+					id = a.todos.CurrentListID()
+				}
+				a.todoLists, err = a.todos.RenameList(id, text)
+				if err == nil {
+					settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+					a.syncTodoListIndexToID(id)
+				}
+			default:
 				a.todoStore, _, err = a.todos.Add(text)
 			}
 			if err != nil {
@@ -1618,17 +1759,11 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 			} else {
 				a.markTodoChanged()
 			}
-			a.todoInputMode = ""
-			a.todoInputBuffer = ""
-			a.todoInputCursorOffset = 0
-			a.todoEditID = ""
+			a.clearTodoInput()
 			a.clampTodoIndex()
 			return true
 		case "esc":
-			a.todoInputMode = ""
-			a.todoInputBuffer = ""
-			a.todoInputCursorOffset = 0
-			a.todoEditID = ""
+			a.clearTodoInput()
 			return true
 		case "backspace":
 			runes := []rune(a.todoInputBuffer)
@@ -1674,7 +1809,13 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		}
 		return true
 	}
+	if key.Ctrl && key.Name == "a" {
+		return a.toggleTodoSidebarFocus()
+	}
 	a.reloadTodosForRender()
+	if a.todoListFocus {
+		return a.handleTodoListKey(key)
+	}
 	rows := a.todoSelectableRows()
 	switch key.Name {
 	case "down", "j":
@@ -1691,6 +1832,27 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 		a.todoInputMode = "new"
 		a.todoInputBuffer = ""
 		a.todoInputCursorOffset = 0
+		return true
+	case "l":
+		settings.SaveTodoSidebarVisible(true)
+		a.todoListFocus = true
+		a.syncTodoListIndexToCurrent()
+		return true
+	case "L":
+		a.todoInputMode = "new-list"
+		a.todoInputBuffer = ""
+		a.todoInputCursorOffset = 0
+		return true
+	case "r":
+		if list, ok := a.currentTodoList(); ok {
+			a.todoInputMode = "rename-list"
+			a.todoInputBuffer = list.Name
+			a.todoInputCursorOffset = len([]rune(a.todoInputBuffer))
+			a.todoEditID = list.ID
+		}
+		return true
+	case "x":
+		a.showDeleteTodoListModalForCurrent()
 		return true
 	case "e":
 		if item, ok := a.selectedTodoItem(); ok && item.Status == todo.StatusTodo && item.CheckedAt == nil {
@@ -1726,6 +1888,132 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 	return false
 }
 
+func (a *terminalApp) clearTodoInput() {
+	a.todoInputMode = ""
+	a.todoInputBuffer = ""
+	a.todoInputCursorOffset = 0
+	a.todoEditID = ""
+}
+
+func (a *terminalApp) handleTodoListKey(key notes.Key) bool {
+	active := a.activeTodoLists()
+	a.clampTodoListIndex()
+	switch key.Name {
+	case "down", "j":
+		if a.todoListIndex < len(active)-1 {
+			a.todoListIndex++
+		}
+		return true
+	case "up", "k":
+		if a.todoListIndex > 0 {
+			a.todoListIndex--
+		}
+		return true
+	case "enter":
+		if list, ok := a.selectedTodoList(); ok {
+			a.selectTodoList(list.ID)
+		}
+		return true
+	case "n":
+		a.todoInputMode = "new-list"
+		a.todoInputBuffer = ""
+		a.todoInputCursorOffset = 0
+		return true
+	case "r":
+		if list, ok := a.selectedTodoList(); ok {
+			a.todoInputMode = "rename-list"
+			a.todoEditID = list.ID
+			a.todoInputBuffer = list.Name
+			a.todoInputCursorOffset = len([]rune(a.todoInputBuffer))
+		}
+		return true
+	case "d":
+		if list, ok := a.selectedTodoList(); ok {
+			a.showDeleteTodoListModal(list)
+		}
+		return true
+	case "esc":
+		a.todoListFocus = false
+		return true
+	}
+	return false
+}
+
+func (a *terminalApp) toggleTodoSidebarFocus() bool {
+	if !settings.TodoSidebarVisible() {
+		settings.SaveTodoSidebarVisible(true)
+		a.todoListFocus = true
+		a.syncTodoListIndexToCurrent()
+		return true
+	}
+	if a.todoListFocus {
+		a.todoListFocus = false
+		settings.SaveTodoSidebarVisible(false)
+		return true
+	}
+	a.todoListFocus = true
+	a.syncTodoListIndexToCurrent()
+	return true
+}
+
+func (a *terminalApp) switchTodoList(delta int) bool {
+	if a == nil || a.todos == nil {
+		return true
+	}
+	catalog, err := a.todos.CycleList(delta)
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo list switch failed: " + err.Error())
+		return true
+	}
+	a.todoLists = catalog
+	settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+	store, err := a.todos.Load()
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo load failed: " + err.Error())
+		return true
+	}
+	a.todoStore = store
+	a.todoArchiveExpanded = map[string]bool{}
+	a.todoIndex = 0
+	a.syncTodoListIndexToCurrent()
+	if a.firebaseTodoSyncer != nil {
+		a.firebaseTodoSyncer.ListID = a.todos.CurrentListID()
+	}
+	if list, ok := a.currentTodoList(); ok {
+		helpers.StatusBarInst().UpdateStatusBar("Todo list: " + list.Name)
+	}
+	return true
+}
+
+func (a *terminalApp) selectTodoList(id string) bool {
+	if a == nil || a.todos == nil {
+		return true
+	}
+	catalog, err := a.todos.SelectList(id)
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo list switch failed: " + err.Error())
+		return true
+	}
+	a.todoLists = catalog
+	settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+	store, err := a.todos.Load()
+	if err != nil {
+		helpers.StatusBarInst().UpdateStatusBar("Todo load failed: " + err.Error())
+		return true
+	}
+	a.todoStore = store
+	a.todoArchiveExpanded = map[string]bool{}
+	a.todoIndex = 0
+	a.syncTodoListIndexToCurrent()
+	if a.firebaseTodoSyncer != nil {
+		a.firebaseTodoSyncer.ListID = a.todos.CurrentListID()
+	}
+	if list, ok := a.currentTodoList(); ok {
+		helpers.StatusBarInst().UpdateStatusBar("Todo list: " + list.Name)
+	}
+	return true
+}
+
 func (a *terminalApp) openTodoArchiveMonth(month string) {
 	if a.todoArchiveExpanded == nil {
 		a.todoArchiveExpanded = map[string]bool{}
@@ -1739,9 +2027,22 @@ func (a *terminalApp) openTodoArchiveMonth(month string) {
 		a.todoArchiveExpanded[month] = true
 		return
 	}
+	listID := todo.DefaultListID
+	if a.todos != nil {
+		listID = a.todos.CurrentListID()
+	}
 	a.startSyncOperation("load todo archive "+month, func() error {
-		return a.pullTodoArchiveMonthFromFirebase(context.Background(), month)
+		return a.pullTodoArchiveMonthFromFirebaseForList(context.Background(), listID, month)
 	}, func() {
+		if a.todos != nil && a.todos.CurrentListID() != listID {
+			helpers.StatusBarInst().UpdateStatusBar("Todo archive loaded for background list: " + month)
+			return
+		}
+		if a.todos != nil {
+			if store, err := a.todos.LoadList(listID); err == nil {
+				a.todoStore = store
+			}
+		}
 		a.todoArchiveExpanded[month] = true
 		helpers.StatusBarInst().UpdateStatusBar("Todo archive loaded: " + month)
 		a.reloadTodosForRender()
@@ -2446,6 +2747,9 @@ func (a *terminalApp) refresh() {
 	}
 	status := a.currentStatusText()
 	a.lastStatus = status
+	if a.help != nil {
+		a.help.SetText(a.oneLine(a.currentHelpLine()))
+	}
 	if a.statusBar != nil {
 		a.statusBar.SetText(status)
 	}
@@ -2499,17 +2803,17 @@ func (a *terminalApp) refresh() {
 	case viewNotes:
 		a.refreshNotesBody()
 	case viewPages:
-		a.refreshSingle("Pages", a.renderPages(maxInt(3, a.height-10)))
+		a.refreshSingle("Pages", a.renderPages(maxInt(3, a.height-13)))
 	case viewPassword:
-		a.refreshSingle("Password", a.renderPassword(maxInt(3, a.height-10)))
+		a.refreshSingle("Password", a.renderPassword(maxInt(3, a.height-13)))
 	case viewTodo:
-		a.refreshSingle("Todo", a.renderTodo(maxInt(3, a.height-10)))
+		a.refreshTodoBody()
 	case viewSync:
-		a.refreshSingle("Sync", a.renderSync(maxInt(3, a.height-10)))
+		a.refreshSingle("Sync", a.renderSync(maxInt(3, a.height-13)))
 	case viewSettings:
-		a.refreshSingleMarkup("Settings", a.renderSettings(maxInt(3, a.height-10)))
+		a.refreshSingleMarkup("Settings", a.renderSettings(maxInt(3, a.height-13)))
 	case viewRecorder:
-		a.refreshSingleMarkup("Recorder", a.renderRecorder(maxInt(3, a.height-10)))
+		a.refreshSingleMarkup("Recorder", a.renderRecorder(maxInt(3, a.height-13)))
 	}
 }
 
@@ -2667,7 +2971,7 @@ func (a *terminalApp) watchStatus(ctx context.Context) {
 
 func (a *terminalApp) refreshNotesBody() {
 	_, editorWidth, previewWidth := a.notesPaneSizes()
-	bodyHeight := maxInt(3, a.height-6)
+	bodyHeight := maxInt(3, a.height-9)
 	contentHeight := maxInt(1, bodyHeight-3)
 	editorInnerHeight := maxInt(1, contentHeight-2)
 
@@ -2754,6 +3058,48 @@ func (a *terminalApp) notesPaneSizes() (int, int, int) {
 		previewOuter = previewInner + 2
 	}
 	return sidebarOuter, editorOuter, previewOuter
+}
+
+func (a *terminalApp) refreshTodoBody() {
+	bodyHeight := maxInt(3, a.height-13)
+	contentHeight := maxInt(1, bodyHeight-2)
+	if a.sidebar != nil {
+		a.sidebar.SetTitle(a.todoListSidebarTitle())
+		a.sidebar.SetText(joinTViewLines(a.todoListSidebarRows(contentHeight)))
+	}
+	if a.single != nil {
+		a.single.SetTitle("Todo")
+		a.single.SetWrap(false)
+		a.single.SetWordWrap(false)
+		text := a.renderTodo(bodyHeight)
+		a.singleLinkText = helpers.StripANSI(text)
+		styled := styleSupportedLinks(text)
+		if a.todoSelection.visible {
+			styled = styleTextRange(styled, a.todoSelection.start, a.todoSelection.end, helpers.ANSIRoleSelection)
+		}
+		a.single.SetText(joinTViewLines(strings.Split(styled, "\n")))
+	}
+	content := tview.NewFlex().SetDirection(tview.FlexColumn)
+	sidebarWidth := a.todoSidebarWidth()
+	if settings.TodoSidebarVisible() && sidebarWidth > 0 {
+		content.AddItem(a.sidebar, sidebarWidth, 0, false)
+	}
+	content.AddItem(a.single, 0, 1, false)
+	a.body.AddItem(content, 0, 1, false)
+}
+
+func (a *terminalApp) todoSidebarWidth() int {
+	if !settings.TodoSidebarVisible() {
+		return 0
+	}
+	width := maxInt(18, a.width/4)
+	if width > 34 {
+		width = 34
+	}
+	if width > a.width/2 {
+		width = a.width / 2
+	}
+	return width
 }
 
 func (a *terminalApp) refreshSingle(title string, text string) {
@@ -3106,6 +3452,17 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 			screen.ShowCursor(x+col, y+row)
 			return
 		}
+		if a.view == viewTodo && a.todoListFocus && settings.TodoSidebarVisible() && a.sidebar != nil {
+			x, y, _, height := a.sidebar.GetInnerRect()
+			row, ok := a.todoListSidebarCursorRow(height)
+			if !ok {
+				screen.HideCursor()
+				return
+			}
+			screen.SetCursorStyle(tcell.CursorStyleSteadyBlock)
+			screen.ShowCursor(x, y+row)
+			return
+		}
 		screen.SetCursorStyle(tcell.CursorStyleDefault)
 		screen.HideCursor()
 		return
@@ -3178,12 +3535,17 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 
 func (a *terminalApp) todoInputCursor() (int, int) {
 	prefix := "new: "
-	if a.todoInputMode == "edit" {
+	switch a.todoInputMode {
+	case "edit":
 		prefix = "edit: "
+	case "new-list":
+		prefix = "new list: "
+	case "rename-list":
+		prefix = "rename list: "
 	}
 	runes := []rune(a.todoInputBuffer)
 	a.clampTodoInputCursor(len(runes))
-	return 2, len([]rune(prefix)) + a.todoInputCursorOffset
+	return 1, len([]rune(prefix)) + a.todoInputCursorOffset
 }
 
 func joinTViewLines(lines []string) string {
@@ -3277,7 +3639,6 @@ func (a *terminalApp) renderPages(height int) string {
 	}
 	lines := []string{
 		"Pages calculator",
-		"j/k move | e/enter edit | tab fields | enter apply | r recalc",
 		fmt.Sprintf("%sfirst book:  %s", focusPrefix(0), fieldValue(0, a.pages.FirstBookInput)),
 		fmt.Sprintf("%sread pages:  %s", focusPrefix(1), fieldValue(1, a.pages.ReadInput)),
 		fmt.Sprintf("%sother book:  %s", focusPrefix(2), fieldValue(2, a.pages.SecondBookInput)),
@@ -3292,7 +3653,6 @@ func (a *terminalApp) renderPages(height int) string {
 func (a *terminalApp) renderPassword(height int) string {
 	lines := []string{
 		"Password generator",
-		"g generate | l letters | n numbers | s symbols | +/- length",
 		fmt.Sprintf("letters: %t", a.password.Letters),
 		fmt.Sprintf("numbers: %t", a.password.Numbers),
 		fmt.Sprintf("symbols: %t", a.password.SpecialSymbols),
@@ -3307,15 +3667,37 @@ func (a *terminalApp) renderPassword(height int) string {
 
 func (a *terminalApp) renderTodo(height int) string {
 	a.reloadTodosForRender()
-	lines := []string{"Todo", "j/k move | n new | enter/space check | e edit | m section | J/K reorder active"}
+	a.todoClickRows = map[int]int{}
+	a.todoListClickRegions = nil
+	itemIndexes := map[string]int{}
+	monthIndexes := map[string]int{}
+	for index, row := range a.todoSelectableRows() {
+		if row.item != nil {
+			itemIndexes[row.item.ID] = index
+		} else if row.archiveMonth != "" {
+			monthIndexes[row.archiveMonth] = index
+		}
+	}
+	listName := todo.DefaultListName
+	if list, ok := a.currentTodoList(); ok {
+		listName = list.Name
+	}
+	lines := []string{
+		"Todo - " + listName,
+	}
 	if a.todoInputMode != "" {
 		label := "new"
 		if a.todoInputMode == "edit" {
 			label = "edit"
+		} else if a.todoInputMode == "new-list" {
+			label = "new list"
+		} else if a.todoInputMode == "rename-list" {
+			label = "rename list"
 		}
 		lines = append(lines, fmt.Sprintf("%s: %s", label, a.todoInputBuffer))
 	} else {
-		lines = append(lines, "")
+		row := len(lines)
+		lines = append(lines, "lists: "+a.todoListSummary(row, row < height))
 	}
 	selectedID := ""
 	selectedMonth := ""
@@ -3332,6 +3714,7 @@ func (a *terminalApp) renderTodo(height int) string {
 			return
 		}
 		for _, item := range items {
+			a.todoClickRows[len(lines)] = itemIndexes[item.ID]
 			prefix := "  "
 			if item.ID == selectedID {
 				prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, "> ")
@@ -3361,6 +3744,7 @@ func (a *terminalApp) renderTodo(height int) string {
 	} else {
 		groups := todo.ArchiveGroups(a.todoStore)
 		for _, month := range months {
+			a.todoClickRows[len(lines)] = monthIndexes[month]
 			prefix := "  "
 			if month == selectedMonth {
 				prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, "> ")
@@ -3381,6 +3765,249 @@ func (a *terminalApp) renderTodo(height int) string {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:height], "\n")
+}
+
+func (a *terminalApp) currentTodoList() (todo.ListMeta, bool) {
+	if a == nil {
+		return todo.ListMeta{}, false
+	}
+	catalog := a.todoLists
+	if len(catalog.Lists) == 0 && a.todos != nil {
+		loaded, err := a.todos.LoadLists()
+		if err == nil {
+			catalog = loaded
+			a.todoLists = loaded
+		}
+	}
+	id := todo.DefaultListID
+	if a.todos != nil {
+		id = a.todos.CurrentListID()
+	} else if catalog.CurrentListID != "" {
+		id = catalog.CurrentListID
+	}
+	for _, list := range catalog.Lists {
+		if list.ID == id && !list.Deleted {
+			return list, true
+		}
+	}
+	return todo.ListMeta{ID: todo.DefaultListID, Name: todo.DefaultListName}, true
+}
+
+func (a *terminalApp) activeTodoLists() []todo.ListMeta {
+	if a == nil {
+		return []todo.ListMeta{{ID: todo.DefaultListID, Name: todo.DefaultListName}}
+	}
+	catalog := a.todoLists
+	if len(catalog.Lists) == 0 && a.todos != nil {
+		loaded, err := a.todos.LoadLists()
+		if err == nil {
+			catalog = loaded
+			a.todoLists = loaded
+		}
+	}
+	active := todo.ActiveLists(catalog)
+	if len(active) == 0 {
+		return []todo.ListMeta{{ID: todo.DefaultListID, Name: todo.DefaultListName}}
+	}
+	return active
+}
+
+func (a *terminalApp) selectedTodoList() (todo.ListMeta, bool) {
+	active := a.activeTodoLists()
+	if len(active) == 0 {
+		return todo.ListMeta{}, false
+	}
+	a.clampTodoListIndex()
+	return active[a.todoListIndex], true
+}
+
+func (a *terminalApp) clampTodoListIndex() {
+	active := a.activeTodoLists()
+	if len(active) == 0 {
+		a.todoListIndex = 0
+		return
+	}
+	if a.todoListIndex < 0 {
+		a.todoListIndex = 0
+	}
+	if a.todoListIndex >= len(active) {
+		a.todoListIndex = len(active) - 1
+	}
+}
+
+func (a *terminalApp) syncTodoListIndexToCurrent() {
+	if a == nil || a.todos == nil {
+		return
+	}
+	a.syncTodoListIndexToID(a.todos.CurrentListID())
+}
+
+func (a *terminalApp) syncTodoListIndexToID(id string) {
+	id = todo.NormalizeListID(id)
+	active := a.activeTodoLists()
+	for i, list := range active {
+		if list.ID == id {
+			a.todoListIndex = i
+			return
+		}
+	}
+	a.clampTodoListIndex()
+}
+
+func (a *terminalApp) todoListSidebarTitle() string {
+	if a.todoListFocus {
+		return "Todo Lists [focus]"
+	}
+	return "Todo Lists"
+}
+
+func (a *terminalApp) todoListSidebarRows(height int) []string {
+	active := a.activeTodoLists()
+	a.clampTodoListIndex()
+	current := todo.DefaultListID
+	if a.todos != nil {
+		current = a.todos.CurrentListID()
+	}
+	rows := make([]string, 0, len(active))
+	for i, list := range active {
+		prefix := "  "
+		if list.ID == current {
+			prefix = "* "
+		}
+		line := prefix + list.Name
+		if a.todoListFocus && i == a.todoListIndex {
+			line = helpers.ANSI(helpers.ANSIReverse, line)
+		}
+		rows = append(rows, line)
+	}
+	if len(rows) == 0 {
+		rows = append(rows, "  "+todo.DefaultListName)
+	}
+	if start, end := a.todoListSidebarVisibleRange(height); start > 0 || end < len(rows) {
+		rows = rows[start:end]
+	}
+	return rows
+}
+
+func (a *terminalApp) todoListSidebarVisibleRange(height int) (int, int) {
+	count := len(a.activeTodoLists())
+	if height <= 0 || count <= height {
+		return 0, count
+	}
+	a.clampTodoListIndex()
+	start := a.todoListIndex - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start+height > count {
+		start = count - height
+	}
+	return start, start + height
+}
+
+func (a *terminalApp) todoListSidebarCursorRow(height int) (int, bool) {
+	if height <= 0 || len(a.activeTodoLists()) == 0 {
+		return 0, false
+	}
+	a.clampTodoListIndex()
+	start, end := a.todoListSidebarVisibleRange(height)
+	if a.todoListIndex < start || a.todoListIndex >= end {
+		return 0, false
+	}
+	return a.todoListIndex - start, true
+}
+
+func (a *terminalApp) showDeleteTodoListModalForCurrent() {
+	if list, ok := a.currentTodoList(); ok {
+		a.showDeleteTodoListModal(list)
+	}
+}
+
+func (a *terminalApp) showDeleteTodoListModal(list todo.ListMeta) {
+	if a == nil || a.todos == nil {
+		return
+	}
+	if list.ID == todo.DefaultListID {
+		helpers.StatusBarInst().UpdateStatusBar("Default todo list cannot be deleted")
+		return
+	}
+	count := a.todoListItemCount(list.ID)
+	a.deleteTodoListID = list.ID
+	a.deleteTodoListLabel = list.Name
+	if a.deleteTodoListModal != nil {
+		a.deleteTodoListModal.SetText(fmt.Sprintf("Delete todo list %q and its %d todo item(s)? This cannot be undone.", list.Name, count))
+	}
+	if a.pagesRoot != nil {
+		a.pagesRoot.ShowPage("delete-todo-list")
+	}
+	if a.tui != nil && a.deleteTodoListModal != nil {
+		a.tui.SetFocus(a.deleteTodoListModal)
+	}
+}
+
+func (a *terminalApp) todoListItemCount(id string) int {
+	if a == nil || a.todos == nil {
+		return 0
+	}
+	store, err := a.todos.LoadList(id)
+	if err != nil {
+		return 0
+	}
+	return len(store.Items)
+}
+
+func (a *terminalApp) todoListSummary(row int, recordClickRegions bool) string {
+	catalog := a.todoLists
+	if len(catalog.Lists) == 0 && a.todos != nil {
+		loaded, err := a.todos.LoadLists()
+		if err == nil {
+			catalog = loaded
+			a.todoLists = loaded
+		}
+	}
+	current := todo.DefaultListID
+	if a.todos != nil {
+		current = a.todos.CurrentListID()
+	}
+	active := todo.ActiveLists(catalog)
+	if len(active) == 0 {
+		active = []todo.ListMeta{{ID: todo.DefaultListID, Name: todo.DefaultListName}}
+	}
+	var out strings.Builder
+	column := 0
+	for i, list := range active {
+		if i > 0 {
+			out.WriteString(" | ")
+			column += runewidth.StringWidth(" | ")
+		}
+		label := list.Name
+		if list.ID == current {
+			label = "[" + label + "]"
+		}
+		start := column
+		out.WriteString(label)
+		column += runewidth.StringWidth(label)
+		if recordClickRegions && column > start {
+			a.todoListClickRegions = append(a.todoListClickRegions, todoListClickRegion{
+				row:   row,
+				start: len("lists: ") + start,
+				end:   len("lists: ") + column,
+				index: i,
+				id:    list.ID,
+			})
+		}
+	}
+	return out.String()
+}
+
+func todoListExists(catalog todo.ListsStore, id string) bool {
+	id = todo.NormalizeListID(id)
+	for _, list := range catalog.Lists {
+		if list.ID == id && !list.Deleted {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *terminalApp) renderSync(height int) string {
@@ -3688,6 +4315,7 @@ func (a *terminalApp) configureFirebaseTodoSyncer(ctx context.Context) error {
 		TokenPath:   kokosync.TokenPath(),
 		Session:     session,
 		DeviceID:    "",
+		ListID:      a.todos.CurrentListID(),
 	}
 	a.firebaseNoteSyncer = &kokosync.NoteSyncer{
 		Provider:    provider,
@@ -3806,22 +4434,19 @@ func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
 	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
 		return nil
 	}
-	local, err := a.todos.Load()
+	catalog, err := a.firebaseTodoSyncer.SyncRepository(ctx, a.todos)
 	if err != nil {
 		return err
 	}
-	merged, changed, err := a.firebaseTodoSyncer.PullStore(ctx, local)
+	a.todoLists = catalog
+	settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+	store, err := a.todos.Load()
 	if err != nil {
 		return err
 	}
-	if !changed {
-		return nil
-	}
-	if err := a.todos.Save(merged); err != nil {
-		return err
-	}
-	a.todoStore = merged
-	a.recordFirebaseSyncOutcome(nil, "Firebase todos pulled")
+	a.todoStore = store
+	a.syncTodoListIndexToCurrent()
+	a.recordFirebaseSyncOutcome(nil, "Firebase todo lists synced")
 	a.queueUIDraw(func() {
 		a.reloadTodosForRender()
 		a.refresh()
@@ -3830,27 +4455,38 @@ func (a *terminalApp) pullTodosFromFirebase(ctx context.Context) error {
 }
 
 func (a *terminalApp) pullTodoArchiveMonthFromFirebase(ctx context.Context, month string) error {
+	listID := todo.DefaultListID
+	if a != nil && a.todos != nil {
+		listID = a.todos.CurrentListID()
+	}
+	return a.pullTodoArchiveMonthFromFirebaseForList(ctx, listID, month)
+}
+
+func (a *terminalApp) pullTodoArchiveMonthFromFirebaseForList(ctx context.Context, listID string, month string) error {
 	if err := a.ensureFirebaseSyncer(ctx); err != nil {
 		return err
 	}
 	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
 		return nil
 	}
-	local, err := a.todos.Load()
+	listID = todo.NormalizeListID(listID)
+	if listID == "" {
+		listID = todo.DefaultListID
+	}
+	local, err := a.todos.LoadList(listID)
 	if err != nil {
 		return err
 	}
-	merged, changed, err := a.firebaseTodoSyncer.PullArchiveMonth(ctx, local, month)
+	merged, changed, err := a.firebaseTodoSyncer.PullArchiveMonthForList(ctx, listID, local, month)
 	if err != nil {
 		return err
 	}
 	if !changed {
 		return nil
 	}
-	if err := a.todos.Save(merged); err != nil {
+	if err := a.todos.SaveList(listID, merged); err != nil {
 		return err
 	}
-	a.todoStore = merged
 	a.recordFirebaseSyncOutcome(nil, "Firebase todo archive pulled: "+month)
 	return nil
 }
@@ -3893,12 +4529,104 @@ func (a *terminalApp) pushTodosToFirebase(ctx context.Context) error {
 	if a.todos == nil || a.firebaseTodoSyncer == nil || !a.firebaseTodoSyncer.Ready() {
 		return nil
 	}
-	store, err := a.todos.Load()
+	previousListID := a.todos.CurrentListID()
+	catalog, err := a.todos.LoadLists()
 	if err != nil {
 		return err
 	}
-	if err := a.firebaseTodoSyncer.PushStore(ctx, store); err != nil {
+	mergedCatalog, changed, err := a.firebaseTodoSyncer.PullLists(ctx, catalog)
+	if err != nil {
 		return err
+	}
+	if changed {
+		if err := a.todos.SaveLists(mergedCatalog); err != nil {
+			return err
+		}
+		if err := a.todos.RemoveDeletedListData(mergedCatalog); err != nil {
+			return err
+		}
+		catalog, err = a.todos.LoadLists()
+		if err != nil {
+			return err
+		}
+	} else {
+		catalog = mergedCatalog
+	}
+	a.todoLists = catalog
+	listsPushed, err := a.firebaseTodoSyncer.PushLists(ctx, catalog)
+	if err != nil {
+		return err
+	}
+	if !listsPushed {
+		refreshedCatalog, refreshed, err := a.firebaseTodoSyncer.PullListsFull(ctx, catalog)
+		if err != nil {
+			return err
+		}
+		if refreshed {
+			if err := a.todos.SaveLists(refreshedCatalog); err != nil {
+				return err
+			}
+			if err := a.todos.RemoveDeletedListData(refreshedCatalog); err != nil {
+				return err
+			}
+			catalog, err = a.todos.LoadLists()
+			if err != nil {
+				return err
+			}
+		} else {
+			catalog = refreshedCatalog
+		}
+		a.todoLists = catalog
+		listsPushed, err = a.firebaseTodoSyncer.PushLists(ctx, catalog)
+		if err != nil {
+			return err
+		}
+		if !listsPushed {
+			refreshedCatalog, refreshed, err = a.firebaseTodoSyncer.PullListsFull(ctx, catalog)
+			if err != nil {
+				return err
+			}
+			if refreshed {
+				if err := a.todos.SaveLists(refreshedCatalog); err != nil {
+					return err
+				}
+				if err := a.todos.RemoveDeletedListData(refreshedCatalog); err != nil {
+					return err
+				}
+				catalog, err = a.todos.LoadLists()
+				if err != nil {
+					return err
+				}
+			} else {
+				catalog = refreshedCatalog
+			}
+			a.todoLists = catalog
+			if a.todos.CurrentListID() != previousListID {
+				settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+				a.todoArchiveExpanded = map[string]bool{}
+				if store, err := a.todos.Load(); err == nil {
+					a.todoStore = store
+				}
+			}
+			a.recordFirebaseSyncOutcome(nil, "Firebase todo metadata refreshed")
+			return nil
+		}
+	}
+	for _, list := range todo.ActiveLists(catalog) {
+		store, err := a.todos.LoadList(list.ID)
+		if err != nil {
+			return err
+		}
+		if err := a.firebaseTodoSyncer.PushStoreForList(ctx, list.ID, store); err != nil {
+			return err
+		}
+	}
+	if a.todos.CurrentListID() != previousListID {
+		settings.SaveTodoCurrentListID(a.todos.CurrentListID())
+		a.todoArchiveExpanded = map[string]bool{}
+		if store, err := a.todos.Load(); err == nil {
+			a.todoStore = store
+		}
 	}
 	a.recordFirebaseSyncOutcome(nil, "Firebase todos pushed")
 	return nil
@@ -4290,60 +5018,87 @@ func firebaseWorkspaceID(cfg *settings.FirebaseSettings, fileCfg kokosync.Fireba
 	return strings.TrimSpace(os.Getenv("KOKO_FIREBASE_WORKSPACE_ID"))
 }
 
-func (a *terminalApp) helpText() string {
+func normalizeHelpLine(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if idx := strings.Index(text, ": "); idx >= 0 {
+		return text[:idx] + " | " + text[idx+2:]
+	}
+	return text
+}
+
+func (a *terminalApp) currentHelpLine() string {
+	baseTabs := fmt.Sprintf("ctrl+t tab bar | ctrl+tab next tab | ctrl+%s tabs", a.appTabKeyHint())
 	switch a.view {
 	case viewNotes:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return a.notes.HelpText() + " | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
+		if a.notes == nil {
+			return "notes | " + baseTabs
+		}
+		return normalizeHelpLine(a.notes.HelpText()) + " | " + baseTabs
 	case viewPages:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.pages != nil && a.pages.IsEditing() {
-			return "pages/edit: digits replace selection | tab/shift+tab field | left/right cursor | backspace delete | enter apply | esc stop edit"
+			return "pages edit | digits replace selection | tab/shift+tab field | left/right cursor | backspace delete | enter apply | esc stop edit"
 		}
-		return "pages: q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | e edit | r recalc"
+		return "pages | " + baseTabs + " | ctrl+s save | j/k move | e edit | r recalc"
 	case viewPassword:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return "password: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | g generate | l/n/s toggle | +/- length"
+		return "password | " + baseTabs + " | ctrl+s save | g generate | l/n/s toggle | +/- length"
 	case viewTodo:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.todoInputMode != "" {
-			return "todo/edit: text input | enter save | esc cancel"
+			switch a.todoInputMode {
+			case "new-list":
+				return "todo lists new | text input | enter save | esc cancel"
+			case "rename-list":
+				return "todo lists rename | text input | enter save | esc cancel"
+			case "edit":
+				return "todo edit | text input | enter save | esc cancel"
+			default:
+				return "todo new | text input | enter save | esc cancel"
+			}
 		}
-		return "todo: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | n new | enter/space check | e edit | m section | J/K reorder"
+		if a.todoListFocus {
+			return "todo lists | j/k move | enter open | n new | r rename | d delete | ctrl+a tasks"
+		}
+		return "todo | " + baseTabs + " | ctrl+s save | ctrl+a lists | j/k move | n new | enter/space check | e edit | m section | J/K reorder"
 	case viewSync:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
-		return "sync: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+r quick sync | j/k move | enter run action | save locally before upload"
+		return "sync | " + baseTabs + " | ctrl+r quick sync | j/k move | enter run action | save locally before upload"
 	case viewSettings:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.tabOrderEditMode {
-			return "settings/tab order: j/k select tab | J/K move selected | enter/esc done"
+			return "settings tab order | j/k select tab | J/K move selected | enter/esc done"
 		}
 		if a.settingsEditMode {
-			return "settings/edit: digits edit | backspace delete | enter apply | esc cancel"
+			return "settings edit | digits edit | backspace delete | enter apply | esc cancel"
 		}
-		return "settings: ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs | ctrl+s save | j/k move | enter change option"
+		return "settings | " + baseTabs + " | ctrl+s save | j/k move | enter change option"
 	case viewRecorder:
 		if a.tabSelect {
-			return fmt.Sprintf("tab select: left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
+			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
 		}
 		if a.recorderCapturing {
-			return "recorder: capturing keys for 5s | all other key bindings blocked"
+			return "recorder | capturing keys for 5s | all other key bindings blocked"
 		}
-		return "recorder: started by :recordkeys | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
+		return "recorder | started by :recordkeys | " + baseTabs
 	default:
-		return "q quit | ctrl+t tab bar | ctrl+tab next tab | ctrl+" + a.appTabKeyHint() + " tabs"
+		return "app | q quit | " + baseTabs
 	}
 }
 
@@ -4479,12 +5234,20 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "+, -", desc: "change password length"},
 	})...)
 	lines = append(lines, renderSection("Todo:", []helpEntry{
+		{keys: "ctrl+a", desc: "toggle todo list/sidebar focus"},
 		{keys: "j/k, arrows", desc: "move selection"},
 		{keys: "n", desc: "create a todo"},
 		{keys: "enter, space", desc: "check or uncheck selected todo"},
 		{keys: "e", desc: "edit selected active todo"},
 		{keys: "m", desc: "move selected active todo between short and long term"},
 		{keys: "J/K", desc: "reorder selected active unchecked todo"},
+	})...)
+	lines = append(lines, renderSection("Todo lists:", []helpEntry{
+		{keys: "j/k, arrows", desc: "move list selection"},
+		{keys: "enter", desc: "open selected list"},
+		{keys: "n", desc: "create a todo list"},
+		{keys: "r", desc: "rename selected todo list"},
+		{keys: "d", desc: "delete selected named list"},
 	})...)
 	lines = append(lines, renderSection("Sync:", []helpEntry{
 		{keys: "j/k", desc: "move selection"},
