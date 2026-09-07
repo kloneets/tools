@@ -55,9 +55,9 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Run Android unit tests
+      - name: Run Android isolated unit tests
         working-directory: android
-        run: ./gradlew :app:testDebugUnitTest
+        run: ./gradlew :app:testIsolatedUnitTest
 
       - name: Run Android lint
         working-directory: android
