@@ -40,4 +40,9 @@
     <item name="settings_spell_check" type="id" />
     <item name="settings_privacy_policy" type="id" />
     <item name="settings_delete_account" type="id" />
+    <item name="todo_search_query" type="id" />
+    <item name="todo_search_count" type="id" />
+    <item name="todo_search_previous" type="id" />
+    <item name="todo_search_next" type="id" />
+    <item name="todo_search_close" type="id" />
 </resources>

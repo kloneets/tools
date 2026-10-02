@@ -12,6 +12,9 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.BackgroundColorSpan
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -50,6 +53,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+
+private data class TextEditorViewState(
+    val selectionStart: Int,
+    val selectionEnd: Int,
+    val scrollX: Int,
+    val scrollY: Int,
+    val focused: Boolean,
+)
 
 class MainActivity : ComponentActivity() {
     private lateinit var settingsRepository: SettingsRepository
@@ -98,6 +109,7 @@ class MainActivity : ComponentActivity() {
     private var suppressNoteAutosave = false
     private val notePickerExpandedFolders = mutableSetOf<String>()
     private var notePickerDialog: AlertDialog? = null
+    private val noteEditorStates = mutableMapOf<String, TextEditorViewState>()
 
     private var firstInput: EditText? = null
     private var readInput: EditText? = null
@@ -114,11 +126,16 @@ class MainActivity : ComponentActivity() {
     private var pagesLocalEditUntilMs = 0L
     private var pagesLocalEditAtMs = 0L
 	private var todoDraftText = ""
+	private var todoDraftEditorState: TextEditorViewState? = null
+	private var skipNextEditorStateCapture = false
 	private var lastSyncStatus = ""
     private val pendingRemoteNotes = mutableMapOf<String, FirebaseRemoteNote>()
     private var todoMoveMode = false
     private val todoMoveRows = mutableMapOf<String, View>()
     private var todoDraggingId: String? = null
+    private val todoSearch = TodoSearch()
+    private val todoSearchRows = mutableMapOf<String, View>()
+    private var todoSearchBar: LinearLayout? = null
     private val expandedTodoArchiveMonths = mutableSetOf<String>()
     private val loadingTodoArchiveMonths = mutableSetOf<String>()
 
@@ -421,6 +438,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showScreen(screen: Screen) {
+        if (skipNextEditorStateCapture) {
+            skipNextEditorStateCapture = false
+        } else {
+            captureCurrentEditorState()
+        }
         val changed = currentScreen != screen
         currentScreen = screen
         val lastScreen = screen.settingValue
@@ -430,6 +452,48 @@ class MainActivity : ComponentActivity() {
         if (changed) {
             syncCurrentScreenToFirebase()
         }
+    }
+
+    private fun captureCurrentEditorState() {
+        when (currentScreen) {
+            Screen.Notes -> captureCurrentNoteEditorState()
+            Screen.Todo -> captureTodoDraftEditorState()
+            else -> Unit
+        }
+    }
+
+    private fun captureCurrentNoteEditorState() {
+        val state = noteEditor?.captureEditorState()?.let {
+            TextEditorViewState(it.selectionStart, it.selectionEnd, it.scrollX, it.scrollY, it.focused)
+        } ?: rawNoteEditor?.captureViewState() ?: return
+        noteEditorStates[currentNotePath] = state
+    }
+
+    private fun captureTodoDraftEditorState() {
+        todoDraftEditorState = findViewById<EditText?>(R.id.todo_input)?.captureViewState()
+            ?: todoDraftEditorState
+    }
+
+    private fun EditText.captureViewState(): TextEditorViewState {
+        return TextEditorViewState(
+            selectionStart = selectionStart.coerceAtLeast(0),
+            selectionEnd = selectionEnd.coerceAtLeast(0),
+            scrollX = scrollX,
+            scrollY = scrollY,
+            focused = hasFocus(),
+        )
+    }
+
+    private fun EditText.restoreViewState(state: TextEditorViewState) {
+        setSelection(
+            state.selectionStart.coerceIn(0, length()),
+            state.selectionEnd.coerceIn(0, length()),
+        )
+        if (state.focused) {
+            requestFocus()
+            post { requestFocus() }
+        }
+        post { scrollTo(state.scrollX, state.scrollY) }
     }
 
     private fun showNotes() {
@@ -564,7 +628,7 @@ class MainActivity : ComponentActivity() {
         cancelPendingNoteAutosave()
         currentNotePath = relativePath
         loadedNoteText = notesRepository.read(relativePath)
-        setEditorTextFromNote(loadedNoteText)
+        setEditorTextFromNote(loadedNoteText, noteEditorStates[relativePath])
         persistSettings(
             settings.copy(notesApp = settings.notesApp.copy(currentNotePath = relativePath)),
         )
@@ -582,14 +646,30 @@ class MainActivity : ComponentActivity() {
         return currentNotePath.ifBlank { "No note selected" }
     }
 
-    private fun setEditorTextFromNote(text: String) {
+    private fun setEditorTextFromNote(text: String, state: TextEditorViewState? = null) {
         suppressNoteAutosave = true
         try {
             noteEditor?.setMarkdown(text, 0)
-            noteEditor?.scrollEditorToTop()
+            if (state == null) {
+                noteEditor?.scrollEditorToTop()
+            } else {
+                noteEditor?.restoreEditorState(
+                    MarkdownEditorState(
+                        state.selectionStart,
+                        state.selectionEnd,
+                        state.scrollX,
+                        state.scrollY,
+                        state.focused,
+                    ),
+                )
+            }
             rawNoteEditor?.setText(text)
-            rawNoteEditor?.setSelection(0)
-            rawNoteEditor?.post { rawNoteEditor?.scrollTo(0, 0) }
+            if (state == null) {
+                rawNoteEditor?.setSelection(0)
+                rawNoteEditor?.post { rawNoteEditor?.scrollTo(0, 0) }
+            } else {
+                rawNoteEditor?.restoreViewState(state)
+            }
         } finally {
             suppressNoteAutosave = false
         }
@@ -636,6 +716,7 @@ class MainActivity : ComponentActivity() {
 
     private fun clearCurrentNoteFromRemoteDelete() {
         if (currentNotePath.isBlank() && loadedNoteText.isEmpty() && noteEditorText().isEmpty()) return
+        noteEditorStates.remove(currentNotePath)
         currentNotePath = ""
         loadedNoteText = ""
         setEditorTextFromNote("")
@@ -768,6 +849,7 @@ class MainActivity : ComponentActivity() {
             afterSwitch()
             return
         }
+        captureCurrentNoteEditorState()
         val previousPath = currentNotePath
         saveCurrentNoteSilently()
         if (previousPath.isNotBlank()) {
@@ -808,6 +890,8 @@ class MainActivity : ComponentActivity() {
             .setView(form)
             .setPositiveButton("Create") { _, _ ->
                 val path = NotesRepository.buildNewNotePath(selectedFolder, input.text.toString())
+                captureCurrentNoteEditorState()
+                noteEditorStates.remove(path)
                 currentNotePath = path
                 notesRepository.save(path, "")
                 pushNoteToFirebase(path, "")
@@ -845,10 +929,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun saveCurrentNoteInternal(showToast: Boolean, refreshList: Boolean) {
+        val previousPath = currentNotePath
         val path = currentNotePath.ifBlank { "untitled.md" }
         val text = noteEditorText()
         val saved = notesRepository.save(path, text)
         currentNotePath = saved.relativePath
+        if (previousPath != saved.relativePath) {
+            noteEditorStates.remove(previousPath)?.let { state ->
+                noteEditorStates[saved.relativePath] = state
+            }
+        }
         persistSettings(
             settings.copy(notesApp = settings.notesApp.copy(currentNotePath = saved.relativePath)),
         )
@@ -898,6 +988,7 @@ class MainActivity : ComponentActivity() {
                         deleteLocal = { notesRepository.delete(path) },
                         afterDelete = {
                             pushNoteDeleteToFirebase(path)
+                            noteEditorStates.remove(path)
                             currentNotePath = ""
                             loadedNoteText = ""
                             persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
@@ -1015,6 +1106,9 @@ class MainActivity : ComponentActivity() {
         refreshTodoLists()
         val currentListName = currentTodoListName()
         setScreenHeader("Todo", if (todoMoveMode) "$currentListName - Move tasks" else currentListName)
+        todoSearch.selectList(todoRepository.currentListId())
+        val searchFocused = todoSearchBar?.findViewById<EditText>(R.id.todo_search_query)?.hasFocus() == true
+        (todoSearchBar?.parent as? ViewGroup)?.removeView(todoSearchBar)
         content.removeAllViews()
         content.orientation = LinearLayout.VERTICAL
         content.setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -1036,7 +1130,13 @@ class MainActivity : ComponentActivity() {
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT
             setText(todoDraftText)
-            setSelection(text.length)
+            if (todoDraftEditorState == null) {
+                setSelection(text.length)
+            } else {
+                restoreViewState(requireNotNull(todoDraftEditorState).let { state ->
+                    if (todoSearch.open) state.copy(focused = false) else state
+                })
+            }
             setTextColor(COLOR_TEXT_PRIMARY)
             setHintTextColor(COLOR_TEXT_MUTED)
             background = roundedStroke(COLOR_SURFACE, COLOR_BORDER, dp(10).toFloat())
@@ -1055,6 +1155,8 @@ class MainActivity : ComponentActivity() {
             pushTodosToFirebase()
             todoDraftText = ""
             input.setText("")
+            todoDraftEditorState = null
+            skipNextEditorStateCapture = true
             showTodo()
         }.apply {
             layoutParams = LinearLayout.LayoutParams(dp(84), dp(48)).apply {
@@ -1064,6 +1166,13 @@ class MainActivity : ComponentActivity() {
         inputRow.addView(input)
         inputRow.addView(addButton)
         content.addView(inputRow)
+        if (todoSearch.open) {
+            val bar = todoSearchBar ?: createTodoSearchBar().also { todoSearchBar = it }
+            content.addView(bar)
+            if (searchFocused) bar.findViewById<EditText>(R.id.todo_search_query).requestFocus()
+        } else {
+            todoSearchBar = null
+        }
 
         val scroll = ScrollView(this).apply {
             id = R.id.todo_list
@@ -1079,6 +1188,21 @@ class MainActivity : ComponentActivity() {
         scroll.addView(list)
         content.addView(scroll)
 
+        renderTodoSearchResults()
+        scheduleTodoBoundaryRefresh()
+    }
+
+    private fun renderTodoSearchResults(reveal: Boolean = true) {
+        todoSearch.refresh(todoStore)
+        if (reveal) {
+            TodoRepository.archiveGroups(todoStore).forEach { (month, items) ->
+                if (items.any { it.id == todoSearch.selectedId }) expandedTodoArchiveMonths.add(month)
+            }
+        }
+        val scroll = findViewById<ScrollView>(R.id.todo_list) ?: return
+        val list = scroll.getChildAt(0) as LinearLayout
+        list.removeAllViews()
+        todoSearchRows.clear()
         TodoScreenRows.activeSections(todoStore).forEach { section ->
             addTodoSection(list, section, archived = false)
         }
@@ -1096,7 +1220,65 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        scheduleTodoBoundaryRefresh()
+        findViewById<TextView?>(R.id.todo_search_count)?.text = todoSearch.counter()
+        if (reveal && todoSearch.open) scroll.post {
+            todoSearchRows[todoSearch.selectedId]?.let { scroll.smoothScrollTo(0, it.top) }
+        }
+    }
+
+    private fun openTodoSearch() {
+        todoSearch.selectList(todoRepository.currentListId())
+        todoSearch.open = true
+        showTodo()
+        findViewById<EditText>(R.id.todo_search_query).apply {
+            requestFocus()
+            post { (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(this, InputMethodManager.SHOW_IMPLICIT) }
+        }
+    }
+
+    private fun createTodoSearchBar(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(TextView(this@MainActivity).apply {
+            text = "Current list · active + loaded archive"
+            setTextColor(COLOR_TEXT_MUTED)
+        })
+        addView(EditText(this@MainActivity).apply {
+            id = R.id.todo_search_query
+            hint = "Search tasks"
+            setSingleLine(true)
+            setTextColor(COLOR_TEXT_PRIMARY)
+            setHintTextColor(COLOR_TEXT_MUTED)
+            setText(todoSearch.query)
+            setSelection(text.length)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun afterTextChanged(s: Editable?) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    todoSearch.query = s?.toString().orEmpty()
+                    renderTodoSearchResults()
+                }
+            })
+        })
+        addView(LinearLayout(this@MainActivity).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                id = R.id.todo_search_count
+                setTextColor(COLOR_TEXT_PRIMARY)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            addView(commandButton("Previous", R.id.todo_search_previous) {
+                todoSearch.move(-1)
+                renderTodoSearchResults()
+            })
+            addView(commandButton("Next", R.id.todo_search_next) {
+                todoSearch.move(1)
+                renderTodoSearchResults()
+            })
+            addView(commandButton("Close", R.id.todo_search_close) {
+                todoSearch.close()
+                showTodo()
+            })
+        })
     }
 
     private fun todoArchiveMonthRow(month: String, cachedCount: Int): TextView {
@@ -1185,7 +1367,7 @@ class MainActivity : ComponentActivity() {
         val scrollY = findViewById<ScrollView?>(R.id.todo_list)?.scrollY ?: 0
         showTodo()
         findViewById<ScrollView?>(R.id.todo_list)?.post {
-            findViewById<ScrollView?>(R.id.todo_list)?.scrollTo(0, scrollY)
+            if (todoSearch.selectedId == null) findViewById<ScrollView?>(R.id.todo_list)?.scrollTo(0, scrollY)
         }
     }
 
@@ -1209,6 +1391,7 @@ class MainActivity : ComponentActivity() {
 
     private fun todoRow(item: TodoItem, archived: Boolean): LinearLayout {
         return LinearLayout(this).apply {
+            todoSearchRows[item.id] = this
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), dp(6), dp(4), dp(6))
@@ -1218,6 +1401,9 @@ class MainActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { bottomMargin = dp(6) }
 
+            if (todoSearch.open && item.id == todoSearch.selectedId) {
+                background = roundedStroke(COLOR_SURFACE, COLOR_ACCENT, dp(8).toFloat())
+            }
             val checked = item.checkedAt != null || item.status == TodoRepository.STATUS_DONE || item.status == TodoRepository.STATUS_ARCHIVED
             val reorderable = canReorderTodo(item, archived)
             val checkBox = CheckBox(this@MainActivity).apply {
@@ -1232,7 +1418,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val label = TextView(this@MainActivity).apply {
-                text = item.text
+                text = SpannableString(item.text).apply {
+                    if (todoSearch.open) fuzzyTodoMatch(item.text, todoSearch.query)?.forEach { offset ->
+                        setSpan(BackgroundColorSpan(COLOR_ACCENT), offset,
+                            offset + Character.charCount(item.text.codePointAt(offset)), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }
                 textSize = 16f
                 setTextColor(if (archived) COLOR_TEXT_MUTED else COLOR_TEXT_PRIMARY)
                 if (checked) paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
@@ -1386,6 +1577,10 @@ class MainActivity : ComponentActivity() {
 
     private fun showTodoActionsMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
+            menu.add("Search").setOnMenuItemClickListener {
+                openTodoSearch()
+                true
+            }
             menu.add("Open list").setOnMenuItemClickListener {
                 showTodoListPicker()
                 true
@@ -1451,6 +1646,8 @@ class MainActivity : ComponentActivity() {
         loadingTodoArchiveMonths.clear()
         todoMoveMode = false
         todoDraftText = ""
+        todoDraftEditorState = null
+        skipNextEditorStateCapture = true
         persistTodoListSelectionIfChanged(todoRepository.currentListId())
         showTodo()
     }
@@ -2027,6 +2224,11 @@ class MainActivity : ComponentActivity() {
         todoLists = result.catalog
         todoStore = result.pullResult.todos
         persistTodoListSelectionIfChanged(result.currentListId)
+        val searchWasOpen = todoSearch.open
+        todoSearch.selectList(result.currentListId)
+        if (currentScreen == Screen.Todo && searchWasOpen) {
+            if (!todoSearch.open) showTodo() else renderTodoSearchResults()
+        }
     }
 
     private fun syncTodoView(session: FirebaseSession) {
@@ -2281,10 +2483,12 @@ class MainActivity : ComponentActivity() {
                         loadingTodoArchiveMonths.clear()
                         todoMoveMode = false
                         todoDraftText = ""
+                        todoDraftEditorState = null
                     }
                     todoStore = todoRepository.load()
                     if (currentScreen == Screen.Todo) {
                         if (selectionChanged) {
+                            skipNextEditorStateCapture = true
                             showTodo()
                         } else {
                             showTodoPreservingScroll()
@@ -2596,6 +2800,7 @@ class MainActivity : ComponentActivity() {
                     val shared = result.second
                     applyTodoFirebaseSyncResult(todoSync)
                     notesRepository.clearAll()
+                    noteEditorStates.clear()
                     shared?.let {
                         settings = SettingsRepository.applySharedSettings(settings, it.values)
                         settingsRepository.save(settings)
@@ -2640,6 +2845,7 @@ class MainActivity : ComponentActivity() {
                 return@forEach
             }
             if (remote.deleted) {
+                noteEditorStates.remove(path)
                 if (isCurrent) {
                     clearCurrentNoteFromRemoteDelete()
                 }
@@ -2671,6 +2877,7 @@ class MainActivity : ComponentActivity() {
     private fun applyPendingRemoteNoteToFile(path: String, savedText: String, updateEditor: Boolean) {
         val remote = pendingRemoteNotes.remove(path) ?: return
         if (remote.deleted) {
+            noteEditorStates.remove(path)
             if (savedText.isNotBlank()) {
                 val conflictPath = conflictNotePath(path)
                 notesRepository.save(conflictPath, savedText)

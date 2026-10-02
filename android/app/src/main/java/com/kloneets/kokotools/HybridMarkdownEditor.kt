@@ -32,6 +32,14 @@ data class MarkdownSegment(
     val renderAsSource: Boolean = false,
 )
 
+data class MarkdownEditorState(
+    val selectionStart: Int,
+    val selectionEnd: Int,
+    val scrollX: Int,
+    val scrollY: Int,
+    val focused: Boolean,
+)
+
 object MarkdownDocumentModel {
     fun segments(markdown: String, activeOffset: Int): List<MarkdownSegment> {
         if (markdown.isEmpty()) {
@@ -236,6 +244,35 @@ class HybridMarkdownEditor(
     }
 
     fun getMarkdown(): String = markdown
+
+    fun captureEditorState(): MarkdownEditorState {
+        val selectionStart = (activeRange.first + activeEditText.selectionStart.coerceAtLeast(0))
+            .coerceIn(0, markdown.length)
+        val selectionEnd = (activeRange.first + activeEditText.selectionEnd.coerceAtLeast(0))
+            .coerceIn(0, markdown.length)
+        return MarkdownEditorState(
+            selectionStart = selectionStart,
+            selectionEnd = selectionEnd,
+            scrollX = scrollX,
+            scrollY = scrollY,
+            focused = activeEditText.hasFocus(),
+        )
+    }
+
+    fun restoreEditorState(state: MarkdownEditorState) {
+        val selectionStart = state.selectionStart.coerceIn(0, markdown.length)
+        val selectionEnd = state.selectionEnd.coerceIn(0, markdown.length)
+        activeOffset = selectionEnd
+        rebuild()
+        activeEditText.setSelection(
+            (selectionStart - activeRange.first).coerceIn(0, activeEditText.length()),
+            (selectionEnd - activeRange.first).coerceIn(0, activeEditText.length()),
+        )
+        if (state.focused) {
+            focusActiveEditor(showKeyboard = false)
+        }
+        post { scrollTo(state.scrollX, state.scrollY) }
+    }
 
     fun setSpellCheckEnabled(enabled: Boolean) {
         spellCheckEnabled = enabled

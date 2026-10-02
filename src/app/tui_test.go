@@ -1523,6 +1523,113 @@ func TestHandleGlobalKeyCtrlTabCyclesAppTabs(t *testing.T) {
 	}
 }
 
+func TestSwitchAppTabPreservesNotesEditorCursor(t *testing.T) {
+	workspace := &notes.Workspace{
+		Tabs: []*notes.Editor{{
+			Text:      "alpha beta",
+			Cursor:    6,
+			ScrollTop: 2,
+			Mode:      notes.ModeInsert,
+		}},
+	}
+	app := &terminalApp{view: viewNotes, notes: workspace}
+
+	app.switchAppTab(viewTodo)
+	app.switchAppTab(viewNotes)
+
+	if got := workspace.ActiveEditor().Cursor; got != 6 {
+		t.Fatalf("notes cursor = %d, want 6 after app tab switch", got)
+	}
+	if got := workspace.ActiveEditor().ScrollTop; got != 2 {
+		t.Fatalf("notes scroll top = %d, want 2 after app tab switch", got)
+	}
+}
+
+func TestSwitchAppTabPreservesTodoCursorState(t *testing.T) {
+	tests := []struct {
+		name  string
+		app   *terminalApp
+		check func(*testing.T, *terminalApp)
+	}{
+		{
+			name: "selected row",
+			app:  &terminalApp{view: viewTodo, todoIndex: 3},
+			check: func(t *testing.T, app *terminalApp) {
+				if app.todoIndex != 3 {
+					t.Fatalf("todo index = %d, want 3", app.todoIndex)
+				}
+			},
+		},
+		{
+			name: "input caret",
+			app: &terminalApp{
+				view:                  viewTodo,
+				todoInputMode:         "new",
+				todoInputBuffer:       "alpha",
+				todoInputCursorOffset: 2,
+			},
+			check: func(t *testing.T, app *terminalApp) {
+				if app.todoInputMode != "new" || app.todoInputBuffer != "alpha" || app.todoInputCursorOffset != 2 {
+					t.Fatalf("todo input state = %q/%q/%d, want new/alpha/2", app.todoInputMode, app.todoInputBuffer, app.todoInputCursorOffset)
+				}
+			},
+		},
+		{
+			name: "list sidebar cursor",
+			app: &terminalApp{
+				view:          viewTodo,
+				todoListFocus: true,
+				todoListIndex: 4,
+			},
+			check: func(t *testing.T, app *terminalApp) {
+				if !app.todoListFocus || app.todoListIndex != 4 {
+					t.Fatalf("todo list focus/index = %t/%d, want true/4", app.todoListFocus, app.todoListIndex)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.app.switchAppTab(viewNotes)
+			test.app.switchAppTab(viewTodo)
+			test.check(t, test.app)
+		})
+	}
+}
+
+func TestHandleGlobalKeyTabRoutesPreserveNotesAndTodoCursorState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	settings.Init()
+	workspace := &notes.Workspace{
+		Tabs: []*notes.Editor{{Text: "alpha", Cursor: 3, ScrollTop: 1, Mode: notes.ModeInsert}},
+	}
+	app := &terminalApp{
+		view:                  viewNotes,
+		notes:                 workspace,
+		todoIndex:             2,
+		todoListIndex:         3,
+		todoListFocus:         true,
+		todoInputMode:         "new",
+		todoInputBuffer:       "bravo",
+		todoInputCursorOffset: 2,
+	}
+
+	if !app.handleGlobalKey(notes.Key{Name: "4", Rune: '4', Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+4) = false, want true")
+	}
+	if !app.handleGlobalKey(notes.Key{Name: "1", Rune: '1', Ctrl: true}) {
+		t.Fatal("handleGlobalKey(ctrl+1) = false, want true")
+	}
+
+	if app.view != viewNotes || workspace.ActiveEditor().Cursor != 3 || workspace.ActiveEditor().ScrollTop != 1 {
+		t.Fatalf("notes state after routed tab switches = view %v cursor %d scroll %d", app.view, workspace.ActiveEditor().Cursor, workspace.ActiveEditor().ScrollTop)
+	}
+	if app.todoIndex != 2 || app.todoListIndex != 3 || !app.todoListFocus || app.todoInputCursorOffset != 2 {
+		t.Fatalf("todo state after routed tab switches = row %d list %d focus %t input cursor %d", app.todoIndex, app.todoListIndex, app.todoListFocus, app.todoInputCursorOffset)
+	}
+}
+
 func TestHandleGlobalKeyPlainTabFallbackCyclesOutsideEditing(t *testing.T) {
 	ws := &notes.Workspace{
 		Tabs:       []*notes.Editor{{Text: "alpha", Mode: notes.ModeNormal}},

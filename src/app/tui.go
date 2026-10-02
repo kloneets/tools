@@ -63,6 +63,9 @@ type terminalApp struct {
 	todoStore              todo.Store
 	todoLists              todo.ListsStore
 	todoIndex              int
+	todoSearch             todoSearchState
+	todoScroll             int
+	todoScrollManual       bool
 	todoListIndex          int
 	todoListFocus          bool
 	todoInputMode          string
@@ -1000,6 +1003,18 @@ func (a *terminalApp) handleTodoMouse(event *tcell.EventMouse, action tview.Mous
 		offset = textOffsetAtPosition(a.singleLinkText, y-sy, x-sx)
 	}
 	switch action {
+	case tview.MouseScrollUp, tview.MouseScrollDown:
+		if !inside {
+			return false
+		}
+		a.todoScrollManual = true
+		if action == tview.MouseScrollUp {
+			a.todoScroll -= 3
+		} else {
+			a.todoScroll += 3
+		}
+		a.refresh()
+		return true
 	case tview.MouseLeftDown:
 		if !inside {
 			return false
@@ -1049,6 +1064,7 @@ func (a *terminalApp) handleTodoMouse(event *tcell.EventMouse, action tview.Mous
 		}
 		if todoIndex, ok := a.todoClickRows[y-sy]; ok {
 			a.todoIndex = todoIndex
+			a.todoScrollManual = false
 			a.todoListFocus = false
 			a.refresh()
 			return true
@@ -1354,6 +1370,9 @@ func (a *terminalApp) handleGlobalKey(key notes.Key) bool {
 		return true
 	}
 	if a.recorderCapturing {
+		return true
+	}
+	if a.view == viewTodo && !a.showHelp && !a.tabSelect && a.handleTodoSearchKey(key) {
 		return true
 	}
 	if key.Ctrl && key.Name == "s" {
@@ -1819,11 +1838,13 @@ func (a *terminalApp) handleTodoKey(key notes.Key) bool {
 	rows := a.todoSelectableRows()
 	switch key.Name {
 	case "down", "j":
+		a.todoScrollManual = false
 		if a.todoIndex < len(rows)-1 {
 			a.todoIndex++
 		}
 		return true
 	case "up", "k":
+		a.todoScrollManual = false
 		if a.todoIndex > 0 {
 			a.todoIndex--
 		}
@@ -2103,6 +2124,7 @@ func (a *terminalApp) reloadTodosForRender() {
 		return
 	}
 	a.todoStore = store
+	a.updateTodoSearch()
 	a.clampTodoIndex()
 }
 
@@ -3071,7 +3093,7 @@ func (a *terminalApp) refreshTodoBody() {
 		a.single.SetTitle("Todo")
 		a.single.SetWrap(false)
 		a.single.SetWordWrap(false)
-		text := a.renderTodo(bodyHeight)
+		text := a.renderTodo(contentHeight)
 		a.singleLinkText = helpers.StripANSI(text)
 		styled := styleSupportedLinks(text)
 		if a.todoSelection.visible {
@@ -3433,6 +3455,12 @@ func (a *terminalApp) showCursor(screen tcell.Screen) {
 				return
 			}
 		}
+		if a.view == viewTodo && a.todoSearch.editing {
+			x, y, width, height := a.single.GetInnerRect()
+			screen.SetCursorStyle(tcell.CursorStyleSteadyBar)
+			screen.ShowCursor(x+max(0, min(width-1, 1+runewidth.StringWidth(a.todoSearch.query))), y+max(0, height-1))
+			return
+		}
 		if a.view == viewTodo && a.todoInputMode != "" {
 			x, y, width, height := a.single.GetInnerRect()
 			row, col := a.todoInputCursor()
@@ -3667,6 +3695,7 @@ func (a *terminalApp) renderPassword(height int) string {
 
 func (a *terminalApp) renderTodo(height int) string {
 	a.reloadTodosForRender()
+	a.updateTodoSearch()
 	a.todoClickRows = map[int]int{}
 	a.todoListClickRegions = nil
 	itemIndexes := map[string]int{}
@@ -3720,9 +3749,12 @@ func (a *terminalApp) renderTodo(height int) string {
 				prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, "> ")
 			}
 			box := "[ ]"
-			text := item.Text
+			text := a.todoSearchText(item.Text)
 			if item.CheckedAt != nil || item.Status == todo.StatusDone || item.Status == todo.StatusArchived {
 				box = "[x]"
+				if item.Status == todo.StatusDone {
+					text = item.Text
+				}
 				text = "~" + text + "~"
 			}
 			if archived {
@@ -3756,15 +3788,17 @@ func (a *terminalApp) renderTodo(height int) string {
 			lines = append(lines, fmt.Sprintf("%s[%s] %s", prefix, marker, month))
 			if a.todoArchiveExpanded != nil && a.todoArchiveExpanded[month] {
 				for _, item := range groups[month] {
-					lines = append(lines, "    [-] ~"+item.Text+"~")
+					a.todoClickRows[len(lines)] = itemIndexes[item.ID]
+					prefix := "    "
+					if item.ID == selectedID {
+						prefix = helpers.ANSI(helpers.ANSIBold+helpers.ANSIFgGreen, ">   ")
+					}
+					lines = append(lines, prefix+"[-] ~"+a.todoSearchText(item.Text)+"~")
 				}
 			}
 		}
 	}
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-	return strings.Join(lines[:height], "\n")
+	return a.todoViewport(lines, height)
 }
 
 func (a *terminalApp) currentTodoList() (todo.ListMeta, bool) {
@@ -5069,10 +5103,13 @@ func (a *terminalApp) currentHelpLine() string {
 				return "todo new | text input | enter save | esc cancel"
 			}
 		}
+		if a.todoSearch.active {
+			return "todo search | enter confirm | n next | N reverse | esc cancel/clear | / forward | ? backward"
+		}
 		if a.todoListFocus {
 			return "todo lists | j/k move | enter open | n new | r rename | d delete | ctrl+a tasks"
 		}
-		return "todo | " + baseTabs + " | ctrl+s save | ctrl+a lists | j/k move | n new | enter/space check | e edit | m section | J/K reorder"
+		return "todo | " + baseTabs + " | ctrl+s save | ctrl+a lists | j/k move | /,? search | n new | enter/space check | e edit | m section | J/K reorder"
 	case viewSync:
 		if a.tabSelect {
 			return fmt.Sprintf("tab select | left/right move | %s jump | ctrl+%s direct jump | enter confirm | esc cancel", a.appTabKeyHint(), a.appTabKeyHint())
@@ -5236,7 +5273,9 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 	lines = append(lines, renderSection("Todo:", []helpEntry{
 		{keys: "ctrl+a", desc: "toggle todo list/sidebar focus"},
 		{keys: "j/k, arrows", desc: "move selection"},
-		{keys: "n", desc: "create a todo"},
+		{keys: "n", desc: "create a todo (repeat direction while searching)"},
+		{keys: "/, ?", desc: "fuzzy search current list forward/backward"},
+		{keys: "N, esc", desc: "reverse search direction, clear search"},
 		{keys: "enter, space", desc: "check or uncheck selected todo"},
 		{keys: "e", desc: "edit selected active todo"},
 		{keys: "m", desc: "move selected active todo between short and long term"},

@@ -31,6 +31,12 @@ func (a *terminalApp) todoSelectableRows() []todoSelectableRow {
 	}
 	for _, month := range todo.ArchiveMonths(a.todoStore) {
 		rows = append(rows, todoSelectableRow{archiveMonth: month})
+		if a.todoArchiveExpanded[month] {
+			for _, item := range todo.ArchiveMonthItems(a.todoStore, month) {
+				item := item
+				rows = append(rows, todoSelectableRow{item: &item})
+			}
+		}
 	}
 	return rows
 }

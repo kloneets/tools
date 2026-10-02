@@ -30,6 +30,94 @@ class MainActivityTest {
     }
 
     @Test
+    fun todoFindPreservesInputAndDraftAndNavigatesLoadedResults() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        TodoRepository(context).apply { add("groceries"); add("green cabbage") }
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                activity.findViewById<EditText>(R.id.todo_input).apply {
+                    setText("unfinished draft")
+                    setSelection(3)
+                    requestFocus()
+                }
+                MainActivity::class.java.getDeclaredMethod("openTodoSearch").apply { isAccessible = true }.invoke(activity)
+                val query = activity.findViewById<EditText>(R.id.todo_search_query)
+                query.setText("grc")
+                query.setSelection(1)
+                assertEquals("1 / 2", activity.findViewById<TextView>(R.id.todo_search_count).text.toString())
+                activity.findViewById<View>(R.id.todo_search_previous).performClick()
+                assertEquals("2 / 2", activity.findViewById<TextView>(R.id.todo_search_count).text.toString())
+                assertTrue(query === activity.findViewById<EditText>(R.id.todo_search_query))
+                assertEquals(1, query.selectionStart)
+                assertTrue(query.hasFocus())
+                assertEquals("unfinished draft", activity.findViewById<EditText>(R.id.todo_input).text.toString())
+                assertEquals(3, activity.findViewById<EditText>(R.id.todo_input).selectionStart)
+                showNotes(activity)
+                showTodo(activity)
+                assertEquals("grc", activity.findViewById<EditText>(R.id.todo_search_query).text.toString())
+                activity.findViewById<EditText>(R.id.todo_search_query).setText("missing")
+                assertEquals("No matches", activity.findViewById<TextView>(R.id.todo_search_count).text.toString())
+                activity.findViewById<View>(R.id.todo_search_close).performClick()
+                assertNull(activity.findViewById<View>(R.id.todo_search_query))
+            }
+        }
+    }
+
+    @Test
+    fun todoFindRevealsLoadedArchiveAfterLayoutAndKeepsQueryFocus() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val repository = TodoRepository(context)
+        repeat(30) { repository.add("task $it") }
+        val archived = repository.add("archived groceries").items.first { it.text == "archived groceries" }
+        repository.save(repository.load().copy(items = repository.load().items.map {
+            if (it.id == archived.id) it.copy(status = TodoRepository.STATUS_ARCHIVED,
+                archivedAt = java.time.OffsetDateTime.parse("2026-01-01T00:00:00Z")) else it
+        }))
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                activity.findViewById<EditText>(R.id.todo_input).requestFocus()
+                MainActivity::class.java.getDeclaredMethod("openTodoSearch").apply { isAccessible = true }.invoke(activity)
+                activity.findViewById<EditText>(R.id.todo_search_query).setText("grc")
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            SystemClock.sleep(600)
+            scenario.onActivity { activity ->
+                assertTrue(activity.findViewById<EditText>(R.id.todo_search_query).hasFocus())
+                assertEquals("1 / 1", activity.findViewById<TextView>(R.id.todo_search_count).text.toString())
+                val rows = MainActivity::class.java.getDeclaredField("todoSearchRows").apply { isAccessible = true }
+                    .get(activity) as Map<*, *>
+                val row = rows[archived.id] as View
+                assertTrue(row.getGlobalVisibleRect(android.graphics.Rect()))
+                assertTrue(activity.findViewById<android.widget.ScrollView>(R.id.todo_list).scrollY > 0)
+            }
+        }
+    }
+
+    @Test
+    fun todoFindRefreshesAfterEditsAndClearsForAnotherList() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val repository = TodoRepository(context)
+        val task = repository.add("groceries").items.single()
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                MainActivity::class.java.getDeclaredMethod("openTodoSearch").apply { isAccessible = true }.invoke(activity)
+                activity.findViewById<EditText>(R.id.todo_search_query).setText("grc")
+                assertEquals("1 / 1", activity.findViewById<TextView>(R.id.todo_search_count).text.toString())
+                repository.edit(task.id, "other task")
+                showTodo(activity)
+                assertEquals("No matches", activity.findViewById<TextView>(R.id.todo_search_count).text.toString())
+                val other = repository.createList("Another").second
+                MainActivity::class.java.getDeclaredMethod("selectTodoList", String::class.java).apply { isAccessible = true }
+                    .invoke(activity, other.id)
+                assertNull(activity.findViewById<View>(R.id.todo_search_query))
+            }
+        }
+    }
+
+    @Test
     fun instrumentationRunsAgainstIsolatedTargetPackageWithFirebaseDisabled() {
         assertEquals("com.kloneets.kokotools.testhost", BuildConfig.APPLICATION_ID)
         assertEquals("", BuildConfig.FIREBASE_API_KEY)
@@ -273,6 +361,308 @@ class MainActivityTest {
     }
 
     @Test
+    fun rawNoteRestoresSelectionAndFocusAfterTodoNavigation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("raw.md", "alpha beta")
+                setPrivateField(activity, "currentNotePath", "raw.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "raw.md", previewHidden = true)),
+                )
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).apply {
+                    requestFocus()
+                    setSelection(2, 7)
+                }
+                showTodo(activity)
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).let { editor ->
+                    assertEquals(2, editor.selectionStart)
+                    assertEquals(7, editor.selectionEnd)
+                    assertTrue(editor.hasFocus())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun richNoteRestoresDocumentSelectionAfterTodoNavigation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("rich.md", "alpha\nbeta")
+                setPrivateField(activity, "currentNotePath", "rich.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "rich.md", previewHidden = false)),
+                )
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).apply {
+                    requestFocus()
+                    setSelection(3)
+                }
+                showTodo(activity)
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).let { editor ->
+                    assertEquals(3, editor.selectionStart)
+                    assertEquals(3, editor.selectionEnd)
+                    assertTrue(editor.hasFocus())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun noteSelectionsAreRememberedPerNote() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("a.md", "alpha")
+                repository.save("b.md", "bravo")
+                setPrivateField(activity, "currentNotePath", "a.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "a.md", previewHidden = true)),
+                )
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(2)
+                requestNoteSwitch(activity, "b.md")
+                assertEquals(0, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(4)
+                requestNoteSwitch(activity, "a.md")
+                assertEquals(2, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+
+                requestNoteSwitch(activity, "b.md")
+                assertEquals(4, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun untitledNoteKeepsSelectionWhenSwitchedBeforeAutosave() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                setPrivateField(activity, "currentNotePath", "")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "", previewHidden = true)),
+                )
+                showNotes(activity)
+                repository.save("other.md", "other")
+
+                activity.findViewById<EditText>(R.id.note_editor).apply {
+                    setText("draft text")
+                    setSelection(3)
+                }
+                requestNoteSwitch(activity, "other.md")
+                requestNoteSwitch(activity, "untitled.md")
+
+                assertEquals("draft text", activity.findViewById<EditText>(R.id.note_editor).text.toString())
+                assertEquals(3, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun remoteDeleteClearsRememberedStateForNonCurrentNote() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("a.md", "alpha")
+                repository.save("b.md", "bravo")
+                setPrivateField(activity, "currentNotePath", "a.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "a.md", previewHidden = true)),
+                )
+                showNotes(activity)
+                requestNoteSwitch(activity, "b.md")
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(4)
+                requestNoteSwitch(activity, "a.md")
+
+                applyRemoteNotes(
+                    activity,
+                    listOf(FirebaseRemoteNote("b", "b.md", "", 1L, deleted = true)),
+                )
+                repository.save("b.md", "new")
+                requestNoteSwitch(activity, "b.md")
+
+                assertEquals(0, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun deferredRemoteDeleteClearsRememberedStateWhenSwitchingAway() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("a.md", "alpha")
+                repository.save("b.md", "bravo")
+                setPrivateField(activity, "currentNotePath", "b.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "b.md", previewHidden = true)),
+                )
+                showNotes(activity)
+                activity.findViewById<EditText>(R.id.note_editor).apply {
+                    setText("local draft")
+                    setSelection(5)
+                }
+                applyRemoteNotes(
+                    activity,
+                    listOf(FirebaseRemoteNote("b", "b.md", "", 1L, deleted = true)),
+                )
+
+                requestNoteSwitch(activity, "a.md")
+                repository.save("b.md", "new")
+                requestNoteSwitch(activity, "b.md")
+
+                assertEquals(0, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun restoredNoteSelectionClampsWhenTextGetsShorter() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("shortened.md", "alpha beta")
+                setPrivateField(activity, "currentNotePath", "shortened.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "shortened.md", previewHidden = true)),
+                )
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(8)
+                showTodo(activity)
+                repository.save("shortened.md", "x")
+                showNotes(activity)
+
+                assertEquals(1, activity.findViewById<EditText>(R.id.note_editor).selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun todoDraftRestoresSelectionAndFocusAfterNotesNavigation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                activity.findViewById<EditText>(R.id.todo_input).apply {
+                    setText("alpha beta")
+                    requestFocus()
+                    setSelection(2, 7)
+                }
+
+                showNotes(activity)
+                showTodo(activity)
+
+                activity.findViewById<EditText>(R.id.todo_input).let { input ->
+                    assertEquals("alpha beta", input.text.toString())
+                    assertEquals(2, input.selectionStart)
+                    assertEquals(7, input.selectionEnd)
+                    assertTrue(input.hasFocus())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun rawNoteRestoresScrollPositionAfterTodoNavigation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val scrollY = 80
+            scenario.onActivity { activity ->
+                val repository = NotesRepository(activity)
+                repository.clearAll()
+                repository.save("long.md", (1..100).joinToString("\n") { "line $it" })
+                setPrivateField(activity, "currentNotePath", "long.md")
+                setPrivateField(
+                    activity,
+                    "settings",
+                    AppSettings(notesApp = NotesSettings(currentNotePath = "long.md", previewHidden = true)),
+                )
+                showNotes(activity)
+
+                activity.findViewById<EditText>(R.id.note_editor).scrollTo(0, scrollY)
+                showTodo(activity)
+                showNotes(activity)
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            scenario.onActivity { activity ->
+                assertEquals(scrollY, activity.findViewById<EditText>(R.id.note_editor).scrollY)
+            }
+        }
+    }
+
+    @Test
+    fun todoDraftRestoresHorizontalScrollAfterNotesNavigation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val scrollX = 40
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                activity.findViewById<EditText>(R.id.todo_input).apply {
+                    setText((1..20).joinToString(" ") { "todo$it" })
+                    scrollTo(scrollX, 0)
+                }
+                showNotes(activity)
+                showTodo(activity)
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            scenario.onActivity { activity ->
+                assertEquals(scrollX, activity.findViewById<EditText>(R.id.todo_input).scrollX)
+            }
+        }
+    }
+
+    @Test
+    fun submittedTodoDraftDoesNotRestoreStaleSelection() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                activity.findViewById<EditText>(R.id.todo_input).apply {
+                    setText("alpha")
+                    setSelection(2)
+                }
+                activity.findViewById<View>(R.id.todo_add).performClick()
+
+                showNotes(activity)
+                showTodo(activity)
+
+                activity.findViewById<EditText>(R.id.todo_input).let { input ->
+                    assertEquals("", input.text.toString())
+                    assertEquals(0, input.selectionStart)
+                    assertEquals(0, input.selectionEnd)
+                }
+            }
+        }
+    }
+
+    @Test
     fun pagesScreenRecalculatesAfterInput() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             scenario.onActivity { activity ->
@@ -340,6 +730,24 @@ class MainActivityTest {
         MainActivity::class.java.getDeclaredMethod("showNotes").apply {
             isAccessible = true
             invoke(activity)
+        }
+    }
+
+    private fun showTodo(activity: MainActivity) {
+        MainActivity::class.java.getDeclaredMethod("showTodo").apply {
+            isAccessible = true
+            invoke(activity)
+        }
+    }
+
+    private fun requestNoteSwitch(activity: MainActivity, path: String) {
+        MainActivity::class.java.getDeclaredMethod(
+            "requestNoteSwitch",
+            String::class.java,
+            kotlin.jvm.functions.Function0::class.java,
+        ).apply {
+            isAccessible = true
+            invoke(activity, path, {})
         }
     }
 
