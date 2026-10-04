@@ -6,6 +6,7 @@ import android.content.res.Configuration
 import android.content.Intent
 import android.net.Uri
 import android.graphics.Paint
+import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -26,6 +27,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.BaseInputConnection
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -60,6 +62,13 @@ private data class TextEditorViewState(
     val scrollX: Int,
     val scrollY: Int,
     val focused: Boolean,
+)
+
+private data class NoteMirrorEdit(
+    val rangeIndex: Int,
+    val start: Int,
+    val end: Int,
+    val replacement: String,
 )
 
 class MainActivity : ComponentActivity() {
@@ -102,6 +111,8 @@ class MainActivity : ComponentActivity() {
     private var noteSelector: TextView? = null
     private var noteEditor: HybridMarkdownEditor? = null
     private var rawNoteEditor: EditText? = null
+    private val noteMultiCursor = MultiCursorEditing()
+    private var multiCursorMode = false
     private var rawNoteSpellChecker: AndroidSpellChecker? = null
     private var loadedNoteText = ""
     private val noteAutosaveHandler = Handler(Looper.getMainLooper())
@@ -110,6 +121,7 @@ class MainActivity : ComponentActivity() {
     private val notePickerExpandedFolders = mutableSetOf<String>()
     private var notePickerDialog: AlertDialog? = null
     private val noteEditorStates = mutableMapOf<String, TextEditorViewState>()
+    private var multiCursorRichEditorState: TextEditorViewState? = null
 
     private var firstInput: EditText? = null
     private var readInput: EditText? = null
@@ -463,6 +475,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun captureCurrentNoteEditorState() {
+        if (multiCursorMode) return
         val state = noteEditor?.captureEditorState()?.let {
             TextEditorViewState(it.selectionStart, it.selectionEnd, it.scrollX, it.scrollY, it.focused)
         } ?: rawNoteEditor?.captureViewState() ?: return
@@ -509,7 +522,7 @@ class MainActivity : ComponentActivity() {
         rawNoteSpellChecker = null
         rawNoteEditor = null
 
-        if (settings.notesApp.previewHidden) {
+        if (settings.notesApp.previewHidden || multiCursorMode) {
             noteEditor = null
             rawNoteEditor = buildRawNoteEditor()
             content.addView(rawNoteEditor)
@@ -535,7 +548,26 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildRawNoteEditor(): EditText {
-        return EditText(this).apply {
+        return object : EditText(this) {
+            private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = COLOR_ACCENT
+                strokeWidth = dp(2).toFloat()
+            }
+
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                if (!multiCursorMode || !hasFocus() || layout == null) return
+                noteMultiCursor.ranges.forEachIndexed { index, range ->
+                    if (index == noteMultiCursor.primaryIndex || !range.isEmpty) return@forEachIndexed
+                    val offset = range.start.coerceIn(0, length())
+                    val line = layout.getLineForOffset(offset)
+                    val x = compoundPaddingLeft + layout.getPrimaryHorizontal(offset) - scrollX
+                    val top = compoundPaddingTop + layout.getLineTop(line) - scrollY
+                    val bottom = compoundPaddingTop + layout.getLineBottom(line) - scrollY
+                    canvas.drawLine(x, top.toFloat(), x, bottom.toFloat(), cursorPaint)
+                }
+            }
+        }.apply {
             id = R.id.note_editor
             minLines = 10
             textSize = 16f
@@ -555,10 +587,80 @@ class MainActivity : ComponentActivity() {
             )
             addTextChangedListener(MarkdownHighlightingTextWatcher(MarkdownHighlighter(palette.markdown)))
             addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                private var beforeText = ""
+                private var beforeRanges: List<MultiCursorRange> = emptyList()
+                private var beforeSelectionStart = 0
+                private var beforeSelectionEnd = 0
+                private var compositionBaseText = ""
+                private var compositionBaseRanges: List<MultiCursorRange> = emptyList()
+                private var compositionBaseSelectionStart = 0
+                private var compositionBaseSelectionEnd = 0
+                private var compositionActive = false
+                private var changeStart = 0
+                private var changeBefore = 0
+                private var changeCount = 0
+                private var mirroring = false
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+                    if (!mirroring && !suppressNoteAutosave && !compositionActive && multiCursorMode && noteMultiCursor.active) {
+                        beforeText = s?.toString().orEmpty()
+                        beforeRanges = noteMultiCursor.ranges
+                        beforeSelectionStart = selectionStart.coerceAtLeast(0)
+                        beforeSelectionEnd = selectionEnd.coerceAtLeast(0)
+                    }
+                }
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    changeStart = start
+                    changeBefore = before
+                    changeCount = count
+                }
                 override fun afterTextChanged(s: Editable?) {
-                    scheduleNoteAutosave()
+                    val composingNow = s != null && BaseInputConnection.getComposingSpanStart(s) >= 0
+                    if (!mirroring && !suppressNoteAutosave && s != null && multiCursorMode && noteMultiCursor.active) {
+                        if (composingNow && !compositionActive) {
+                            compositionBaseText = beforeText
+                            compositionBaseRanges = beforeRanges
+                            compositionBaseSelectionStart = beforeSelectionStart
+                            compositionBaseSelectionEnd = beforeSelectionEnd
+                            compositionActive = true
+                        } else if (!composingNow) {
+                            val wasComposition = compositionActive
+                            val sourceText = if (wasComposition) compositionBaseText else beforeText
+                            val sourceRanges = if (wasComposition) compositionBaseRanges else beforeRanges
+                            val sourceSelectionStart = if (wasComposition) compositionBaseSelectionStart else beforeSelectionStart
+                            val sourceSelectionEnd = if (wasComposition) compositionBaseSelectionEnd else beforeSelectionEnd
+                            compositionActive = false
+                            if (sourceRanges.isNotEmpty()) {
+                                promoteEditedCursor(
+                                    sourceRanges,
+                                    sourceSelectionStart,
+                                    sourceSelectionEnd,
+                                    changeStart,
+                                    changeBefore,
+                                )
+                                val editedRanges = noteMultiCursor.ranges
+                                mirroring = true
+                                try {
+                                    if (wasComposition) {
+                                        mirrorMultiCursorChange(s, sourceText, editedRanges)
+                                    } else {
+                                        val inserted = s.subSequence(changeStart, changeStart + changeCount).toString()
+                                        mirrorMultiCursorChange(
+                                            s,
+                                            sourceText,
+                                            editedRanges,
+                                            changeStart,
+                                            changeBefore,
+                                            inserted,
+                                        )
+                                    }
+                                } finally {
+                                    mirroring = false
+                                }
+                            }
+                        }
+                    }
+                    if (multiCursorMode && noteMultiCursor.active) renderMultiCursorSelections(this@apply)
+                    if (!compositionActive && !composingNow) scheduleNoteAutosave()
                     rawNoteSpellChecker?.onTextChanged()
                 }
             })
@@ -580,8 +682,156 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun mirrorMultiCursorChange(
+        editable: Editable,
+        oldText: String,
+        ranges: List<MultiCursorRange>,
+        exactStart: Int? = null,
+        exactRemoved: Int? = null,
+        exactInserted: String? = null,
+    ) {
+        if (ranges.isEmpty()) return
+        val primaryIndex = noteMultiCursor.primaryIndex.coerceIn(0, ranges.lastIndex)
+        val primary = ranges[primaryIndex]
+        // Find the single replacement Android just applied at the primary selection.
+        val currentText = editable.toString()
+        if (exactStart == null && oldText == currentText) return
+        val prefix: Int
+        val inserted: String
+        val removedCount: Int
+        if (exactStart != null && exactRemoved != null && exactInserted != null) {
+            prefix = exactStart
+            inserted = exactInserted
+            removedCount = exactRemoved
+        } else {
+            var commonPrefix = 0
+            while (commonPrefix < oldText.length && commonPrefix < currentText.length &&
+                oldText[commonPrefix] == currentText[commonPrefix]) commonPrefix++
+            var suffix = 0
+            while (suffix < oldText.length - commonPrefix && suffix < currentText.length - commonPrefix &&
+                oldText[oldText.length - 1 - suffix] == currentText[currentText.length - 1 - suffix]) suffix++
+            prefix = commonPrefix
+            inserted = currentText.substring(commonPrefix, currentText.length - suffix)
+            removedCount = oldText.length - commonPrefix - suffix
+        }
+        val primaryDelta = inserted.length - removedCount
+        val backspace = removedCount > 0 && inserted.isEmpty() && primary.isEmpty && prefix < primary.start
+        val operations = ranges.mapIndexedNotNull { index, range ->
+            if (index == primaryIndex) return@mapIndexedNotNull null
+            val start: Int
+            val end: Int
+            if (backspace && range.isEmpty) {
+                start = if (range.start == 0) 0 else Character.offsetByCodePoints(oldText, range.start, -1)
+                end = range.start
+            } else if (removedCount > 0 && inserted.isEmpty() && primary.isEmpty && range.isEmpty) {
+                start = range.start
+                end = if (range.start >= oldText.length) oldText.length
+                    else Character.offsetByCodePoints(oldText, range.start, 1)
+            } else {
+                start = range.start; end = range.end
+            }
+            if (start == end && inserted.isEmpty()) null else {
+                fun shift(offset: Int): Int = when {
+                    removedCount == 0 && offset >= prefix -> offset + primaryDelta
+                    removedCount > 0 && offset >= prefix + removedCount -> offset + primaryDelta
+                    removedCount > 0 && offset > prefix -> prefix + inserted.length
+                    else -> offset
+                }
+                NoteMirrorEdit(index, shift(start), shift(end), inserted)
+            }
+        }.sortedByDescending { it.start }
+        operations.forEach { edit ->
+            if (edit.start in 0..editable.length && edit.end in edit.start..editable.length) {
+                editable.replace(edit.start, edit.end, edit.replacement)
+            }
+        }
+        val caretPositions = ranges.mapIndexed { index, range ->
+            if (index == primaryIndex) {
+                val base = (prefix + inserted.length).coerceAtMost(editable.length)
+                val deltaBefore = operations.filter { it.start < base }.sumOf { it.replacement.length - (it.end - it.start) }
+                (base + deltaBefore).coerceIn(0, editable.length)
+            } else {
+                val op = operations.firstOrNull { it.rangeIndex == index }
+                val sourcePosition = if (op != null) op.start + op.replacement.length else {
+                    val cursor = range.start
+                    when {
+                        removedCount == 0 && cursor >= prefix -> cursor + primaryDelta
+                        removedCount > 0 && cursor >= prefix + removedCount -> cursor + primaryDelta
+                        removedCount > 0 && cursor > prefix -> prefix + inserted.length
+                        else -> cursor
+                    }
+                }
+                val deltaBefore = operations.filter { it.start < sourcePosition && it.rangeIndex != index }
+                    .sumOf { it.replacement.length - (it.end - it.start) }
+                (sourcePosition + deltaBefore).coerceIn(0, editable.length)
+            }
+        }
+        val primaryPos = caretPositions[primaryIndex].coerceIn(0, editable.length)
+        noteMultiCursor.setCollapsedRanges(caretPositions.map { it.coerceIn(0, editable.length) }, primaryPos)
+        rawNoteEditor?.setSelection(primaryPos)
+    }
+
+    private fun promoteEditedCursor(
+        ranges: List<MultiCursorRange>,
+        selectionStart: Int,
+        selectionEnd: Int,
+        changeStart: Int,
+        removedCount: Int,
+    ) {
+        if (ranges.isEmpty()) return
+        val selectedStart = minOf(selectionStart, selectionEnd)
+        val selectedEnd = maxOf(selectionStart, selectionEnd)
+        var index = ranges.indexOfFirst { it.start == selectedStart && it.end == selectedEnd }
+        var collapsedRange: MultiCursorRange? = null
+        if (index < 0 && selectedStart == selectedEnd) {
+            index = ranges.indices
+                .filter { selectedStart in ranges[it].start..ranges[it].end }
+                .minWithOrNull(
+                    compareBy<Int> { if (ranges[it].start == selectedStart) 0 else 1 }
+                        .thenBy { minOf(selectedStart - ranges[it].start, ranges[it].end - selectedStart) },
+                )
+                ?: -1
+            if (index >= 0) collapsedRange = MultiCursorRange(selectedStart, selectedStart)
+        }
+        if (index < 0) {
+            index = when {
+                removedCount > 0 -> ranges.indexOfFirst { range ->
+                    (range.start == changeStart && range.end == changeStart + removedCount) ||
+                        (range.isEmpty && range.start == changeStart + removedCount) ||
+                        (range.isEmpty && range.start == changeStart)
+                }
+                else -> ranges.indexOfFirst { it.isEmpty && it.start == changeStart }
+            }
+        }
+        if (index >= 0) noteMultiCursor.promoteSelection(index, collapsedRange)
+    }
+
+    private fun renderMultiCursorSelections(editor: EditText) {
+        val editable = editor.text ?: return
+        val prior = editable.getSpans(0, editable.length, MultiCursorHighlight::class.java)
+        prior.forEach(editable::removeSpan)
+        noteMultiCursor.ranges.forEachIndexed { index, range ->
+            if (index != noteMultiCursor.primaryIndex && !range.isEmpty && range.end <= editable.length) {
+                editable.setSpan(MultiCursorHighlight(), range.start, range.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+        editor.invalidate()
+    }
+
+    private class MultiCursorHighlight : BackgroundColorSpan(0x553F8CFF)
+
     private fun showNotesActionsMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
+            menu.add(if (multiCursorMode) "Exit multi-cursor" else "Multi-cursor").setOnMenuItemClickListener {
+                if (multiCursorMode) exitMultiCursorMode() else enterMultiCursorMode()
+                true
+            }
+            if (multiCursorMode) {
+                menu.add("Add next occurrence").setOnMenuItemClickListener {
+                    addNextNoteCursor()
+                    true
+                }
+            }
             menu.add("Open note").setOnMenuItemClickListener {
                 showNotePicker()
                 true
@@ -607,6 +857,61 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun enterMultiCursorMode() {
+        if (currentScreen != Screen.Notes || multiCursorMode) return
+        captureCurrentNoteEditorState()
+        multiCursorRichEditorState = noteEditorStates[currentNotePath]
+        saveCurrentNoteSilently()
+        multiCursorMode = true
+        noteMultiCursor.clear()
+        showNotes()
+        rawNoteEditor?.post {
+            val editor = rawNoteEditor ?: return@post
+            val start = editor.selectionStart.coerceAtLeast(0)
+            val end = editor.selectionEnd.coerceAtLeast(0)
+            noteMultiCursor.beginAtText(editor.text.toString(), start, end)
+            noteMultiCursor.ranges.firstOrNull()?.let { editor.setSelection(it.start, it.end) }
+            renderMultiCursorSelections(editor)
+            editor.requestFocus()
+            (getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager)
+                ?.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    private fun exitMultiCursorMode() {
+        val editor = rawNoteEditor
+        if (editor != null && noteMultiCursor.active) {
+            val primary = noteMultiCursor.ranges.getOrNull(noteMultiCursor.primaryIndex)
+            if (primary != null) {
+                val selection = primary.start.coerceIn(0, editor.length())
+                editor.setSelection(selection)
+                val richState = multiCursorRichEditorState ?: noteEditorStates[currentNotePath]
+                if (richState != null) {
+                    noteEditorStates[currentNotePath] = richState.copy(
+                        selectionStart = selection,
+                        selectionEnd = selection,
+                    )
+                }
+            }
+        }
+        saveCurrentNoteSilently()
+        multiCursorMode = false
+        noteMultiCursor.clear()
+        multiCursorRichEditorState = null
+        if (currentScreen == Screen.Notes) showNotes()
+    }
+
+    private fun addNextNoteCursor() {
+        val editor = rawNoteEditor ?: return
+        val next = noteMultiCursor.addNext(editor.text.toString(), editor.selectionStart, editor.selectionEnd)
+        if (next == null) {
+            Toast.makeText(this, "No more occurrences", Toast.LENGTH_SHORT).show()
+            return
+        }
+        editor.setSelection(next.start, next.end)
+        renderMultiCursorSelections(editor)
+    }
+
     private fun refreshNotes() {
         noteList = notesRepository.listNotes()
 
@@ -625,6 +930,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun selectNote(relativePath: String) {
+        if (relativePath != currentNotePath && multiCursorMode) {
+            multiCursorMode = false
+            noteMultiCursor.clear()
+            multiCursorRichEditorState = null
+        }
         cancelPendingNoteAutosave()
         currentNotePath = relativePath
         loadedNoteText = notesRepository.read(relativePath)
@@ -710,7 +1020,15 @@ class MainActivity : ComponentActivity() {
             return false
         }
         loadedNoteText = text
+        val wasMultiCursor = multiCursorMode
+        if (multiCursorMode) {
+            multiCursorMode = false
+            noteMultiCursor.clear()
+            multiCursorRichEditorState = null
+            noteEditorStates.remove(currentNotePath)
+        }
         updateEditorTextFromRemoteNote(text)
+        if (wasMultiCursor && currentScreen == Screen.Notes) showNotes()
         return true
     }
 
@@ -718,10 +1036,14 @@ class MainActivity : ComponentActivity() {
         if (currentNotePath.isBlank() && loadedNoteText.isEmpty() && noteEditorText().isEmpty()) return
         noteEditorStates.remove(currentNotePath)
         currentNotePath = ""
+        multiCursorMode = false
+        noteMultiCursor.clear()
+        multiCursorRichEditorState = null
         loadedNoteText = ""
         setEditorTextFromNote("")
         persistSettings(settings.copy(notesApp = settings.notesApp.copy(currentNotePath = "")))
         updateNoteSelector()
+        if (currentScreen == Screen.Notes) showNotes()
     }
 
     private fun toggleNoteRendering() {
@@ -730,6 +1052,7 @@ class MainActivity : ComponentActivity() {
 
     private fun changeNoteRenderingEnabled(enabled: Boolean) {
         if (enabled == !settings.notesApp.previewHidden) return
+        if (multiCursorMode) exitMultiCursorMode()
         saveCurrentNoteSilently()
         persistSettings(
             settings.copy(
@@ -849,6 +1172,7 @@ class MainActivity : ComponentActivity() {
             afterSwitch()
             return
         }
+        val wasMultiCursor = multiCursorMode
         captureCurrentNoteEditorState()
         val previousPath = currentNotePath
         saveCurrentNoteSilently()
@@ -857,6 +1181,7 @@ class MainActivity : ComponentActivity() {
         }
         applyPendingRemoteNoteToFile(relativePath, notesRepository.read(relativePath), updateEditor = false)
         selectNote(relativePath)
+        if (wasMultiCursor && currentScreen == Screen.Notes) showNotes()
         afterSwitch()
     }
 
@@ -865,6 +1190,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun promptNewNote() {
+        if (multiCursorMode) exitMultiCursorMode()
         var selectedFolder = ""
         val folders = notesRepository.listFolders()
         lateinit var folderButton: Button
@@ -898,6 +1224,7 @@ class MainActivity : ComponentActivity() {
                 loadedNoteText = ""
                 refreshNotes()
                 selectNote(path)
+                if (currentScreen == Screen.Notes) showNotes()
             }
             .setNegativeButton("Cancel", null)
             .show()

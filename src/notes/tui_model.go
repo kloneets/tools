@@ -72,43 +72,50 @@ type editorSnapshot struct {
 }
 
 type Editor struct {
-	Path                string
-	Title               string
-	Text                string
-	Cursor              int
-	ScrollTop           int
-	Mode                Mode
-	Command             string
-	Status              string
-	Dirty               bool
-	PendingOp           string
-	NormalCount         string
-	LastSearch          string
-	LastSearchPos       int
-	LastSearchBackward  bool
-	Register            vimRegister
-	SelectionMode       vimSelectionMode
-	SelectionMark       int
-	SelectionCursor     int
-	YankHighlightStart  int
-	YankHighlightEnd    int
-	YankHighlightUntil  time.Time
-	LastXText           string
-	LastXCursor         int
-	LastXArmed          bool
-	AutoCompletePrefix  string
-	AutoCompleteKind    string
-	AutoCompleteMatches []string
-	AutoCompleteIndex   int
-	AutoCompleteStart   int
-	AutoCompleteEnd     int
-	SpellCacheText      string
-	SpellCacheSpans     []markdownSpan
-	SpellAsyncText      string
-	SpellAsyncRunning   bool
-	UndoStack           []editorSnapshot
-	RedoStack           []editorSnapshot
-	ReplaceConfirm      *replaceConfirmSession
+	Path                  string
+	Title                 string
+	Text                  string
+	Cursor                int
+	ScrollTop             int
+	Mode                  Mode
+	Command               string
+	Status                string
+	Dirty                 bool
+	PendingOp             string
+	NormalCount           string
+	LastSearch            string
+	LastSearchPos         int
+	LastSearchBackward    bool
+	Register              vimRegister
+	SelectionMode         vimSelectionMode
+	SelectionMark         int
+	SelectionCursor       int
+	YankHighlightStart    int
+	YankHighlightEnd      int
+	YankHighlightUntil    time.Time
+	LastXText             string
+	LastXCursor           int
+	LastXArmed            bool
+	AutoCompletePrefix    string
+	AutoCompleteKind      string
+	AutoCompleteMatches   []string
+	AutoCompleteIndex     int
+	AutoCompleteStart     int
+	AutoCompleteEnd       int
+	SpellCacheText        string
+	SpellCacheSpans       []markdownSpan
+	SpellAsyncText        string
+	SpellAsyncRunning     bool
+	UndoStack             []editorSnapshot
+	RedoStack             []editorSnapshot
+	ReplaceConfirm        *replaceConfirmSession
+	MultiCursorActive     bool
+	MultiCursorStarts     []int
+	MultiCursorLengths    []int
+	MultiCursorQuery      string
+	MultiCursorBlockMode  bool
+	MultiCursorPadColumn  int
+	MultiCursorPadPending bool
 }
 
 type replaceConfirmSession struct {
@@ -200,6 +207,7 @@ func (w *Workspace) setCurrentTab(index int) bool {
 	}
 	if w.CurrentTab >= 0 && w.CurrentTab < len(w.Tabs) && w.CurrentTab != index {
 		w.LastAccessedTab = w.CurrentTab
+		ExitMultiCursor(w.Tabs[w.CurrentTab])
 	}
 	w.CurrentTab = index
 	w.syncOpenSelectionToActive()
@@ -1150,6 +1158,28 @@ func (w *Workspace) moveFolderByRel(folder string, rawTarget string) error {
 }
 
 func (w *Workspace) HandleKey(key Key) bool {
+	if key.Ctrl && key.Alt && key.Name == "m" && !w.FocusSidebar {
+		if ed := w.ActiveEditor(); ed != nil {
+			if ed.MultiCursorActive {
+				ExitMultiCursor(ed)
+			} else {
+				EnterMultiCursor(ed)
+			}
+		}
+		return true
+	}
+	if key.Alt && key.Name == "n" && !w.FocusSidebar {
+		if ed := w.ActiveEditor(); ed != nil && ed.MultiCursorActive {
+			AddNextMultiCursor(ed)
+			return true
+		}
+	}
+	if key.Name == "esc" {
+		if ed := w.ActiveEditor(); ed != nil && ed.MultiCursorActive {
+			ExitMultiCursor(ed)
+			return true
+		}
+	}
 	if key.Ctrl && key.Name == "s" {
 		w.pendingSaveAll = true
 		return true
@@ -1812,6 +1842,13 @@ func handleCommandMode(w *Workspace, ed *Editor, key Key) bool {
 		}
 		return true
 	case "enter":
+		if strings.TrimSpace(ed.Command) == "mc" {
+			ed.Command = ""
+			if EnterMultiCursor(ed) {
+				ed.Status = "multi-cursor: Alt+N adds next match; Esc exits"
+			}
+			return true
+		}
 		cmd, err := parseVimCommand(ed.Command)
 		if err != nil {
 			ed.Status = err.Error()
@@ -1840,6 +1877,9 @@ func handleCommandMode(w *Workspace, ed *Editor, key Key) bool {
 }
 
 func handleInsertMode(w *Workspace, ed *Editor, key Key) bool {
+	if ed.MultiCursorActive {
+		return handleMultiCursorInsert(ed, key)
+	}
 	switch key.Name {
 	case "esc":
 		clearAutoComplete(ed)
@@ -2888,6 +2928,26 @@ func handleVisualMode(w *Workspace, ed *Editor, key Key) bool {
 			return true
 		}
 	}
+	if ed.SelectionMode == vimSelectionBlock && (ed.PendingOp == "d" || ed.PendingOp == "c") && key.Name == "esc" {
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		clearVisualSelection(ed)
+		ed.Mode = ModeNormal
+		return true
+	}
+	if ed.SelectionMode == vimSelectionBlock && (ed.PendingOp == "d" || ed.PendingOp == "c") {
+		if key.Name >= "0" && key.Name <= "9" && len([]rune(key.Name)) == 1 {
+			ed.NormalCount += key.Name
+			return true
+		}
+		if applyBlockVisualOperator(w, ed, key.Name) {
+			return true
+		}
+		ed.PendingOp = ""
+		ed.NormalCount = ""
+		ed.Status = "block operator supports w, b, or $; Esc cancels"
+		return true
+	}
 	switch key.Name {
 	case "esc":
 		clearVisualSelection(ed)
@@ -2921,6 +2981,18 @@ func handleVisualMode(w *Workspace, ed *Editor, key Key) bool {
 		ed.NormalCount = ""
 		ed.PendingOp = "m"
 		return true
+	}
+	if ed.SelectionMode == vimSelectionBlock {
+		switch {
+		case key.Name == "I" || key.Rune == 'I':
+			EnterBlockInsertMultiCursor(ed)
+			return true
+		case key.Name == "d" || key.Name == "c":
+			ed.PendingOp = key.Name
+			ed.NormalCount = ""
+			ed.Status = "block " + key.Name + " pending: w, b, or $; x deletes the rectangle"
+			return true
+		}
 	}
 	switch key.Name {
 	case "h", "left":
@@ -3917,16 +3989,25 @@ func (w *Workspace) HelpText() string {
 	if ed == nil {
 		return "notes: no note open | ctrl+a sidebar | ctrl+n new | ctrl+s save"
 	}
+	if ed.MultiCursorActive {
+		if ed.MultiCursorBlockMode {
+			return "notes/block insert: type edits every selected row | backspace/delete edit all rows | esc exits"
+		}
+		return "notes/multi-cursor: type edits all selections | Alt+n add next occurrence | esc keep primary cursor and exit"
+	}
 	if ed.Mode == ModeInsert {
-		return "notes/insert: tab complete or spaces | shift+tab reverse complete | ctrl+g/:spell spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save | ctrl+a sidebar"
+		return "notes/insert: tab complete or spaces | :mc multi-cursor | ctrl+alt+m toggle | ctrl+g/:spell spelling | up/down cycle suggestion | enter accept | esc normal/cancel | ctrl+s save"
 	}
 	if ed.Mode == ModeCommand {
-		return "notes/command: enter run | esc cancel | :w save | :q quit | :bd close note | :mld/:mlu move lines | /pat ?pat search | :s/pat/repl/gc replace | sidebar/sb | undo redo preview | spell"
+		return "notes/command: enter run | esc cancel | :w save | :q quit | :mc multi-cursor | :bd close note | :mld/:mlu move lines | /pat ?pat search | :s/pat/repl/gc replace | sidebar/sb | undo redo preview | spell"
 	}
 	if ed.Mode == ModeVisual {
+		if ed.SelectionMode == vimSelectionBlock {
+			return "notes/block: I insert at each left edge | d/c then w/b/$ edits each row | x deletes rectangle | y yank | esc cancel"
+		}
 		return "notes/visual: h j k l move | V line | :'<,'>s/pat/repl/gc replace | :mld/:mlu move selected lines | >/< indent | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | : command | /pat ?pat search | n next | N prev | :%s/pat/repl/g replace | R rename | ctrl+a sidebar"
+	return "notes/normal: i insert | u undo | :mc/Ctrl+Alt+M multi-cursor | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | : command | /pat ?pat search | n next | N prev | :%s/pat/repl/g replace | R rename | ctrl+a sidebar"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -5230,21 +5311,22 @@ func yankHighlightSpans(ed *Editor) []markdownSpan {
 }
 
 func visualHighlightSpans(ed *Editor) []markdownSpan {
-	if ed == nil || ed.SelectionMode == vimSelectionNone {
+	if ed == nil {
 		return nil
 	}
+	var spans []markdownSpan
 	switch ed.SelectionMode {
 	case vimSelectionChar:
 		start := min(ed.SelectionMark, ed.SelectionCursor)
 		end := max(ed.SelectionMark, ed.SelectionCursor) + 1
-		return []markdownSpan{{Tag: tagVisualSelection, Start: start, End: end}}
+		spans = append(spans, markdownSpan{Tag: tagVisualSelection, Start: start, End: end})
 	case vimSelectionLine:
 		start, end := vimLineRange(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		return []markdownSpan{{Tag: tagVisualSelection, Start: start, End: end}}
+		spans = append(spans, markdownSpan{Tag: tagVisualSelection, Start: start, End: end})
 	case vimSelectionBlock:
 		lines := vimLineInfos(ed.Text)
 		startIdx, endIdx, startCol, endCol := vimLineColumns(ed.Text, ed.SelectionMark, ed.SelectionCursor)
-		spans := make([]markdownSpan, 0, endIdx-startIdx+1)
+		blockSpans := make([]markdownSpan, 0, endIdx-startIdx+1)
 		for idx := startIdx; idx <= endIdx; idx++ {
 			line := lines[idx]
 			lineWidth := line.end - line.start
@@ -5259,12 +5341,29 @@ func visualHighlightSpans(ed *Editor) []markdownSpan {
 			if from >= to {
 				continue
 			}
-			spans = append(spans, markdownSpan{Tag: tagVisualSelection, Start: line.start + from, End: line.start + to})
+			blockSpans = append(blockSpans, markdownSpan{Tag: tagVisualSelection, Start: line.start + from, End: line.start + to})
 		}
-		return spans
-	default:
-		return nil
+		spans = append(spans, blockSpans...)
 	}
+	if ed.MultiCursorActive {
+		textLen := len([]rune(ed.Text))
+		for i, start := range ed.MultiCursorStarts {
+			length := 0
+			if i < len(ed.MultiCursorLengths) {
+				length = ed.MultiCursorLengths[i]
+			}
+			spanStart := start
+			spanEnd := min(textLen, start+max(1, length))
+			if spanStart == textLen && textLen > 0 {
+				spanStart = textLen - 1
+				spanEnd = textLen
+			}
+			if spanStart >= 0 && spanStart < spanEnd {
+				spans = append(spans, markdownSpan{Tag: tagVisualSelection, Start: spanStart, End: spanEnd})
+			}
+		}
+	}
+	return spans
 }
 
 func replaceConfirmHighlightSpans(ed *Editor) []markdownSpan {

@@ -450,6 +450,8 @@ func TestMapTCellKey(t *testing.T) {
 		{tcell.NewEventKey(tcell.KeyRune, 't', tcell.ModCtrl), notes.Key{Name: "t", Ctrl: true, Rune: 't'}},
 		{tcell.NewEventKey(tcell.KeyRune, '1', tcell.ModCtrl), notes.Key{Name: "1", Ctrl: true, Rune: '1'}},
 		{tcell.NewEventKey(tcell.KeyRune, 'g', tcell.ModCtrl), notes.Key{Name: "g", Ctrl: true, Rune: 'g'}},
+		{tcell.NewEventKey(tcell.KeyRune, 'm', tcell.ModCtrl|tcell.ModAlt), notes.Key{Name: "m", Ctrl: true, Alt: true, Rune: 'm'}},
+		{tcell.NewEventKey(tcell.KeyRune, 'n', tcell.ModAlt), notes.Key{Name: "n", Alt: true, Rune: 'n'}},
 		{tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModCtrl), notes.Key{Name: "3", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 0x1c, tcell.ModNone), notes.Key{Name: "4", Ctrl: true}},
 		{tcell.NewEventKey(tcell.KeyRune, 0x1d, tcell.ModNone), notes.Key{Name: "5", Ctrl: true}},

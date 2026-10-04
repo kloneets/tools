@@ -795,6 +795,10 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	if row < 0 {
 		row = 0
 	}
+	if ed := a.notes.ActiveEditor(); ed != nil && ed.MultiCursorActive &&
+		(action == tview.MouseLeftDown || action == tview.MouseLeftClick) {
+		notes.ExitMultiCursor(ed)
+	}
 	if event.Modifiers()&tcell.ModCtrl != 0 {
 		if uri, ok := a.notes.EditorLinkAtVisualPosition(row, col); ok {
 			switch action {
@@ -1247,7 +1251,7 @@ func mapTCellKey(event *tcell.EventKey) (notes.Key, bool) {
 			return notes.Key{Name: "space", Rune: ' '}, true
 		}
 		if event.Modifiers()&tcell.ModCtrl != 0 {
-			return notes.Key{Ctrl: true, Name: string(r), Rune: r}, true
+			return notes.Key{Ctrl: true, Alt: event.Modifiers()&tcell.ModAlt != 0, Name: string(r), Rune: r}, true
 		}
 		return notes.Key{Name: string(r), Rune: r, Shift: event.Modifiers()&tcell.ModShift != 0, Alt: event.Modifiers()&tcell.ModAlt != 0}, true
 	case tcell.KeyEnter:
@@ -4931,6 +4935,9 @@ func (a *terminalApp) updateOpenCleanNote(rel string, text string) {
 	for _, tab := range a.notes.Tabs {
 		if tab == nil || tab.Path != abs || tab.Dirty {
 			continue
+		}
+		if tab.Text != text {
+			notes.ExitMultiCursor(tab)
 		}
 		tab.Text = text
 		tab.Dirty = false

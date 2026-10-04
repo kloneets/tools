@@ -3968,8 +3968,8 @@ func TestVisualBlockYankAndDelete(t *testing.T) {
 	ed2.Cursor = vimVerticalMoveOffset(ed2.Text, ed2.Cursor, 1)
 	ed2.Cursor = vimClampOffset(ed2.Text, ed2.Cursor+1)
 	refreshVisualSelection(ed2)
-	if !handleVisualMode(&Workspace{}, ed2, Key{Name: "d", Rune: 'd'}) {
-		t.Fatal("d in visual block mode should succeed")
+	if !handleVisualMode(&Workspace{}, ed2, Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("x in visual block mode should delete the block")
 	}
 	if got := ed2.Text; got != "ad\nwz" {
 		t.Fatalf("text = %q, want %q", got, "ad\nwz")
@@ -3989,8 +3989,8 @@ func TestVisualBlockDeleteThenPPastesDeletedBlock(t *testing.T) {
 	ed.Cursor = vimVerticalMoveOffset(ed.Text, ed.Cursor, 1)
 	ed.Cursor = vimClampOffset(ed.Text, ed.Cursor+1)
 	refreshVisualSelection(ed)
-	if !handleVisualMode(&Workspace{}, ed, Key{Name: "d", Rune: 'd'}) {
-		t.Fatal("d in visual block mode should succeed")
+	if !handleVisualMode(&Workspace{}, ed, Key{Name: "x", Rune: 'x'}) {
+		t.Fatal("x in visual block mode should delete the block")
 	}
 	if got := ed.Text; got != "ad\nwz" {
 		t.Fatalf("after delete text = %q, want %q", got, "ad\nwz")

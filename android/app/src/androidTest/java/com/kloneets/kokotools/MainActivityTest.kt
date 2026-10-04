@@ -1,6 +1,7 @@
 package com.kloneets.kokotools
 
 import android.os.SystemClock
+import android.text.style.BackgroundColorSpan
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
@@ -12,6 +13,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -134,6 +136,202 @@ class MainActivityTest {
                 assertTrue(activity.findViewById<ImageButton>(R.id.tools_menu).isShown)
                 assertTrue(activity.findViewById<ImageButton>(R.id.actions_menu).isShown)
                 assertNull(activity.findViewById<View>(R.id.notes_list))
+            }
+        }
+    }
+
+    @Test
+    fun notesMultiCursorMirrorsEditsAndRestoresRichEditor() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val noteText = (listOf("cat cat") + (1..100).map { "line $it" }).joinToString("\n")
+        NotesRepository(context).save("multi.md", noteText)
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showNotes(activity)
+                requestNoteSwitch(activity, "multi.md")
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            var richScrollY = 0
+            scenario.onActivity { activity ->
+                val richEditor = getPrivateField(activity, "noteEditor") as HybridMarkdownEditor
+                richEditor.scrollTo(0, 300)
+                richScrollY = richEditor.scrollY
+                assertTrue(richScrollY > 0)
+                val original = activity.findViewById<EditText>(R.id.note_editor)
+                original.setSelection(0, 3)
+                MainActivity::class.java.getDeclaredMethod("enterMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                val source = activity.findViewById<EditText>(R.id.note_editor)
+                assertEquals(0, source.selectionStart)
+                assertEquals(3, source.selectionEnd)
+                MainActivity::class.java.getDeclaredMethod("addNextNoteCursor").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                assertEquals(4, source.selectionStart)
+                assertEquals(7, source.selectionEnd)
+                val matchSpans = source.text.getSpans(0, source.length(), BackgroundColorSpan::class.java)
+                assertTrue(matchSpans.any {
+                    it.javaClass.simpleName == "MultiCursorHighlight" &&
+                        source.text.getSpanStart(it) == 0 && source.text.getSpanEnd(it) == 3
+                })
+                // Select the other visible match, then replace it with a longer value.
+                source.setSelection(0, 3)
+                source.text.replace(source.selectionStart, source.selectionEnd, "grocery")
+                assertTrue(source.text.toString().startsWith("grocery grocery"))
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            scenario.onActivity { activity ->
+                MainActivity::class.java.getDeclaredMethod("exitMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            scenario.onActivity { activity ->
+                val restored = activity.findViewById<EditText>(R.id.note_editor)
+                assertTrue(restored.text.toString().startsWith("grocery grocery"))
+                assertEquals(7, restored.selectionStart)
+                val richEditor = getPrivateField(activity, "noteEditor") as HybridMarkdownEditor
+                assertEquals(richScrollY, richEditor.scrollY)
+                val highlights = restored.text.getSpans(0, restored.length(), BackgroundColorSpan::class.java)
+                assertFalse(highlights.any { it.javaClass.simpleName == "MultiCursorHighlight" })
+            }
+        }
+    }
+
+    @Test
+    fun notesMultiCursorKeepsPrimaryOnlyEditAndCursorState() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        NotesRepository(context).save("primary.md", "cat cat")
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showNotes(activity)
+                requestNoteSwitch(activity, "primary.md")
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(0, 3)
+                MainActivity::class.java.getDeclaredMethod("enterMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                val source = activity.findViewById<EditText>(R.id.note_editor)
+                source.text.replace(0, 3, "dog")
+                assertEquals("dog cat", source.text.toString())
+                assertEquals(3, source.selectionStart)
+                MainActivity::class.java.getDeclaredMethod("exitMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                val restored = activity.findViewById<EditText>(R.id.note_editor)
+                assertEquals("dog cat", restored.text.toString())
+                assertEquals(3, restored.selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun notesMultiCursorPromotesCaretAtAnotherCursorBoundary() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        NotesRepository(context).save("boundary.md", "cat cat")
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showNotes(activity)
+                requestNoteSwitch(activity, "boundary.md")
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(0, 3)
+                MainActivity::class.java.getDeclaredMethod("enterMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                MainActivity::class.java.getDeclaredMethod("addNextNoteCursor").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                val source = activity.findViewById<EditText>(R.id.note_editor)
+                source.setSelection(0) // Move from the primary to the first cursor's boundary.
+                source.text.insert(0, "!")
+                assertEquals("!cat !", source.text.toString())
+                assertEquals(1, source.selectionStart)
+            }
+        }
+    }
+
+    @Test
+    fun notesMultiCursorAdjustsOffsetsForEveryPrimaryPositionAndDeleteDirection() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        NotesRepository(context).save("offsets.md", "cat cat cat!")
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showNotes(activity)
+                requestNoteSwitch(activity, "offsets.md")
+                MainActivity::class.java.getDeclaredMethod("enterMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                val source = activity.findViewById<EditText>(R.id.note_editor)
+                val model = getPrivateField(activity, "noteMultiCursor") as MultiCursorEditing
+                val selections = listOf(MultiCursorRange(0, 3), MultiCursorRange(4, 7), MultiCursorRange(8, 11))
+                val replacements = listOf("grocery", "x", "cat")
+                val expectedTexts = listOf("grocery grocery grocery!", "x x x!", "cat cat cat!")
+                for (primary in selections.indices) {
+                    setPrivateField(activity, "multiCursorMode", false)
+                    source.setText("cat cat cat!")
+                    model.setSelections(selections, primary)
+                    setPrivateField(activity, "multiCursorMode", true)
+                    source.setSelection(selections[primary].start, selections[primary].end)
+                    source.text.replace(selections[primary].start, selections[primary].end, replacements[primary])
+                    assertEquals(expectedTexts[primary], source.text.toString())
+                }
+
+                setPrivateField(activity, "multiCursorMode", false)
+                source.setText("cat cat cat!")
+                val carets = listOf(3, 7, 11)
+                model.setCollapsedRanges(carets, 7)
+                setPrivateField(activity, "multiCursorMode", true)
+                source.setSelection(7)
+                source.text.delete(6, 7) // Backspace at the middle cursor.
+                assertEquals("ca ca ca!", source.text.toString())
+
+                setPrivateField(activity, "multiCursorMode", false)
+                source.setText("cat cat cat!")
+                model.setCollapsedRanges(carets, 7)
+                setPrivateField(activity, "multiCursorMode", true)
+                source.setSelection(7)
+                source.text.delete(7, 8) // Delete at the middle cursor.
+                assertEquals("catcatcat", source.text.toString())
+            }
+        }
+    }
+
+    @Test
+    fun notesMultiCursorDefersImeCompositionThenMirrorsCommit() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        NotesRepository(context).save("composition.md", "cat cat")
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showNotes(activity)
+                requestNoteSwitch(activity, "composition.md")
+                activity.findViewById<EditText>(R.id.note_editor).setSelection(0, 3)
+                MainActivity::class.java.getDeclaredMethod("enterMultiCursorMode").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                MainActivity::class.java.getDeclaredMethod("addNextNoteCursor").apply {
+                    isAccessible = true
+                    invoke(activity)
+                }
+                val editor = activity.findViewById<EditText>(R.id.note_editor)
+                val connection = editor.onCreateInputConnection(android.view.inputmethod.EditorInfo())
+                    ?: error("Expected EditText input connection")
+                connection.beginBatchEdit()
+                connection.setComposingText("gro", 1)
+                assertEquals("cat gro", editor.text.toString())
+                connection.setComposingText("grocery", 1)
+                assertEquals("cat grocery", editor.text.toString())
+                assertEquals("cat cat", NotesRepository(context).read("composition.md"))
+                connection.endBatchEdit()
+                connection.commitText("grocery", 1)
+                assertEquals("grocery grocery", editor.text.toString())
             }
         }
     }
