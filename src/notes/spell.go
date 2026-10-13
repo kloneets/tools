@@ -17,7 +17,6 @@ import (
 
 	"github.com/kloneets/tools/src/helpers"
 	"github.com/kloneets/tools/src/settings"
-	"github.com/shuLhan/share/lib/hunspell"
 )
 
 type SpellDictionary struct {
@@ -66,7 +65,6 @@ type SpellDictionaryLoadStatus struct {
 
 type spellService struct {
 	mu              sync.Mutex
-	dictionaries    []*hunspell.Spell
 	native          []nativeSpellDictionary
 	custom          map[string]struct{}
 	fallback        map[string]struct{}
@@ -133,11 +131,6 @@ func SpellDictionaryStatus(code string) SpellDictionaryLoadStatus {
 	if native, err := availableNativeSpellDictionary(affPath, dicPath); err == nil {
 		status.Loaded = true
 		status.Backend = native.backend
-	} else if dict, err := loadSpellDictionary(affPath, dicPath); err == nil {
-		status.Loaded = dict != nil
-		if status.Loaded {
-			status.Backend = "go-hunspell"
-		}
 	} else {
 		status.Error = err.Error()
 		if words, fallbackErr := loadFallbackDictionaryWords(dicPath); fallbackErr == nil && len(words) > 0 {
@@ -516,19 +509,13 @@ func currentSpellService() (*spellService, error) {
 			service.native = append(service.native, native)
 			continue
 		}
-		dict, err := loadSpellDictionary(affPath, dicPath)
-		if err != nil {
-			service.loadErrors = append(service.loadErrors, fmt.Errorf("%s: %w", code, err))
-			if words, fallbackErr := loadFallbackDictionaryWords(dicPath); fallbackErr == nil {
-				for word := range words {
-					service.fallback[word] = struct{}{}
-				}
-			} else {
-				service.loadErrors = append(service.loadErrors, fmt.Errorf("%s fallback: %w", code, fallbackErr))
+		if words, err := loadFallbackDictionaryWords(dicPath); err == nil {
+			for word := range words {
+				service.fallback[word] = struct{}{}
 			}
-			continue
+		} else {
+			service.loadErrors = append(service.loadErrors, fmt.Errorf("%s fallback: %w", code, err))
 		}
-		service.dictionaries = append(service.dictionaries, dict)
 	}
 	spellCache = service
 	spellCacheKey = key
@@ -573,12 +560,8 @@ func updateSpellCacheAfterCustomWord(word string) {
 	}
 }
 
-func loadSpellDictionary(affPath string, dicPath string) (*hunspell.Spell, error) {
-	return hunspell.Open(affPath, dicPath)
-}
-
 func (s *spellService) ready() bool {
-	return s != nil && (len(s.native) > 0 || len(s.dictionaries) > 0 || len(s.fallback) > 0 || len(s.custom) > 0)
+	return s != nil && (len(s.native) > 0 || len(s.fallback) > 0 || len(s.custom) > 0)
 }
 
 func (s *spellService) correct(word string) bool {
@@ -600,11 +583,6 @@ func (s *spellService) correct(word string) bool {
 		return true
 	}
 	s.mu.Unlock()
-	for _, dict := range s.dictionaries {
-		if dict.Spell(word) != nil || dict.Spell(strings.ToLower(word)) != nil {
-			return true
-		}
-	}
 	return false
 }
 

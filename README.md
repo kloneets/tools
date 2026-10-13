@@ -190,7 +190,7 @@ Useful command-mode commands:
 
 One-character command chaining is supported for commands such as `:wq`.
 
-Spell checking is configured from Settings. Dictionaries are downloaded only when selected in Settings, starting with English, Russian, and Latvian plus several additional Hunspell dictionaries. The app uses native `nuspell` when available, then native `hunspell`, then a basic `.dic` fallback. On macOS, install the preferred native checker with `brew install nuspell` for full Hunspell dictionary support. Settings shows whether each installed dictionary is using a native checker, fallback mode, or cannot load. Words are accepted if they exist in any loaded dictionary or in `.config/koko-tools/spell/custom.txt`.
+Spell checking is configured from Settings. Dictionaries are downloaded only when selected in Settings, starting with English, Russian, and Latvian plus several additional Hunspell dictionaries. The desktop app uses native `nuspell` when available, then native `hunspell`, then a basic `.dic` word-list fallback. On macOS, install the preferred native checker with `brew install nuspell` for full Hunspell dictionary support. Settings shows whether each installed dictionary is using a native checker, fallback mode, or cannot load. Words are accepted if they exist in any loaded dictionary or in `.config/koko-tools/spell/custom.txt`. Android uses its bundled Hunspell engine.
 
 ## Pages
 

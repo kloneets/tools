@@ -6,7 +6,6 @@ require (
 	github.com/gdamore/tcell/v2 v2.7.4
 	github.com/mattn/go-runewidth v0.0.15
 	github.com/rivo/tview v0.0.0-20241103174730-c76f7879f592
-	github.com/shuLhan/share v0.53.1
 	github.com/tree-sitter-grammars/tree-sitter-lua v0.5.0
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-bash v0.25.1

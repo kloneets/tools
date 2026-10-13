@@ -282,7 +282,7 @@ func TestRenderEditorPaneSkipsActiveWordSpellCheckWhileTyping(t *testing.T) {
 	}
 }
 
-func TestSpellHighlightUsesFallbackDictionaryWhenHunspellLoadFails(t *testing.T) {
+func TestSpellHighlightUsesBasicDictionaryFallbackWithoutNativeChecker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	settings.Inst().NotesApp.SpellCheckEnabled = true
@@ -302,7 +302,7 @@ func TestSpellHighlightUsesFallbackDictionaryWhenHunspellLoadFails(t *testing.T)
 	}
 }
 
-func TestSpellDictionaryStatusReportsFallbackWhenHunspellLoadFails(t *testing.T) {
+func TestSpellDictionaryStatusReportsFallbackWithoutNativeChecker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	defer ResetSpellTestHooksForTests()
@@ -321,8 +321,8 @@ func TestSpellDictionaryStatusReportsFallbackWhenHunspellLoadFails(t *testing.T)
 	if !status.Fallback {
 		t.Fatal("Fallback = false, want true")
 	}
-	if !strings.Contains(status.Error, "unknown affix flag") {
-		t.Fatalf("Error = %q, want Hunspell load error", status.Error)
+	if !strings.Contains(status.Error, "native checker unavailable") {
+		t.Fatalf("Error = %q, want native checker unavailable", status.Error)
 	}
 }
 
@@ -584,7 +584,7 @@ func TestNativeSuggestionWordsParsesOutput(t *testing.T) {
 	}
 }
 
-func TestSpellServiceSkipsBrokenDictionaryAndKeepsFallbackWords(t *testing.T) {
+func TestSpellServiceUsesBasicDictionaryFallbackWithoutNativeChecker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()
 	settings.Inst().NotesApp.SpellCheckEnabled = true
@@ -607,7 +607,7 @@ func TestSpellServiceSkipsBrokenDictionaryAndKeepsFallbackWords(t *testing.T) {
 		t.Fatal("known = incorrect, want accepted from fallback dictionary")
 	}
 	if !service.correct("latviesu") {
-		t.Fatal("latviesu = incorrect, want accepted from remaining dictionary")
+		t.Fatal("latviesu = incorrect, want accepted from basic dictionary fallback")
 	}
 	if service.correct("badwrd") {
 		t.Fatal("badwrd = correct, want misspelled")
