@@ -15,4 +15,5 @@
 - Independent review `ci_review` clean after icon corrections.
 - PR #1 run 41033142867: Android, Apple Silicon build (including native icon packaging tests), and benchmarks passed. Go failed in a previously timing-sensitive async spell test: a retained native dictionary invoked global `spellRunCommand` after a later test set the hook to nil.
 - Plan follow-up: capture command runner per native dictionary and add deterministic checks/suggestions hook-isolation regression coverage, then repeat local and remote tests.
-- Final audit pending follow-up CI verification.
+- Follow-up fix: native dictionaries retain their initialized command runner for both checks and suggestions. Regression tests cover nil/replacement hooks for both native backends. Notes suite passed 30 repetitions; full Go suite, vet and build passed. Independent follow-up review is clean; no waivers.
+- PR: https://github.com/kloneets/tools/pull/1. Final remote CI verification remains the completion gate; its result is recorded by the PR checks.
