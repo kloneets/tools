@@ -127,6 +127,7 @@ type replaceConfirmSession struct {
 }
 
 type Workspace struct {
+	tabBar              tabBarState
 	Tree                []TreeEntry
 	Selection           int
 	BrowserTree         []TreeEntry
@@ -152,6 +153,7 @@ type Workspace struct {
 	pendingQuit         bool
 	pendingQuitForce    bool
 	pendingSaveAll      bool
+	pendingTabList      bool
 	pendingDeletePath   string
 	pendingDeleteLabel  string
 	pendingDeleteFolder bool
@@ -2568,6 +2570,22 @@ func spellSuggestionTarget(ed *Editor) (string, int, int, bool) {
 }
 
 func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
+	if ed.PendingOp == "g" {
+		ed.PendingOp = ""
+		switch key.Name {
+		case "<":
+			w.ScrollTabs(-1)
+			return true
+		case ">":
+			w.ScrollTabs(1)
+			return true
+		case "N":
+			w.pendingTabList = true
+			return true
+		case "esc":
+			return true
+		}
+	}
 	if ed.PendingOp == "r" {
 		return handleReplacePending(ed, key)
 	}
@@ -2611,6 +2629,10 @@ func handleNormalMode(w *Workspace, ed *Editor, key Key) bool {
 		return true
 	}
 	switch key.Name {
+	case "g":
+		ed.NormalCount = ""
+		ed.PendingOp = "g"
+		return true
 	case "i":
 		ed.NormalCount = ""
 		ed.Mode = ModeInsert
@@ -4007,7 +4029,7 @@ func (w *Workspace) HelpText() string {
 		}
 		return "notes/visual: h j k l move | V line | :'<,'>s/pat/repl/gc replace | :mld/:mlu move selected lines | >/< indent | y yank | d/x delete | esc normal"
 	}
-	return "notes/normal: i insert | u undo | :mc/Ctrl+Alt+M multi-cursor | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | : command | /pat ?pat search | n next | N prev | :%s/pat/repl/g replace | R rename | ctrl+a sidebar"
+	return "notes/normal: g< g> scroll tabs | gN open tabs | i insert | u undo | :mc/Ctrl+Alt+M multi-cursor | ctrl+g/:spell spelling | :mld/:mlu move line | >/< indent | r<char> replace | x delete | : command | /pat ?pat search | n next | N prev | :%s/pat/repl/g replace | R rename | ctrl+a sidebar"
 }
 
 func (w *Workspace) TakePendingOpenLinks() []string {
@@ -4088,7 +4110,7 @@ func (w *Workspace) PreviewRows(width int, height int) []string {
 }
 
 func (w *Workspace) TabsText(width int) string {
-	return helpers.TruncateANSI(renderTabs(w), width)
+	return w.renderTabBar(width)
 }
 
 func (w *Workspace) StatusText(width int) string {
@@ -4359,14 +4381,14 @@ func (w *Workspace) sidebarVisibleRange(visibleRows int) (int, int) {
 func (w *Workspace) renderEditor(height int, width int) []string {
 	ed := w.ActiveEditor()
 	if ed == nil {
-		lines := []string{helpers.TruncateANSI(renderTabs(w), width)}
+		lines := []string{w.TabsText(width)}
 		for _, line := range fillLines(max(0, height-1), "No note open") {
 			lines = append(lines, helpers.PadANSI(line, width))
 		}
 		return lines
 	}
 	if w.PreviewHidden {
-		tabsLine := helpers.TruncateANSI(renderTabs(w), width)
+		tabsLine := w.TabsText(width)
 		editorLines := renderEditorPane(ed, width, height-1)
 		lines := []string{tabsLine}
 		for i := 0; i < height-1; i++ {
@@ -4376,7 +4398,7 @@ func (w *Workspace) renderEditor(height int, width int) []string {
 	}
 	editorWidth := resolveEditorWidth(settings.Inst().NotesApp.EditorWidth, width)
 	previewWidth := width - editorWidth - 1
-	tabsLine := helpers.TruncateANSI(renderTabs(w), width)
+	tabsLine := w.TabsText(width)
 	editorLines := renderEditorPane(ed, editorWidth, height-1)
 	previewLines := renderPreviewPane(ed, previewWidth, height-1)
 	lines := []string{tabsLine}
@@ -4406,6 +4428,14 @@ func renderTabs(w *Workspace) string {
 }
 
 func (w *Workspace) tabIndexAtColumn(col int) (int, bool) {
+	if w != nil && w.tabBar.width > 0 {
+		for _, hit := range w.tabBar.hits {
+			if col >= hit.start && col < hit.end {
+				return hit.index, true
+			}
+		}
+		return 0, false
+	}
 	if w == nil || col < 0 {
 		return 0, false
 	}
@@ -4436,6 +4466,14 @@ func (w *Workspace) CloseTabAtColumn(col int) bool {
 }
 
 func (w *Workspace) tabCloseIndexAtColumn(col int) (int, bool) {
+	if w != nil && w.tabBar.width > 0 {
+		for _, hit := range w.tabBar.hits {
+			if col == hit.close {
+				return hit.index, true
+			}
+		}
+		return 0, false
+	}
 	if w == nil || col < 0 {
 		return 0, false
 	}

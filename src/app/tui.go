@@ -99,6 +99,7 @@ type terminalApp struct {
 	deleteTodoListModal    *tview.Modal
 	deleteNoteFolder       bool
 	openLinksModal         *tview.Modal
+	noteTabsList           *tview.List
 	root                   *tview.Flex
 	lastStatus             string
 	tabSelect              bool
@@ -576,6 +577,12 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 	if event == nil {
 		return nil
 	}
+	if a.noteTabsList != nil {
+		if handler := a.noteTabsList.InputHandler(); handler != nil {
+			handler(event, func(tview.Primitive) {})
+		}
+		return nil
+	}
 	if a.shuttingDown && a.quitModal != nil && a.pagesRoot != nil {
 		if a.syncInProgress {
 			return nil
@@ -692,6 +699,9 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	if event == nil || a == nil || a.shuttingDown {
 		return event, action
 	}
+	if a.noteTabsList != nil {
+		return event, action
+	}
 	x, y := event.Position()
 	if a.header != nil {
 		hx, hy, hw, hh := a.header.GetInnerRect()
@@ -774,6 +784,29 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 	row := y - ey - 1
 	col := x - ex
 	if row == -1 {
+		if action == tview.MouseScrollUp || action == tview.MouseScrollDown {
+			delta := 1
+			if action == tview.MouseScrollUp {
+				delta = -1
+			}
+			a.notes.ScrollTabs(delta)
+			a.refresh()
+			return nil, action
+		}
+		if control := a.notes.TabBarControlAtColumn(col); control != "" {
+			if action == tview.MouseLeftClick {
+				switch control {
+				case "previous":
+					a.notes.ScrollTabs(-1)
+				case "next":
+					a.notes.ScrollTabs(1)
+				case "list":
+					a.showNoteTabsList()
+				}
+				a.refresh()
+			}
+			return nil, action
+		}
 		if action == tview.MouseLeftClick {
 			if a.notes.CloseTabAtColumn(col) {
 				a.notesMouseDragging = false
@@ -1486,6 +1519,10 @@ func (a *terminalApp) scheduleYankHighlightClear() {
 
 func (a *terminalApp) consumePendingNoteActions() {
 	if a == nil || a.notes == nil {
+		return
+	}
+	if a.notes.TakePendingTabList() {
+		a.showNoteTabsList()
 		return
 	}
 	if path, label, folder, ok := a.notes.TakePendingDeleteTarget(); ok {
@@ -3022,7 +3059,7 @@ func (a *terminalApp) refreshNotesBody() {
 	editorLines := make([]string, 0, editorInnerHeight)
 	a.notes.EditorHeight = maxInt(1, editorInnerHeight-1)
 	a.notes.EditorRenderWidth = maxInt(1, editorWidth-2)
-	editorLines = append(editorLines, a.notes.TabsText(maxInt(10, editorWidth-3)))
+	editorLines = append(editorLines, a.notes.TabsText(maxInt(1, editorWidth-2)))
 	editorLines = append(editorLines, a.notes.EditorRows(maxInt(1, editorWidth-2), maxInt(1, editorInnerHeight-1))...)
 	a.editor.SetText(joinTViewLines(editorLines))
 	a.preview.SetText(joinTViewLines(a.notes.PreviewRows(maxInt(1, previewWidth-2), editorInnerHeight)))
@@ -5205,6 +5242,8 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "R", desc: "rename current note"},
 	})...)
 	lines = append(lines, renderSection("Notes normal:", []helpEntry{
+		{keys: "g< / g>", desc: "scroll note tabs left / right (normal mode)"},
+		{keys: "gN", desc: "open all note tabs; arrows select, Enter opens, Esc cancels"},
 		{keys: "i, a", desc: "enter insert mode at cursor or after cursor"},
 		{keys: "o, O", desc: "open a new line below or above"},
 		{keys: "h j k l, arrows", desc: "move cursor"},

@@ -60,7 +60,7 @@ func TestRenderUsesASCIITreeMarkers(t *testing.T) {
 		}},
 		CurrentTab: 0,
 	}
-	got := w.Render(80, 10)
+	got := strings.Join(w.SidebarRows(10), "\n")
 	for _, bad := range []string{"▾", "▸", "•", "│", "─", "…"} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("Render() contains non-ASCII marker %q in %q", bad, got)

@@ -1,0 +1,2 @@
+Switch between Todo lists directly from the Todo screen with a scrollable list selector.
+The current list is highlighted, and switching lists takes one tap.
