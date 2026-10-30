@@ -355,6 +355,41 @@ func TestSpellDictionaryStatusPrefersNativeNuspell(t *testing.T) {
 	}
 }
 
+func TestNativeSpellDictionaryRetainsRunnerAfterHooksChange(t *testing.T) {
+	for _, backend := range []string{"nuspell", "hunspell"} {
+		t.Run(backend, func(t *testing.T) {
+			defer ResetSpellTestHooksForTests()
+			lookPath := func(name string) (string, error) {
+				if name == backend {
+					return "/fake/" + name, nil
+				}
+				return "", errors.New("missing")
+			}
+			SetSpellNativeHooksForTests(lookPath, func(_ string, _ []string, input string) (string, error) {
+				return input, nil
+			})
+			dict, err := availableNativeSpellDictionary("index.aff", "index.dic")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, replacement := range []func(string, []string, string) (string, error){
+				nil,
+				func(string, []string, string) (string, error) {
+					return "", errors.New("replacement runner must not be used")
+				},
+			} {
+				SetSpellNativeHooksForTests(lookPath, replacement)
+				if got, err := dict.run([]string{"word"}); err != nil || got != "word\n" {
+					t.Fatalf("check after hook change = %q, %v", got, err)
+				}
+				if got, err := dict.runSuggestions("word"); err != nil || got != "word\n" {
+					t.Fatalf("suggestions after hook change = %q, %v", got, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSpellDictionaryStatusUsesNativeHunspellWhenNuspellMissing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	settings.Init()

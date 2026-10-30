@@ -20,18 +20,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install GTK4 dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            gcc \
-            libgirepository1.0-dev \
-            libglib2.0-dev \
-            libgtk-4-dev \
-            gobject-introspection \
-            pkg-config
-
       - name: Run tests
         run: go test ./...
 
@@ -54,6 +42,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Run Android isolated unit tests
         working-directory: android
@@ -64,7 +54,7 @@ jobs:
         run: ./gradlew :app:lintDebug
 
   build-macos-arm64:
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Check out repository
@@ -76,17 +66,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install GTK4 dependencies
-        run: |
-          brew update
-          brew install gtk4 gobject-introspection pkgconf
-
-      - name: Configure pkg-config
-        run: |
-          {
-            echo "PKG_CONFIG_PATH=$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/share/pkgconfig"
-            echo "CGO_ENABLED=1"
-          } >> "$GITHUB_ENV"
+      - name: Test macOS packaging
+        run: go test . -run TestMacOSBuildPackaging -v
 
       - name: Build on Apple Silicon
         run: ./scripts/build-macos-arm64.sh --bundle
@@ -115,22 +96,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install GTK4 dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            gcc \
-            libgirepository1.0-dev \
-            libglib2.0-dev \
-            libgtk-4-dev \
-            gobject-introspection \
-            pkg-config
-
       - name: Run benchmarks
         run: |
           mkdir -p .artifacts
-          go test ./src/notes ./src/gdrive ./src/settings -run '^$' -bench '.' -benchmem | tee .artifacts/benchmarks.txt
+          go test ./src/notes ./src/settings -run '^$' -bench '.' -benchmem | tee .artifacts/benchmarks.txt
 
       - name: Publish benchmark summary
         if: always()
