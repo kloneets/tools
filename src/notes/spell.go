@@ -74,10 +74,11 @@ type spellService struct {
 }
 
 type nativeSpellDictionary struct {
-	backend string
-	command string
-	affPath string
-	dicPath string
+	backend    string
+	command    string
+	affPath    string
+	dicPath    string
+	runCommand func(string, []string, string) (string, error)
 }
 
 type spellToken struct {
@@ -706,14 +707,19 @@ func spellTokenWords(tokens []spellToken) []string {
 }
 
 func availableNativeSpellDictionary(affPath string, dicPath string) (nativeSpellDictionary, error) {
+	// Keep asynchronous checks tied to the runner used to initialize this backend.
+	runner := spellRunCommand
+	if runner == nil {
+		runner = runSpellCommand
+	}
 	if command, err := spellLookPath("nuspell"); err == nil {
-		dict := nativeSpellDictionary{backend: "nuspell", command: command, affPath: affPath, dicPath: dicPath}
+		dict := nativeSpellDictionary{backend: "nuspell", command: command, affPath: affPath, dicPath: dicPath, runCommand: runner}
 		if err := dict.probe(); err == nil {
 			return dict, nil
 		}
 	}
 	if command, err := spellLookPath("hunspell"); err == nil {
-		dict := nativeSpellDictionary{backend: "hunspell", command: command, affPath: affPath, dicPath: dicPath}
+		dict := nativeSpellDictionary{backend: "hunspell", command: command, affPath: affPath, dicPath: dicPath, runCommand: runner}
 		if err := dict.probe(); err == nil {
 			return dict, nil
 		}
@@ -854,10 +860,10 @@ func (d nativeSpellDictionary) run(words []string) (string, error) {
 	input := strings.Join(words, "\n") + "\n"
 	switch d.backend {
 	case "nuspell":
-		return spellRunCommand(d.command, []string{"-d", d.affPath}, input)
+		return d.runCommand(d.command, []string{"-d", d.affPath}, input)
 	case "hunspell":
 		base := strings.TrimSuffix(d.affPath, filepath.Ext(d.affPath))
-		return spellRunCommand(d.command, []string{"-d", base, "-l"}, input)
+		return d.runCommand(d.command, []string{"-d", base, "-l"}, input)
 	default:
 		return "", fmt.Errorf("unknown native spell backend: %s", d.backend)
 	}
@@ -867,10 +873,10 @@ func (d nativeSpellDictionary) runSuggestions(word string) (string, error) {
 	input := word + "\n"
 	switch d.backend {
 	case "nuspell":
-		return spellRunCommand(d.command, []string{"-d", d.affPath}, input)
+		return d.runCommand(d.command, []string{"-d", d.affPath}, input)
 	case "hunspell":
 		base := strings.TrimSuffix(d.affPath, filepath.Ext(d.affPath))
-		return spellRunCommand(d.command, []string{"-d", base}, input)
+		return d.runCommand(d.command, []string{"-d", base}, input)
 	default:
 		return "", fmt.Errorf("unknown native spell backend: %s", d.backend)
 	}

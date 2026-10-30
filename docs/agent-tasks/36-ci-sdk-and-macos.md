@@ -12,4 +12,7 @@
 - Preferred GPT-5.5 unavailable; inherited agent model fallback used.
 - Local checks passed: full Go tests, vet, isolated Android unit tests, debug lint, actionlint v1.7.7, shell syntax, packaging tests, diff check.
 - Native macOS tools are unavailable on this Linux host; PR CI verifies native icon generation and Apple Silicon build.
-- Final review/audit and remote CI pending.
+- Independent review `ci_review` clean after icon corrections.
+- PR #1 run 41033142867: Android, Apple Silicon build (including native icon packaging tests), and benchmarks passed. Go failed in a previously timing-sensitive async spell test: a retained native dictionary invoked global `spellRunCommand` after a later test set the hook to nil.
+- Plan follow-up: capture command runner per native dictionary and add deterministic checks/suggestions hook-isolation regression coverage, then repeat local and remote tests.
+- Final audit pending follow-up CI verification.
