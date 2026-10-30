@@ -33,6 +33,7 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -1443,6 +1444,8 @@ class MainActivity : ComponentActivity() {
         todoMoveRows.clear()
         todoDraggingId = null
 
+        addTodoListSwitcher()
+
         val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1949,6 +1952,47 @@ class MainActivity : ComponentActivity() {
             .firstOrNull { it.id == todoRepository.currentListId() }
             ?.name
             ?: TodoRepository.DEFAULT_LIST_NAME
+    }
+
+    private fun addTodoListSwitcher() {
+        val lists = TodoRepository.activeLists(todoLists)
+        if (lists.size < 2) return
+        val currentId = todoRepository.currentListId()
+        val scroll = HorizontalScrollView(this).apply {
+            id = R.id.todo_list_switcher
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(10) }
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        var selectedButton: View? = null
+        lists.forEach { list ->
+            val button = commandButton(list.name, View.NO_ID) {
+                if (list.id != todoRepository.currentListId()) selectTodoList(list.id)
+            }.apply {
+                tag = list.id
+                isSelected = list.id == currentId
+                setSingleLine(true)
+                maxWidth = dp(240)
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                contentDescription = if (isSelected) "${list.name}, current list" else "Open ${list.name}"
+                background = roundedStroke(
+                    if (isSelected) COLOR_SURFACE_ALT else COLOR_SURFACE,
+                    if (isSelected) COLOR_ACCENT else COLOR_BORDER,
+                    dp(10).toFloat(),
+                )
+                setPadding(dp(16), 0, dp(16), 0)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply {
+                    marginEnd = dp(8)
+                }
+            }
+            row.addView(button)
+            if (button.isSelected) selectedButton = button
+        }
+        scroll.addView(row)
+        content.addView(scroll)
+        scroll.post { selectedButton?.let { scroll.scrollTo(it.left, 0) } }
     }
 
     private fun showTodoListPicker() {

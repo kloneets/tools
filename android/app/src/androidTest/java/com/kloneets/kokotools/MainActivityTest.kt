@@ -32,6 +32,50 @@ class MainActivityTest {
     }
 
     @Test
+    fun todoListsSwitchDirectlyAndKeepCurrentListDraft() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val repository = TodoRepository(context)
+        repository.add("default task")
+        val other = repository.createList("Shopping").second
+        repository.add("shopping task")
+        repository.selectList(TodoRepository.DEFAULT_LIST_ID)
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                val switcher = activity.findViewById<ViewGroup>(R.id.todo_list_switcher)
+                val current = switcher.findViewWithTag<View>(TodoRepository.DEFAULT_LIST_ID)
+                assertTrue(current.isSelected)
+                activity.findViewById<EditText>(R.id.todo_input).setText("draft")
+                current.performClick()
+                assertEquals("draft", activity.findViewById<EditText>(R.id.todo_input).text.toString())
+                MainActivity::class.java.getDeclaredMethod("openTodoSearch").apply { isAccessible = true }.invoke(activity)
+                activity.findViewById<EditText>(R.id.todo_search_query).setText("default")
+                activity.findViewById<ViewGroup>(R.id.todo_list_switcher)
+                    .findViewWithTag<View>(other.id).performClick()
+                assertNull(activity.findViewById<View>(R.id.todo_search_query))
+                assertEquals("", activity.findViewById<EditText>(R.id.todo_input).text.toString())
+                val updated = activity.findViewById<ViewGroup>(R.id.todo_list_switcher)
+                assertTrue(updated.findViewWithTag<View>(other.id).isSelected)
+                assertFalse(updated.findViewWithTag<View>(TodoRepository.DEFAULT_LIST_ID).isSelected)
+                assertEquals(other.id, SettingsRepository(context).load().todoApp.currentListId)
+                updated.findViewWithTag<View>(TodoRepository.DEFAULT_LIST_ID).performClick()
+                assertTrue(activity.findViewById<ViewGroup>(R.id.todo_list_switcher)
+                    .findViewWithTag<View>(TodoRepository.DEFAULT_LIST_ID).isSelected)
+            }
+        }
+    }
+
+    @Test
+    fun todoListSwitcherHiddenWithOnlyOneList() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                showTodo(activity)
+                assertNull(activity.findViewById<View>(R.id.todo_list_switcher))
+            }
+        }
+    }
+
+    @Test
     fun todoFindPreservesInputAndDraftAndNavigatesLoadedResults() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         TodoRepository(context).apply { add("groceries"); add("green cabbage") }
