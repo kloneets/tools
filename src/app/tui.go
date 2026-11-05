@@ -415,9 +415,18 @@ func (a *terminalApp) Run(ctx context.Context) error {
 	if !isTerminal(int(os.Stdin.Fd())) {
 		return a.runLineMode(ctx)
 	}
-	app := tview.NewApplication()
+	screen, err := tcell.NewScreen()
+	if err != nil {
+		return err
+	}
+	pasteScreen := &terminalPasteScreen{Screen: screen}
+	app := tview.NewApplication().SetScreen(pasteScreen)
+	if pasteScreen.initErr != nil {
+		return pasteScreen.initErr
+	}
 	a.tui = app
-	app.SetRoot(a.root, true)
+	app.SetRoot(&pasteRoot{Primitive: a.root, app: a}, true)
+	app.EnablePaste(true)
 	app.EnableMouse(true)
 	app.SetInputCapture(a.captureInput)
 	app.SetMouseCapture(a.captureMouse)
