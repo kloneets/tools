@@ -34,3 +34,8 @@ Enable bracketed paste and route a complete paste to a dedicated application han
 - Fixed: synthetic whitespace Undo snapshots could cross a paste and delete original text; after a paste that editor session uses actual snapshots for whitespace boundaries. This intentionally trades synthetic word/sentence grouping for safe transaction boundaries.
 - Added boundary-position, empty-paste, block-padding and typing-after-paste tests.
 - Final full suite and build rerun after review fixes: passed. Paste-focused race tests passed (`go test -race ./src/app ./src/notes -run 'Paste|TerminalPaste'`). Broader optional package race run exposes unrelated existing background Firebase/theme/settings races (e.g. TestSwitchAppTabSameViewDoesNotSync); not changed in this scoped task. Diagnostic log: /tmp/koko-all-race.log.
+
+## CI Follow-up
+- PR #2 CI reported a vet copylocks error: ranging by value over test cases copied terminalApp, which contains atomic state.
+- Fixed the test to iterate by index and reference each case through a pointer.
+- Verification: GOCACHE=/tmp/koko-paste-go-cache go vet ./src/app passed; focused paste tests passed; git diff --check passed.

@@ -66,7 +66,7 @@ func TestTerminalPasteEvents(t *testing.T) {
 	}
 }
 func TestPasteFieldsAndGuards(t *testing.T) {
-	for _, tc := range []struct {
+	cases := []struct {
 		name    string
 		a       terminalApp
 		want    string
@@ -76,7 +76,9 @@ func TestPasteFieldsAndGuards(t *testing.T) {
 		{"settings", terminalApp{view: viewSettings, settingsEditMode: true}, "12", true},
 		{"normal", terminalApp{view: viewSettings}, "", false},
 		{"modal", terminalApp{view: viewTodo, todoInputMode: "new", shuttingDown: true}, "", false},
-	} {
+	}
+	for i := range cases {
+		tc := &cases[i]
 		t.Run(tc.name, func(t *testing.T) {
 			input := "x\n\tq"
 			if tc.name == "settings" {
