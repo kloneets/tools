@@ -66,8 +66,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test macOS packaging
-        run: go test . -run TestMacOSBuildPackaging -v
+      - name: Verify Apple Silicon runner
+        run: test "$(go env GOHOSTARCH)" = arm64
+
+      - name: Run tests on Apple Silicon
+        run: go test ./...
+
+      - name: Run vet on Apple Silicon
+        run: go vet ./...
 
       - name: Build on Apple Silicon
         run: ./scripts/build-macos-arm64.sh --bundle

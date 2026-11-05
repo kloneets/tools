@@ -72,6 +72,8 @@ type editorSnapshot struct {
 }
 
 type Editor struct {
+	// PasteBoundaryActive prevents synthetic typing undo states from crossing a paste.
+	PasteBoundaryActive   bool
 	Path                  string
 	Title                 string
 	Text                  string
@@ -1992,6 +1994,10 @@ func rememberTypedInsertBoundary(ed *Editor, r rune) {
 }
 
 func rememberWhitespaceInsertBoundary(ed *Editor) {
+	if ed.PasteBoundaryActive {
+		rememberUndoState(ed)
+		return
+	}
 	runes := []rune(ed.Text)
 	cursor := vimClampOffset(ed.Text, ed.Cursor)
 	if cursor == 0 {
