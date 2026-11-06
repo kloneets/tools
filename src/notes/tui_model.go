@@ -129,6 +129,7 @@ type replaceConfirmSession struct {
 }
 
 type Workspace struct {
+	sidebarSearch       sidebarSearchState
 	tabBar              tabBarState
 	Tree                []TreeEntry
 	Selection           int
@@ -699,6 +700,9 @@ func (w *Workspace) saveAllDirty(sync bool) (bool, error) {
 }
 
 func (w *Workspace) IsEditableContext() bool {
+	if w.FocusSidebar && w.sidebarSearch.editing {
+		return true
+	}
 	ed := w.ActiveEditor()
 	return ed != nil && !w.FocusSidebar && (ed.Mode == ModeInsert || ed.Mode == ModeCommand || ed.Mode == ModeVisual)
 }
@@ -1162,6 +1166,9 @@ func (w *Workspace) moveFolderByRel(folder string, rawTarget string) error {
 }
 
 func (w *Workspace) HandleKey(key Key) bool {
+	if w.FocusSidebar && !w.BrowserCommandMode && w.handleSidebarSearchKey(key) {
+		return true
+	}
 	if key.Ctrl && key.Alt && key.Name == "m" && !w.FocusSidebar {
 		if ed := w.ActiveEditor(); ed != nil {
 			if ed.MultiCursorActive {
@@ -1189,6 +1196,7 @@ func (w *Workspace) HandleKey(key Key) bool {
 		return true
 	}
 	if key.Ctrl && key.Name == "a" {
+		w.sidebarSearch = sidebarSearchState{}
 		w.FocusSidebar = !w.FocusSidebar
 		if !w.FocusSidebar {
 			w.SidebarBrowsing = false
@@ -1379,6 +1387,7 @@ func (w *Workspace) startBrowserCommand(command string) {
 	if w == nil {
 		return
 	}
+	w.sidebarSearch = sidebarSearchState{}
 	w.BrowserCommandMode = true
 	w.BrowserCommand = command
 }
@@ -1740,6 +1749,7 @@ func (w *Workspace) leaveSidebar() {
 	if w == nil {
 		return
 	}
+	w.sidebarSearch = sidebarSearchState{}
 	w.FocusSidebar = false
 	w.SidebarBrowsing = false
 	w.BrowserCommandMode = false
@@ -1750,6 +1760,7 @@ func (w *Workspace) toggleSidebarBrowser() {
 	if w == nil {
 		return
 	}
+	w.sidebarSearch = sidebarSearchState{}
 	if w.SidebarBrowsing {
 		w.SidebarBrowsing = false
 		w.BrowserCommandMode = false
@@ -3906,6 +3917,7 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 			ed.Status = "preview shown"
 		}
 	case vimCommandSidebar:
+		w.sidebarSearch = sidebarSearchState{}
 		w.FocusSidebar = !w.FocusSidebar
 		if w.FocusSidebar {
 			ed.Status = "sidebar focused"
@@ -4008,10 +4020,10 @@ func (w *Workspace) HelpText() string {
 		if w.BrowserCommandMode {
 			return "notes/browser command: enter run | esc cancel"
 		}
-		return "notes/browser: j k move | enter open/toggle/open file | o open folder notes | n/f new | r rename | m move | d delete note/folder | e close | esc close"
+		return "notes/browser: / search names | n/N search next/previous | j k move | enter open/toggle/open file | o open folder notes | n/f new | r rename | m move | d delete note/folder | e close | esc close"
 	}
 	if w.FocusSidebar {
-		return "notes/sidebar: j k move | enter focus note | e browser | x close open note | a last note | 1-9/0 note | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
+		return "notes/sidebar: / search names | n/N search next/previous | j k move | enter focus note | e browser | x close open note | a last note | 1-9/0 note | n new note | f new folder | d delete | R rename current | [/] tabs | ctrl+a editor"
 	}
 	ed := w.ActiveEditor()
 	if ed == nil {
@@ -4124,6 +4136,9 @@ func (w *Workspace) StatusText(width int) string {
 }
 
 func (w *Workspace) CommandLineText(width int) string {
+	if w != nil && w.FocusSidebar && w.sidebarSearch.active {
+		return helpers.TruncateANSI(w.sidebarSearchPrompt(), width)
+	}
 	if w != nil && w.BrowserCommandMode {
 		return helpers.TruncateANSI(w.BrowserCommand, width)
 	}
@@ -4312,7 +4327,7 @@ func (w *Workspace) renderOpenNotes(height int, width int) []string {
 		if i == w.Selection {
 			marker = helpers.ANSI(helpers.ANSIReverse, ">")
 		}
-		label := "o " + entry.Label
+		label := "o " + w.sidebarSearchLabel(entry, width-4)
 		lines = append(lines, helpers.TruncateANSI(marker+" "+label, width))
 	}
 	for len(lines) < height {
@@ -4339,7 +4354,7 @@ func (w *Workspace) renderBrowserTree(height int, width int) []string {
 				icon = "-"
 			}
 		}
-		label := strings.Repeat("  ", entry.Depth) + icon + " " + entry.Label
+		label := strings.Repeat("  ", entry.Depth) + icon + " " + w.sidebarSearchLabel(entry, width-4-entry.Depth*2)
 		lines = append(lines, helpers.TruncateANSI(marker+" "+label, width))
 	}
 	for len(lines) < height {
@@ -4616,6 +4631,7 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 	gutterWidth := editorLineNumberWidth(lines, width)
 	contentWidth := max(1, width-gutterWidth)
 	rows := make([]string, 0, len(lines))
+	cursorLine, _ := cursorLineCol(ed.Text, ed.Cursor)
 	for lineIdx, plainLine := range lines {
 		baseSpans := []markdownSpan(nil)
 		if lineIdx < len(lineSpans) {
@@ -4642,7 +4658,11 @@ func buildEditorVisualRows(ed *Editor, width int) []string {
 					prefix = helpers.ANSI(helpers.ANSIDim, strings.Repeat(" ", gutterWidth))
 				}
 			}
-			rows = append(rows, prefix+applySegmentMarkdown(segment.text, baseSpans, segment.start, segment.end))
+			row := prefix + applySegmentMarkdown(segment.text, baseSpans, segment.start, segment.end)
+			if lineIdx == cursorLine {
+				row = highlightCursorLine(row, width)
+			}
+			rows = append(rows, row)
 		}
 	}
 	return rows

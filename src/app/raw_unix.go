@@ -179,6 +179,9 @@ func parseCSI(seq []byte) notes.Key {
 }
 
 func parseCSIUKey(params string) (notes.Key, bool) {
+	if params == "32;2" {
+		return notes.Key{Name: "space", Rune: ' '}, true
+	}
 	parts := strings.Split(params, ";")
 	if len(parts) < 2 || parts[1] != "5" {
 		return notes.Key{}, false
@@ -187,6 +190,9 @@ func parseCSIUKey(params string) (notes.Key, bool) {
 }
 
 func parseModifyOtherKeys(params string) (notes.Key, bool) {
+	if params == "27;2;32" {
+		return notes.Key{Name: "space", Rune: ' '}, true
+	}
 	parts := strings.Split(params, ";")
 	if len(parts) != 3 || parts[0] != "27" || parts[1] != "5" {
 		return notes.Key{}, false

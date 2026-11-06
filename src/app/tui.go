@@ -586,6 +586,14 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 	if event == nil {
 		return nil
 	}
+	if a.consumeInputSequenceShortcut(event) {
+		return nil
+	}
+	return a.captureDecodedInput(event)
+}
+
+// captureDecodedInput routes complete keys after terminal protocol decoding.
+func (a *terminalApp) captureDecodedInput(event *tcell.EventKey) *tcell.EventKey {
 	if a.noteTabsList != nil {
 		if handler := a.noteTabsList.InputHandler(); handler != nil {
 			handler(event, func(tview.Primitive) {})
@@ -682,9 +690,6 @@ func (a *terminalApp) captureInput(event *tcell.EventKey) *tcell.EventKey {
 		if handler := a.helpOverlay.InputHandler(); handler != nil {
 			handler(event, func(tview.Primitive) {})
 		}
-		return nil
-	}
-	if a.consumeInputSequenceShortcut(event) {
 		return nil
 	}
 	if a.recorderCapturing {
@@ -897,6 +902,8 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 }
 
 var inputSequenceShortcuts = map[string]notes.Key{
+	"\x1b[32;2u":     {Name: "space", Rune: ' '},
+	"\x1b[27;2;32~":  {Name: "space", Rune: ' '},
 	"\x1b[9;5u":      {Name: "tab", Ctrl: true},
 	"\x1b[27;5;9~":   {Name: "tab", Ctrl: true},
 	"\x1b[1;5I":      {Name: "tab", Ctrl: true},
@@ -909,13 +916,27 @@ func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
 	if a == nil || event == nil {
 		return false
 	}
+	// tcell folds an unrecognized CSI introducer into Alt+[ when Escape and
+	// '[' arrive in one terminal read. Accept that form as well as split keys.
+	if event.Key() == tcell.KeyRune && event.Rune() == '[' && event.Modifiers() == tcell.ModAlt {
+		a.flushInputSequence()
+		a.inputSeqMu.Lock()
+		a.inputSeq = "\x1b["
+		a.resetInputSequenceTimerLocked()
+		a.inputSeqMu.Unlock()
+		return true
+	}
 	if event.Key() == tcell.KeyEsc && event.Modifiers() == 0 {
+		// A second Escape completes the first standalone key before buffering
+		// the next one; otherwise rapid Escape presses collapse into one.
+		a.flushInputSequence()
 		a.startInputSequence()
 		return true
 	}
 	token, ok := inputSequenceToken(event)
 	if !ok {
-		return a.flushInputSequence()
+		a.flushInputSequence()
+		return false
 	}
 	a.inputSeqMu.Lock()
 	if a.inputSeq == "" {
@@ -931,8 +952,7 @@ func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
 			a.refresh()
 			return true
 		}
-		a.handleGlobalKey(key)
-		a.refresh()
+		a.captureDecodedInput(inputSequenceEvent(key))
 		return true
 	}
 	if inputSequenceHasPrefix(candidate) {
@@ -948,9 +968,30 @@ func (a *terminalApp) consumeInputSequenceShortcut(event *tcell.EventKey) bool {
 		a.refresh()
 		return true
 	}
-	a.handleGlobalKey(notes.Key{Name: "esc"})
-	a.refresh()
+	a.captureDecodedInput(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	// Replay an unrecognized prefix as ordinary input after Escape. The caller
+	// routes the current event, so no bytes of the candidate are discarded.
+	prefix := strings.TrimSuffix(strings.TrimPrefix(candidate, "\x1b"), token)
+	for _, r := range prefix {
+		a.captureDecodedInput(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
 	return false
+}
+
+// inputSequenceEvent restores the native event shape so modal and help input
+// retain the same routing as keys decoded directly by tcell.
+func inputSequenceEvent(key notes.Key) *tcell.EventKey {
+	mod := tcell.ModNone
+	if key.Ctrl {
+		mod |= tcell.ModCtrl
+	}
+	if key.Name == "tab" {
+		return tcell.NewEventKey(tcell.KeyTab, 0, mod)
+	}
+	if key.Ctrl && key.Rune >= 'a' && key.Rune <= 'z' {
+		return tcell.NewEventKey(tcell.Key(key.Rune-'a'+1), 0, mod)
+	}
+	return tcell.NewEventKey(tcell.KeyRune, key.Rune, mod)
 }
 
 func inputSequenceToken(event *tcell.EventKey) (string, bool) {
@@ -1005,6 +1046,7 @@ func (a *terminalApp) flushInputSequence() bool {
 		a.inputSeqMu.Unlock()
 		return false
 	}
+	sequence := a.inputSeq
 	a.clearInputSequenceLocked()
 	a.inputSeqMu.Unlock()
 	if a.recorderCapturing {
@@ -1012,8 +1054,10 @@ func (a *terminalApp) flushInputSequence() bool {
 		a.refresh()
 		return true
 	}
-	a.handleGlobalKey(notes.Key{Name: "esc"})
-	a.refresh()
+	a.captureDecodedInput(tcell.NewEventKey(tcell.KeyEsc, 0, tcell.ModNone))
+	for _, r := range strings.TrimPrefix(sequence, "\x1b") {
+		a.captureDecodedInput(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+	}
 	return true
 }
 
@@ -3669,6 +3713,7 @@ func ansiToTView(s string) string {
 		helpers.ANSIRoleVisualSelection, themeMarkupPair(theme.Syntax[helpers.ANSIRoleVisualSelection], theme.SelectionBG),
 		helpers.ANSIRoleActiveTab, themeMarkupPair(theme.ActiveTabFG, theme.ActiveTabBG),
 		helpers.ANSIRoleActiveTabClose, themeMarkupPair(theme.ErrorAccent, theme.ActiveTabBG),
+		helpers.ANSIRoleCursorLine, "[:"+cursorLineBackground(theme)+"]",
 		helpers.ANSIRoleSelection, themeMarkupPair(theme.SelectionFG, theme.SelectionBG),
 		helpers.ANSIRoleSpellError, themeMarkupFG(theme.ErrorAccent),
 		"\x1b[0m", "[-:-:-]",
@@ -5234,6 +5279,9 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "j/k, arrows, g/G, ctrl+b/ctrl+f", desc: "scroll help overlay"},
 	})...)
 	lines = append(lines, renderSection("Notes sidebar:", []helpEntry{
+		{keys: "/", desc: "search visible note names"},
+		{keys: "n/N", desc: "next/previous match while searching; n creates a note otherwise"},
+		{keys: "enter, esc", desc: "confirm search; finish typing or clear search"},
 		{keys: "ctrl+a, :sidebar, :sb", desc: "toggle sidebar/editor focus"},
 		{keys: "j/k, arrows", desc: "move selection"},
 		{keys: "enter, l", desc: "focus selected open note or open selected browser note"},

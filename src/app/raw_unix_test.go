@@ -84,3 +84,20 @@ func TestReadKeysDecodesCtrlShortcuts(t *testing.T) {
 		}
 	}
 }
+
+func TestReadKeysDecodesShiftSpace(t *testing.T) {
+	for _, seq := range []string{"\x1b[32;2u", "\x1b[27;2;32~"} {
+		t.Run(seq, func(t *testing.T) {
+			out := make(chan notes.Key, 16)
+			readKeys(bytes.NewBufferString(seq), out)
+			var got []notes.Key
+			for key := range out {
+				got = append(got, key)
+			}
+			want := notes.Key{Name: "space", Rune: ' '}
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("readKeys(%q) = %#v; want one %#v", seq, got, want)
+			}
+		})
+	}
+}

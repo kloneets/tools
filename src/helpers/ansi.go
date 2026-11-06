@@ -101,4 +101,5 @@ const (
 	ANSIRoleSelection       = "\x1b[9021m"
 	ANSIRoleSpellError      = "\x1b[9022m"
 	ANSIRoleActiveTabClose  = "\x1b[9023m"
+	ANSIRoleCursorLine      = "\x1b[9024m"
 )

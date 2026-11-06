@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -67,6 +68,12 @@ func themeMarkupFGStyleBG(fg string, bg string, style string) string {
 
 func themeMarkupPair(fg string, bg string) string {
 	return "[" + fg + ":" + bg + "]"
+}
+
+func cursorLineBackground(theme appTheme) string {
+	br, bg, bb := themeColor(theme.Background).RGB()
+	fr, fg, fb := themeColor(theme.Primary).RGB()
+	return fmt.Sprintf("#%02x%02x%02x", (br*9+fr)/10, (bg*9+fg)/10, (bb*9+fb)/10)
 }
 
 var themesByName = map[string]appTheme{

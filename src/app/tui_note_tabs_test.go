@@ -70,6 +70,8 @@ func TestNoteTabListClickSelectionAndEscape(t *testing.T) {
 	a.showNoteTabsList()
 	a.captureInput(tcell.NewEventKey(tcell.KeyDown, 0, 0))
 	a.captureInput(tcell.NewEventKey(tcell.KeyEsc, 0, 0))
+	// Resolve the terminal decoder's Escape ambiguity as its timeout would.
+	a.flushInputSequence()
 	if a.notes.CurrentTab != 1 || a.noteTabsList != nil {
 		t.Fatal("escape changed note or left picker open")
 	}

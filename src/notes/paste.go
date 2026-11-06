@@ -9,6 +9,11 @@ func (w *Workspace) HandlePaste(text string) bool {
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	if w.FocusSidebar {
+		if w.sidebarSearch.editing {
+			w.sidebarSearch.query += singleLinePaste(text)
+			w.selectFirstSidebarMatch()
+			return true
+		}
 		if w.BrowserCommandMode {
 			w.BrowserCommand += singleLinePaste(text)
 			return true
