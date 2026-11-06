@@ -32,5 +32,8 @@
 - Final review: clean after re-review, including Alt+[ support. No unresolved code findings.
 
 ## Final audit and publication
-- Independent done-auditor: audit confirmed code readiness and local checks; no remaining code findings. Overall status remains incomplete until publication verification below.
-- Publication: pending main push and native macOS CI artifact verification.
+- Independent done-auditor: audit. Final status: complete with waivers. All planned features, tests, review fixes and publication verified. Waivers are the existing full-race failures and unavailable physical Mac keyboard check described above.
+- Published code commit: 59df0c4edc913a0f1fa9d2eb1f01d7b59d816790 on main.
+- CI: https://github.com/kloneets/tools/actions/runs/42266352666 succeeded in all four jobs: Linux tests/vet, native macOS tests/vet/build/package, Android tests/lint, benchmarks.
+- macOS artifact: https://github.com/kloneets/tools/actions/runs/42266352666/artifacts/13527252112 (koko-tools-macos-arm64), confirmed nonexpired and attached to the exact published source commit. Downloaded and inspected archive includes standalone executable, .app, Info.plist, resources and icon. Executable is Mach-O 64-bit arm64; standalone and bundle executable SHA-256 both f1943f4cf085fb54a37011c2c2badd12f53ddd46411848942784ea8798909c4e.
+- This completion-record update changes documentation only; the validated source and artifact remain those of 59df0c4.
