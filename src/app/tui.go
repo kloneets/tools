@@ -5279,7 +5279,7 @@ func (a *terminalApp) renderHelpOverlay(width int, height int) (string, []string
 		{keys: "j/k, arrows, g/G, ctrl+b/ctrl+f", desc: "scroll help overlay"},
 	})...)
 	lines = append(lines, renderSection("Notes sidebar:", []helpEntry{
-		{keys: "/", desc: "search visible note names"},
+		{keys: "/", desc: "fuzzy filter note names, including nested notes"},
 		{keys: "n/N", desc: "next/previous match while searching; n creates a note otherwise"},
 		{keys: "enter, esc", desc: "confirm search; finish typing or clear search"},
 		{keys: "ctrl+a, :sidebar, :sb", desc: "toggle sidebar/editor focus"},
