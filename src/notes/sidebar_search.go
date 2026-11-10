@@ -2,6 +2,7 @@ package notes
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"unicode"
 
@@ -9,9 +10,12 @@ import (
 )
 
 type sidebarSearchState struct {
-	active  bool
-	editing bool
-	query   string
+	active         bool
+	editing        bool
+	query          string
+	openEntries    []TreeEntry
+	browserEntries []TreeEntry
+	initialized    bool
 }
 
 func (w *Workspace) handleSidebarSearchKey(key Key) bool {
@@ -25,11 +29,11 @@ func (w *Workspace) handleSidebarSearchKey(key Key) bool {
 			if len(r) > 0 {
 				s.query = string(r[:len(r)-1])
 			}
-			w.selectFirstSidebarMatch()
+			w.updateSidebarSearch()
 		default:
 			if !key.Ctrl && !key.Alt && !key.Meta && key.Rune >= ' ' {
 				s.query += string(key.Rune)
-				w.selectFirstSidebarMatch()
+				w.updateSidebarSearch()
 			}
 		}
 		return true
@@ -39,11 +43,13 @@ func (w *Workspace) handleSidebarSearchKey(key Key) bool {
 	}
 	switch key.Name {
 	case "/":
+		w.clearSidebarSearch()
 		*s = sidebarSearchState{active: true, editing: true}
+		w.updateSidebarSearch()
 		return true
 	case "esc":
 		if s.active {
-			*s = sidebarSearchState{}
+			w.clearSidebarSearch()
 			return true
 		}
 	case "n", "N":
@@ -93,6 +99,26 @@ func sidebarMatchSpans(label, query string) []markdownSpan {
 			at++
 		}
 	}
+	if len(spans) > 0 {
+		return spans
+	}
+	// Fall back to ordered subsequence matching, retaining rune offsets for highlighting.
+	at := 0
+	for _, char := range needle {
+		for at < len(text) && text[at] != char {
+			at++
+		}
+		if at == len(text) {
+			return nil
+		}
+		if len(spans) > 0 && spans[len(spans)-1].End == at {
+			spans[len(spans)-1].End++
+		} else {
+			spans = append(spans, markdownSpan{Tag: tagSearch, Start: at, End: at + 1})
+		}
+		at++
+	}
+
 	return spans
 }
 
@@ -161,4 +187,85 @@ func (w *Workspace) sidebarSearchPrompt() string {
 		return prompt + " | enter confirm | esc finish"
 	}
 	return prompt + " | n next | N previous | esc clear | enter open"
+}
+
+// Search materializes a visible tree so rendering and every input path share indices.
+// The unfiltered entries retain the user's folder collapse choices.
+func (w *Workspace) updateSidebarSearch() {
+	s := &w.sidebarSearch
+	if !s.initialized {
+		s.openEntries = append([]TreeEntry(nil), w.Tree...)
+		s.browserEntries = append([]TreeEntry(nil), w.BrowserTree...)
+		s.initialized = true
+	}
+	w.applySidebarSearch()
+	w.selectFirstSidebarMatch()
+}
+
+func (w *Workspace) applySidebarSearch() {
+	s := &w.sidebarSearch
+	if !s.initialized {
+		return
+	}
+	openPath, browserPath := "", ""
+	if e := w.selectedOpenEntry(); e != nil {
+		openPath = e.Path
+	}
+	if e := w.selectedBrowserEntry(); e != nil {
+		browserPath = e.Path
+	}
+	w.Tree = filterSidebarEntries(s.openEntries, s.query)
+	source := s.browserEntries
+	if s.query != "" && w.sidebarBrowserAll != nil {
+		source = w.sidebarBrowserAll
+	}
+	w.BrowserTree = filterSidebarEntries(source, s.query)
+	w.Selection = clampSidebarSelectionByPath(w.Tree, w.Selection, openPath)
+	w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, browserPath)
+}
+
+func filterSidebarEntries(entries []TreeEntry, query string) []TreeEntry {
+	if query == "" {
+		return append([]TreeEntry(nil), entries...)
+	}
+	ancestors := make(map[string]bool)
+	for _, entry := range entries {
+		if (entry.Kind != treeNote && entry.Kind != treeOpenNote) || len(sidebarMatchSpans(entry.Label, query)) == 0 {
+			continue
+		}
+		for folder := entry.Folder; folder != "" && folder != "."; folder = filepath.Dir(folder) {
+			ancestors[folder] = true
+		}
+	}
+	var visible []TreeEntry
+	for _, entry := range entries {
+		if entry.Kind == treeFolder {
+			if !ancestors[entry.Folder] {
+				continue
+			}
+			entry.Collapsed = false
+		} else if (entry.Kind != treeNote && entry.Kind != treeOpenNote) || len(sidebarMatchSpans(entry.Label, query)) == 0 {
+			continue
+		}
+		visible = append(visible, entry)
+	}
+	return visible
+}
+
+func (w *Workspace) clearSidebarSearch() {
+	s := w.sidebarSearch
+	openPath, browserPath := "", ""
+	if e := w.selectedOpenEntry(); e != nil {
+		openPath = e.Path
+	}
+	if e := w.selectedBrowserEntry(); e != nil {
+		browserPath = e.Path
+	}
+	if s.initialized {
+		w.Tree = s.openEntries
+		w.BrowserTree = s.browserEntries
+	}
+	w.sidebarSearch = sidebarSearchState{}
+	w.Selection = clampSidebarSelectionByPath(w.Tree, w.Selection, openPath)
+	w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, browserPath)
 }

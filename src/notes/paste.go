@@ -11,7 +11,7 @@ func (w *Workspace) HandlePaste(text string) bool {
 	if w.FocusSidebar {
 		if w.sidebarSearch.editing {
 			w.sidebarSearch.query += singleLinePaste(text)
-			w.selectFirstSidebarMatch()
+			w.updateSidebarSearch()
 			return true
 		}
 		if w.BrowserCommandMode {

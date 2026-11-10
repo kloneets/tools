@@ -130,6 +130,9 @@ type replaceConfirmSession struct {
 
 type Workspace struct {
 	sidebarSearch       sidebarSearchState
+	sidebarBrowserAll   []TreeEntry
+	sidebarOpenStart    int
+	sidebarBrowserStart int
 	tabBar              tabBarState
 	Tree                []TreeEntry
 	Selection           int
@@ -237,6 +240,9 @@ func (w *Workspace) refreshTree() {
 		})
 	}
 	w.Tree = entries
+	if w.sidebarSearch.initialized {
+		w.sidebarSearch.openEntries = entries
+	}
 	w.Selection = clampSidebarSelectionByPath(w.Tree, w.Selection, selectedPath)
 	w.refreshBrowserTree()
 }
@@ -255,7 +261,11 @@ func (w *Workspace) refreshBrowserTree() {
 		selectedLabel = entry.Label
 	}
 	collapsed := make(map[string]bool)
-	for _, entry := range w.BrowserTree {
+	collapseEntries := w.BrowserTree
+	if w.sidebarSearch.initialized {
+		collapseEntries = w.sidebarSearch.browserEntries
+	}
+	for _, entry := range collapseEntries {
 		if entry.Kind == treeFolder && entry.Collapsed {
 			collapsed[entry.Folder] = true
 		}
@@ -274,9 +284,6 @@ func (w *Workspace) refreshBrowserTree() {
 		baseEntries = append(baseEntries, TreeEntry{Kind: treeFolder, Path: noteFolderPath(folder), Label: filepath.Base(folder), Depth: strings.Count(filepath.ToSlash(folder), "/"), Folder: folder, Collapsed: collapsed[folder]})
 	}
 	for _, file := range files {
-		if isHiddenByCollapsed(file.Folder, collapsed) {
-			continue
-		}
 		baseEntries = append(baseEntries, TreeEntry{Kind: treeNote, Path: file.Path, Label: file.Title, Depth: folderDepth(file.Folder), Folder: file.Folder})
 	}
 	sort.SliceStable(baseEntries, func(i, j int) bool {
@@ -284,8 +291,19 @@ func (w *Workspace) refreshBrowserTree() {
 		right := treeSortKey(baseEntries[j])
 		return left < right
 	})
-	entries := append([]TreeEntry(nil), baseEntries...)
+	w.sidebarBrowserAll = append([]TreeEntry(nil), baseEntries...)
+	entries := make([]TreeEntry, 0, len(baseEntries))
+	for _, entry := range baseEntries {
+		if entry.Kind == treeNote && isHiddenByCollapsed(entry.Folder, collapsed) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
 	w.BrowserTree = entries
+	if w.sidebarSearch.initialized {
+		w.sidebarSearch.browserEntries = entries
+		w.applySidebarSearch()
+	}
 	for i, entry := range w.BrowserTree {
 		if entry.Kind != selectedKind {
 			continue
@@ -1196,7 +1214,7 @@ func (w *Workspace) HandleKey(key Key) bool {
 		return true
 	}
 	if key.Ctrl && key.Name == "a" {
-		w.sidebarSearch = sidebarSearchState{}
+		w.clearSidebarSearch()
 		w.FocusSidebar = !w.FocusSidebar
 		if !w.FocusSidebar {
 			w.SidebarBrowsing = false
@@ -1269,6 +1287,7 @@ func (w *Workspace) handleSidebarKey(key Key) bool {
 		return true
 	case "h", "esc":
 		if w.SidebarBrowsing {
+			w.clearSidebarSearch()
 			w.SidebarBrowsing = false
 			w.BrowserCommandMode = false
 			w.BrowserCommand = ""
@@ -1387,7 +1406,25 @@ func (w *Workspace) startBrowserCommand(command string) {
 	if w == nil {
 		return
 	}
-	w.sidebarSearch = sidebarSearchState{}
+	var target *TreeEntry
+	if entry := w.selectedBrowserEntry(); entry != nil {
+		copy := *entry
+		target = &copy
+	}
+	w.clearSidebarSearch()
+	if target != nil {
+		// Keep a found descendant as the command target after clearing the filter.
+		if target.Kind == treeNote && w.sidebarBrowserAll != nil {
+			for i := range w.BrowserTree {
+				folder := w.BrowserTree[i].Folder
+				if w.BrowserTree[i].Kind == treeFolder && (target.Folder == folder || strings.HasPrefix(target.Folder, folder+string(filepath.Separator))) {
+					w.BrowserTree[i].Collapsed = false
+				}
+			}
+			w.refreshBrowserTree()
+		}
+		w.BrowserSelection = clampSidebarSelectionByPath(w.BrowserTree, w.BrowserSelection, target.Path)
+	}
 	w.BrowserCommandMode = true
 	w.BrowserCommand = command
 }
@@ -1749,7 +1786,7 @@ func (w *Workspace) leaveSidebar() {
 	if w == nil {
 		return
 	}
-	w.sidebarSearch = sidebarSearchState{}
+	w.clearSidebarSearch()
 	w.FocusSidebar = false
 	w.SidebarBrowsing = false
 	w.BrowserCommandMode = false
@@ -1760,7 +1797,7 @@ func (w *Workspace) toggleSidebarBrowser() {
 	if w == nil {
 		return
 	}
-	w.sidebarSearch = sidebarSearchState{}
+	w.clearSidebarSearch()
 	if w.SidebarBrowsing {
 		w.SidebarBrowsing = false
 		w.BrowserCommandMode = false
@@ -3917,7 +3954,7 @@ func executeVimCommand(w *Workspace, ed *Editor, cmd vimCommand) {
 			ed.Status = "preview shown"
 		}
 	case vimCommandSidebar:
-		w.sidebarSearch = sidebarSearchState{}
+		w.clearSidebarSearch()
 		w.FocusSidebar = !w.FocusSidebar
 		if w.FocusSidebar {
 			ed.Status = "sidebar focused"
@@ -4381,22 +4418,29 @@ func (w *Workspace) sidebarVisibleSelectionRow() int {
 
 func (w *Workspace) sidebarVisibleRange(visibleRows int) (int, int) {
 	entries := w.activeSidebarEntries()
-	if w == nil || len(entries) == 0 || visibleRows <= 0 {
+	if w == nil {
 		return 0, 0
 	}
-	if visibleRows >= len(entries) {
-		return 0, len(entries)
+	viewport := &w.sidebarOpenStart
+	if w.SidebarBrowsing {
+		viewport = &w.sidebarBrowserStart
 	}
-	start := w.activeSidebarSelection() - (visibleRows - 1)
-	if start < 0 {
-		start = 0
+	if len(entries) == 0 || visibleRows <= 0 {
+		*viewport = 0
+		return 0, 0
 	}
-	end := start + visibleRows
-	if end > len(entries) {
-		end = len(entries)
-		start = max(0, end-visibleRows)
+	// Keep the viewport stable while the selection remains visible. Mouse down,
+	// click and double-click can each select the same screen row before opening it.
+	start := max(0, min(*viewport, max(0, len(entries)-visibleRows)))
+	selection := max(0, min(w.activeSidebarSelection(), len(entries)-1))
+	if selection < start {
+		start = selection
 	}
-	return start, end
+	if selection >= start+visibleRows {
+		start = selection - visibleRows + 1
+	}
+	*viewport = start
+	return start, min(len(entries), start+visibleRows)
 }
 
 func (w *Workspace) renderEditor(height int, width int) []string {
@@ -5125,10 +5169,12 @@ func (w *Workspace) SelectSidebarRow(row int, open bool) bool {
 	if w == nil || len(entries) == 0 {
 		return false
 	}
-	idx := row - 1
-	if idx < 0 {
-		idx = 0
+	visibleRows := max(0, w.SidebarRenderHeight-1)
+	if visibleRows == 0 {
+		visibleRows = len(entries)
 	}
+	start, _ := w.sidebarVisibleRange(visibleRows)
+	idx := start + max(0, row-1)
 	if idx >= len(entries) {
 		idx = len(entries) - 1
 	}

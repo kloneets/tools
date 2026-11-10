@@ -23,6 +23,13 @@ Use standard Go formatting with tabs and let `gofmt` own layout. Keep packages l
 Every code change must include or update automated tests unless the change is purely non-functional documentation. Write table-driven tests with the Go `testing` package in `*_test.go` files next to the code they cover. Favor package-level unit tests for helpers and settings logic. Run `go test ./...` before opening a pull request.
 
 ## Commit & Pull Request Guidelines
+
+### Branches and authorization
+- Always create a new feature or task branch before making development changes; do not develop directly on the main branch.
+- The user authorizes development commands, commits, pushing task branches to GitHub, and creating pull requests without additional confirmation.
+- The user reviews and approves pull requests personally. Do not merge pull requests or push directly to the main branch without explicit permission.
+- Ask for permission before installing software or publishing changes to the main branch. Mandatory environment approval requirements still apply.
+
 Recent history mixes short messages (`small changes to notes`) with clearer prefixes (`feat: finished about section`, `fix window decoration`). Prefer imperative, scoped commits such as `feat: add Google Drive sync toggle` or `fix: back up settings on read failure`. Keep pull requests focused and include:
 - a short summary of behavior changes
 - linked issue or task, if one exists

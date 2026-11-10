@@ -152,6 +152,7 @@ The Notes view is the main Markdown workspace. It supports:
 - Multiple open note tabs.
 - Mouse close buttons on note tabs.
 - Sidebar folder and note navigation.
+- Press `/` in the sidebar to fuzzy-filter note titles (case-insensitive, ordered characters). Search includes notes in collapsed folders, expands matching paths, and hides unrelated notes and folders. `n` / `N` moves between results; clear the search with `esc` after finishing input to restore the ordinary list and folder collapse state.
 - Note rename, create, delete, save, and restore of open note session.
 - Opening all unique external links in the current note.
 - Mouse click links in the Markdown preview, or Ctrl+click links in the editor without changing normal cursor and selection clicks.
