@@ -902,6 +902,8 @@ func (a *terminalApp) captureMouse(event *tcell.EventMouse, action tview.MouseAc
 }
 
 var inputSequenceShortcuts = map[string]notes.Key{
+	"\x1b[127;2u":    {Name: "backspace"},
+	"\x1b[27;2;127~": {Name: "backspace"},
 	"\x1b[32;2u":     {Name: "space", Rune: ' '},
 	"\x1b[27;2;32~":  {Name: "space", Rune: ' '},
 	"\x1b[9;5u":      {Name: "tab", Ctrl: true},
@@ -987,6 +989,9 @@ func inputSequenceEvent(key notes.Key) *tcell.EventKey {
 	}
 	if key.Name == "tab" {
 		return tcell.NewEventKey(tcell.KeyTab, 0, mod)
+	}
+	if key.Name == "backspace" {
+		return tcell.NewEventKey(tcell.KeyBackspace2, 0, mod)
 	}
 	if key.Ctrl && key.Rune >= 'a' && key.Rune <= 'z' {
 		return tcell.NewEventKey(tcell.Key(key.Rune-'a'+1), 0, mod)

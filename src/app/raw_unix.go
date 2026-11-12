@@ -179,6 +179,9 @@ func parseCSI(seq []byte) notes.Key {
 }
 
 func parseCSIUKey(params string) (notes.Key, bool) {
+	if params == "127;2" {
+		return notes.Key{Name: "backspace"}, true
+	}
 	if params == "32;2" {
 		return notes.Key{Name: "space", Rune: ' '}, true
 	}
@@ -190,6 +193,9 @@ func parseCSIUKey(params string) (notes.Key, bool) {
 }
 
 func parseModifyOtherKeys(params string) (notes.Key, bool) {
+	if params == "27;2;127" {
+		return notes.Key{Name: "backspace"}, true
+	}
 	if params == "27;2;32" {
 		return notes.Key{Name: "space", Rune: ' '}, true
 	}
