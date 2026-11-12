@@ -25,6 +25,7 @@ Every code change must include or update automated tests unless the change is pu
 ## Commit & Pull Request Guidelines
 
 ### Branches and authorization
+- The user authorizes all development work under `/home/koko/Projects` without additional confirmation; mandatory environment restrictions still apply.
 - Always create a new feature or task branch before making development changes; do not develop directly on the main branch.
 - The user authorizes development commands, commits, pushing task branches to GitHub, and creating pull requests without additional confirmation.
 - The user reviews and approves pull requests personally. Do not merge pull requests or push directly to the main branch without explicit permission.

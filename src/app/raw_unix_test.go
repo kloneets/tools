@@ -101,3 +101,30 @@ func TestReadKeysDecodesShiftSpace(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCSIShiftBackspace(t *testing.T) {
+	for _, seq := range []string{"127;2u", "27;2;127~"} {
+		t.Run(seq, func(t *testing.T) {
+			if got := parseCSI([]byte(seq)); got != (notes.Key{Name: "backspace"}) {
+				t.Fatalf("parseCSI(%q) = %#v; want backspace", seq, got)
+			}
+		})
+	}
+}
+
+func TestReadKeysDecodesShiftBackspace(t *testing.T) {
+	for _, seq := range []string{"\x1b[127;2u", "\x1b[27;2;127~"} {
+		t.Run(seq, func(t *testing.T) {
+			out := make(chan notes.Key, 16)
+			readKeys(bytes.NewBufferString(seq), out)
+			var got []notes.Key
+			for key := range out {
+				got = append(got, key)
+			}
+			want := notes.Key{Name: "backspace"}
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("readKeys(%q) = %#v; want one %#v", seq, got, want)
+			}
+		})
+	}
+}
